@@ -234,6 +234,22 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.chk_link_panzoom.toggled.connect(self._on_link_panzoom_toggled)
         bar.addWidget(self.chk_link_panzoom)
 
+        self.btn_autoscale = QtWidgets.QPushButton("Autoscale colors")
+        self.btn_autoscale.clicked.connect(self._autoscale_colors)
+        bar.addWidget(self.btn_autoscale)
+
+        self.btn_autopan = QtWidgets.QPushButton("Auto pan/zoom")
+        self.btn_autopan.clicked.connect(self._auto_panzoom)
+        bar.addWidget(self.btn_autopan)
+
+        self.btn_equalize_rows = QtWidgets.QPushButton("Equalize rows")
+        self.btn_equalize_rows.clicked.connect(self.equalize_rows)
+        bar.addWidget(self.btn_equalize_rows)
+
+        self.btn_equalize_cols = QtWidgets.QPushButton("Equalize columns")
+        self.btn_equalize_cols.clicked.connect(self.equalize_columns)
+        bar.addWidget(self.btn_equalize_cols)
+
         bar.addStretch(1)
         v.addLayout(bar)
 
@@ -310,6 +326,7 @@ class MultiViewGrid(QtWidgets.QWidget):
 
         # Re-apply current histogram visibility to all tiles
         self._apply_histogram_visibility(self.chk_show_hist.isChecked())
+        self.equalize_columns()
 
     def _apply_histogram_visibility(self, on: bool):
         """Show/hide the classic HistogramLUTItem on every tile."""
@@ -441,6 +458,41 @@ class MultiViewGrid(QtWidgets.QWidget):
                 fr.viewer.set_view_range(xr=xr, yr=yr)
             except Exception:
                 pass
+
+    def _autoscale_colors(self):
+        if self.chk_link_levels.isChecked():
+            self.chk_link_levels.setChecked(False)
+        for fr in self.frames:
+            try:
+                fr.viewer.autoscale_levels()
+            except Exception:
+                pass
+
+    def _auto_panzoom(self):
+        for fr in self.frames:
+            try:
+                fr.viewer.auto_view_range()
+            except Exception:
+                pass
+
+    def equalize_columns(self):
+        for splitter in self._iter_row_splitters():
+            count = splitter.count()
+            if count <= 0:
+                continue
+            splitter.setSizes([1] * count)
+
+    def equalize_rows(self):
+        count = self.vsplit.count()
+        if count <= 0:
+            return
+        self.vsplit.setSizes([1] * count)
+
+    def _iter_row_splitters(self):
+        for i in range(self.vsplit.count()):
+            w = self.vsplit.widget(i)
+            if isinstance(w, QtWidgets.QSplitter):
+                yield w
 
 # ---------------------------------------------------------------------------
 # Overlay view: simple drag-to-layer

@@ -132,6 +132,35 @@ class CentralPlotWidget(QtWidgets.QWidget):
         finally:
             self._block_view_emit = False
 
+    def autoscale_levels(self):
+        img = getattr(self.img_item, 'image', None)
+        if img is None:
+            return
+        try:
+            data = np.asarray(img, float)
+            finite = np.isfinite(data)
+            if not finite.any():
+                return
+            lo = float(data[finite].min())
+            hi = float(data[finite].max())
+            if lo == hi:
+                hi = lo + 1.0
+            self.set_levels(lo, hi)
+        except Exception:
+            pass
+
+    def auto_view_range(self):
+        try:
+            rect = self.img_item.mapRectToParent(self.img_item.boundingRect())
+        except Exception:
+            rect = None
+        if not rect or rect.isNull():
+            return
+        try:
+            self.plot.vb.setRange(rect=rect, padding=0.0)
+        except Exception:
+            pass
+
     def histogram_widget(self):
         if getattr(self, "lut", None) is None:
             return None
