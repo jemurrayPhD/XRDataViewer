@@ -158,18 +158,6 @@ class ViewerFrame(QtWidgets.QFrame):
         self.hlut = None
         self._hist_glw = None
 
-    def _ensure_right_slot(self):
-        """Guarantee center_split has a widget at index 1 to allow replaceWidget safely."""
-        try:
-            if self.center_split.count() < 2:
-                self._hist_placeholder = QtWidgets.QWidget()
-                self._hist_placeholder.setMinimumWidth(0)
-                self._hist_placeholder.setMaximumWidth(0)
-                self.center_split.addWidget(self._hist_placeholder)
-        except Exception:
-            pass
-
-
     def set_data(self, da, coords):
         Z = np.asarray(da.values, float)
         if "X" in coords and "Y" in coords:
@@ -181,9 +169,16 @@ class ViewerFrame(QtWidgets.QFrame):
 
     def set_histogram_visible(self, on: bool):
         on = bool(on)
-        self._ensure_right_slot()
+
+        # Ensure we always have a placeholder widget we can fall back to
+        if self._hist_placeholder is None:
+            self._hist_placeholder = QtWidgets.QWidget()
+            self._hist_placeholder.setMinimumWidth(0)
+            self._hist_placeholder.setMaximumWidth(0)
+            if self.center_split.count() < 2:
+                self.center_split.addWidget(self._hist_placeholder)
+
         if on:
-            # Create and bind if needed
             if self.hlut is None or self._hist_glw is None:
                 try:
                     self._hist_glw = pg.GraphicsLayoutWidget()
@@ -198,35 +193,49 @@ class ViewerFrame(QtWidgets.QFrame):
                         pass
                     self._hist_glw.addItem(self.hlut)
                 except Exception:
-                    self.hlut = None; self._hist_glw = None
-            # Ensure index 1 exists, then replace
-            try:
-                if self._hist_glw is not None:
+                    self.hlut = None
+                    self._hist_glw = None
+            if self._hist_glw is None:
+                return
+
+            if self.center_split.count() < 2:
+                self.center_split.addWidget(self._hist_glw)
+            else:
+                current = self.center_split.widget(1)
+                if current is not self._hist_glw:
                     old = self.center_split.replaceWidget(1, self._hist_glw)
-                    if old and old is not self._hist_glw:
-                        self._hist_placeholder = old
-                    self._hist_glw.setMinimumWidth(220)
-                    self._hist_glw.setMaximumWidth(16777215)
-                    self.center_split.setSizes([1, 0])
+                    if old is not None and old is not self._hist_glw:
+                        if old is self._hist_placeholder:
+                            self._hist_placeholder = old
+                        else:
+                            try:
+                                old.setParent(None)
+                            except Exception:
+                                pass
+
+            self._hist_glw.setMinimumWidth(220)
+            self._hist_glw.setMaximumWidth(16777215)
+            try:
+                self.center_split.setSizes([1, 0])
             except Exception:
                 pass
         else:
-            # Hide by swapping in a zero-width placeholder
-            try:
-                if self._hist_placeholder is None:
-                    self._hist_placeholder = QtWidgets.QWidget()
-                    self._hist_placeholder.setMinimumWidth(0)
-                    self._hist_placeholder.setMaximumWidth(0)
-                old = self.center_split.replaceWidget(1, self._hist_placeholder)
-                if old is not None and old is not self._hist_placeholder:
-                    try:
-                        old.setParent(None)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            self.hlut = None
-            self._hist_glw = None
+            if self.center_split.count() < 2:
+                self.center_split.addWidget(self._hist_placeholder)
+            else:
+                current = self.center_split.widget(1)
+                if current is not self._hist_placeholder:
+                    old = self.center_split.replaceWidget(1, self._hist_placeholder)
+                    if old is not None and old is not self._hist_placeholder:
+                        if old is self._hist_glw:
+                            self._hist_glw = old
+                        try:
+                            old.setParent(None)
+                        except Exception:
+                            pass
+
+            self._hist_placeholder.setMinimumWidth(0)
+            self._hist_placeholder.setMaximumWidth(0)
 
 
 # ---------------------------------------------------------------------------
