@@ -148,16 +148,6 @@ class ViewerFrame(QtWidgets.QFrame):
         self.viewer = CentralPlotWidget(self)
         self.center_split.addWidget(self.viewer)
 
-        # placeholder for histogram; replaced when enabled
-        self._hist_placeholder = QtWidgets.QWidget()
-        self._hist_placeholder.setMinimumWidth(0)
-        self._hist_placeholder.setMaximumWidth(0)
-        self.center_split.addWidget(self._hist_placeholder)
-
-        # handles for histogram widgets
-        self.hlut = None
-        self._hist_glw = None
-
     def set_data(self, da, coords):
         Z = np.asarray(da.values, float)
         if "X" in coords and "Y" in coords:
@@ -170,72 +160,31 @@ class ViewerFrame(QtWidgets.QFrame):
     def set_histogram_visible(self, on: bool):
         on = bool(on)
 
-        # Ensure we always have a placeholder widget we can fall back to
-        if self._hist_placeholder is None:
-            self._hist_placeholder = QtWidgets.QWidget()
-            self._hist_placeholder.setMinimumWidth(0)
-            self._hist_placeholder.setMaximumWidth(0)
-            if self.center_split.count() < 2:
-                self.center_split.addWidget(self._hist_placeholder)
+        hist_widget = self.viewer.histogram_widget()
+        if not hist_widget:
+            return
 
         if on:
-            if self.hlut is None or self._hist_glw is None:
+            if hist_widget.parent() is not self.center_split:
                 try:
-                    self._hist_glw = pg.GraphicsLayoutWidget()
-                    self.hlut = pg.HistogramLUTItem()
-                    try:
-                        self.hlut.setImageItem(self.viewer.img_item)
-                    except Exception:
-                        pass
-                    try:
-                        self.hlut.gradient.setColorMap(pg.colormap.get("viridis"))
-                    except Exception:
-                        pass
-                    self._hist_glw.addItem(self.hlut)
+                    hist_widget.setParent(None)
                 except Exception:
-                    self.hlut = None
-                    self._hist_glw = None
-            if self._hist_glw is None:
-                return
-
-            if self.center_split.count() < 2:
-                self.center_split.addWidget(self._hist_glw)
-            else:
-                current = self.center_split.widget(1)
-                if current is not self._hist_glw:
-                    old = self.center_split.replaceWidget(1, self._hist_glw)
-                    if old is not None and old is not self._hist_glw:
-                        if old is self._hist_placeholder:
-                            self._hist_placeholder = old
-                        else:
-                            try:
-                                old.setParent(None)
-                            except Exception:
-                                pass
-
-            self._hist_glw.setMinimumWidth(220)
-            self._hist_glw.setMaximumWidth(16777215)
+                    pass
+                self.center_split.addWidget(hist_widget)
+            hist_widget.show()
+            hist_widget.setMinimumWidth(220)
+            hist_widget.setMaximumWidth(16777215)
             try:
                 self.center_split.setSizes([1, 0])
             except Exception:
                 pass
         else:
-            if self.center_split.count() < 2:
-                self.center_split.addWidget(self._hist_placeholder)
-            else:
-                current = self.center_split.widget(1)
-                if current is not self._hist_placeholder:
-                    old = self.center_split.replaceWidget(1, self._hist_placeholder)
-                    if old is not None and old is not self._hist_placeholder:
-                        if old is self._hist_glw:
-                            self._hist_glw = old
-                        try:
-                            old.setParent(None)
-                        except Exception:
-                            pass
-
-            self._hist_placeholder.setMinimumWidth(0)
-            self._hist_placeholder.setMaximumWidth(0)
+            if hist_widget.parent() is self.center_split:
+                try:
+                    hist_widget.setParent(None)
+                except Exception:
+                    pass
+            hist_widget.hide()
 
 
 # ---------------------------------------------------------------------------
