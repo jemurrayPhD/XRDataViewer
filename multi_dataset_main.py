@@ -151,6 +151,31 @@ class ViewerFrame(QtWidgets.QFrame):
         self.viewer = CentralPlotWidget(self)
         self.center_split.addWidget(self.viewer)
 
+        self._hist_master_enabled = True
+        self._hist_local_enabled = True
+        self._hist_last_split_sizes: Optional[List[int]] = None
+        self._hist_widget = self.viewer.histogram_widget()
+        if self._hist_widget is not None:
+            if self.center_split.indexOf(self._hist_widget) == -1:
+                self.center_split.addWidget(self._hist_widget)
+            try:
+                self.center_split.setStretchFactor(0, 1)
+                self.center_split.setStretchFactor(1, 0)
+            except Exception:
+                pass
+        try:
+            self.center_split.splitterMoved.connect(self._record_histogram_sizes)
+        except Exception:
+            pass
+        try:
+            self.viewer.configure_histogram_toggle(
+                getter=self.is_histogram_local_enabled,
+                setter=self.set_histogram_local_enabled,
+            )
+        except Exception:
+            pass
+        self._update_histogram_visibility()
+
     def set_data(self, da, coords):
         Z = np.asarray(da.values, float)
         if "X" in coords and "Y" in coords:
@@ -161,36 +186,73 @@ class ViewerFrame(QtWidgets.QFrame):
             self.viewer.set_image(Z, autorange=True)
 
     def set_histogram_visible(self, on: bool):
-        on = bool(on)
+        self._hist_master_enabled = bool(on)
+        self._update_histogram_visibility()
 
-        hist_widget = self.viewer.histogram_widget()
-        if not hist_widget:
+    def set_histogram_local_enabled(self, on: bool):
+        enabled = bool(on)
+        if self._hist_local_enabled == enabled:
             return
+        self._hist_local_enabled = enabled
+        self._update_histogram_visibility()
 
+    def is_histogram_local_enabled(self) -> bool:
+        return bool(self._hist_local_enabled)
+
+    def _record_histogram_sizes(self, *_):
+        if not self._hist_widget or not self._hist_widget.isVisible():
+            return
+        try:
+            sizes = self.center_split.sizes()
+        except Exception:
+            return
+        if len(sizes) < 2 or sizes[1] <= 0:
+            return
+        self._hist_last_split_sizes = list(sizes)
+
+    def _update_histogram_visibility(self):
+        hist_widget = self._hist_widget or self.viewer.histogram_widget()
+        if hist_widget is None:
+            return
         if self.center_split.indexOf(hist_widget) == -1:
             self.center_split.addWidget(hist_widget)
-            try:
-                self.center_split.setStretchFactor(0, 1)
-                self.center_split.setStretchFactor(1, 0)
-            except Exception:
-                pass
-
-        if on:
-            hist_widget.show()
-            hist_widget.setMinimumWidth(220)
+        want_visible = self._hist_master_enabled and self._hist_local_enabled
+        if want_visible:
+            hist_widget.setMinimumWidth(80)
             hist_widget.setMaximumWidth(16777215)
-            try:
-                self.center_split.setSizes([3, 1])
-            except Exception:
-                pass
+            hist_widget.show()
+            sizes = self._hist_last_split_sizes
+            if sizes and len(sizes) >= 2 and sizes[1] > 0:
+                try:
+                    self.center_split.setSizes(list(sizes))
+                except Exception:
+                    pass
+            else:
+                try:
+                    current = self.center_split.sizes()
+                except Exception:
+                    current = []
+                if len(current) < 2 or current[1] == 0:
+                    total = sum(current) if len(current) >= 2 else 0
+                    if total <= 0:
+                        total = 400
+                    hist_width = max(120, total // 4)
+                    main_width = max(120, total - hist_width)
+                    try:
+                        self.center_split.setSizes([int(main_width), int(hist_width)])
+                    except Exception:
+                        pass
         else:
+            if hist_widget.isVisible():
+                try:
+                    sizes = self.center_split.sizes()
+                except Exception:
+                    sizes = []
+                if len(sizes) >= 2 and sizes[1] > 0:
+                    self._hist_last_split_sizes = list(sizes)
             hist_widget.hide()
             hist_widget.setMinimumWidth(0)
             hist_widget.setMaximumWidth(0)
-            try:
-                self.center_split.setSizes([1, 0])
-            except Exception:
-                pass
 
 
 # ---------------------------------------------------------------------------

@@ -79,6 +79,10 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._last_data = None
         self._last_rect = None
 
+        self._histogram_menu_getter = None
+        self._histogram_menu_setter = None
+        self._histogram_menu_enabled_getter = None
+
         lay = QtWidgets.QHBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.addWidget(self.glw)
         try:
             cmap = pg.colormap.get("viridis"); self.lut.gradient.setColorMap(cmap)
@@ -445,6 +449,21 @@ class CentralPlotWidget(QtWidgets.QWidget):
         act_crosshair.setCheckable(True)
         act_crosshair.setChecked(self._local_crosshair_enabled)
         act_crosshair.toggled.connect(self.set_local_crosshair_enabled)
+
+        if self._histogram_menu_getter and self._histogram_menu_setter:
+            menu.addSeparator()
+            act_hist = menu.addAction("Show histogram")
+            act_hist.setCheckable(True)
+            try:
+                act_hist.setChecked(bool(self._histogram_menu_getter()))
+            except Exception:
+                act_hist.setChecked(True)
+            if self._histogram_menu_enabled_getter is not None:
+                try:
+                    act_hist.setEnabled(bool(self._histogram_menu_enabled_getter()))
+                except Exception:
+                    pass
+            act_hist.toggled.connect(self._histogram_menu_setter)
         try:
             screen_pos = event.screenPos()
         except Exception:
@@ -457,6 +476,11 @@ class CentralPlotWidget(QtWidgets.QWidget):
         else:
             point = QtGui.QCursor.pos()
         menu.exec_(point)
+
+    def configure_histogram_toggle(self, *, getter=None, setter=None, enabled_getter=None):
+        self._histogram_menu_getter = getter
+        self._histogram_menu_setter = setter
+        self._histogram_menu_enabled_getter = enabled_getter
 
     # ---------- resampling helpers ----------
     def _rect_to_qrectf(self, x0, x1, y0, y1):
