@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, List
 
 import numpy as np
 import xarray as xr
@@ -149,9 +149,10 @@ class ViewerFrame(QtWidgets.QFrame):
         self.center_split.addWidget(self.viewer)
 
         # placeholder for histogram; replaced when enabled
-        self._hist_container = QtWidgets.QWidget()
-        self._hist_container.setMinimumWidth(0); self._hist_container.setMaximumWidth(0)
-        self.center_split.addWidget(self._hist_container)
+        self._hist_placeholder = QtWidgets.QWidget()
+        self._hist_placeholder.setMinimumWidth(0)
+        self._hist_placeholder.setMaximumWidth(0)
+        self.center_split.addWidget(self._hist_placeholder)
 
         # handles for histogram widgets
         self.hlut = None
@@ -160,15 +161,11 @@ class ViewerFrame(QtWidgets.QFrame):
     def _ensure_right_slot(self):
         """Guarantee center_split has a widget at index 1 to allow replaceWidget safely."""
         try:
-            while self.center_split.count() < 2:
-                placeholder = QtWidgets.QWidget()
-                placeholder.setMinimumWidth(0)
-                placeholder.setMaximumWidth(0)
-                self.center_split.addWidget(placeholder)
-                placeholder = QtWidgets.QWidget()
-                placeholder.setMinimumWidth(0)
-                placeholder.setMaximumWidth(0)
-                self.center_split.addWidget(placeholder)
+            if self.center_split.count() < 2:
+                self._hist_placeholder = QtWidgets.QWidget()
+                self._hist_placeholder.setMinimumWidth(0)
+                self._hist_placeholder.setMaximumWidth(0)
+                self.center_split.addWidget(self._hist_placeholder)
         except Exception:
             pass
 
@@ -205,7 +202,9 @@ class ViewerFrame(QtWidgets.QFrame):
             # Ensure index 1 exists, then replace
             try:
                 if self._hist_glw is not None:
-                    self.center_split.replaceWidget(1, self._hist_glw)
+                    old = self.center_split.replaceWidget(1, self._hist_glw)
+                    if old and old is not self._hist_glw:
+                        self._hist_placeholder = old
                     self._hist_glw.setMinimumWidth(220)
                     self._hist_glw.setMaximumWidth(16777215)
                     self.center_split.setSizes([1, 0])
@@ -214,9 +213,16 @@ class ViewerFrame(QtWidgets.QFrame):
         else:
             # Hide by swapping in a zero-width placeholder
             try:
-                placeholder = QtWidgets.QWidget()
-                placeholder.setMinimumWidth(0); placeholder.setMaximumWidth(0)
-                self.center_split.replaceWidget(1, placeholder)
+                if self._hist_placeholder is None:
+                    self._hist_placeholder = QtWidgets.QWidget()
+                    self._hist_placeholder.setMinimumWidth(0)
+                    self._hist_placeholder.setMaximumWidth(0)
+                old = self.center_split.replaceWidget(1, self._hist_placeholder)
+                if old is not None and old is not self._hist_placeholder:
+                    try:
+                        old.setParent(None)
+                    except Exception:
+                        pass
             except Exception:
                 pass
             self.hlut = None
