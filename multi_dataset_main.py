@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, List
+from functools import partial
 
 import numpy as np
 import xarray as xr
@@ -143,35 +144,37 @@ class ViewerFrame(QtWidgets.QFrame):
 
         # Center: image on left, histogram on right (toggle visibility)
         self.center_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.center_split.setChildrenCollapsible(False)
+        self.center_split.setHandleWidth(6)
         lay.addWidget(self.center_split, 1)
 
         self.viewer = CentralPlotWidget(self)
         self.center_split.addWidget(self.viewer)
 
-        # placeholder for histogram; replaced when enabled
-        self._hist_container = QtWidgets.QWidget()
-        self._hist_container.setMinimumWidth(0); self._hist_container.setMaximumWidth(0)
-        self.center_split.addWidget(self._hist_container)
-
-        # handles for histogram widgets
-        self.hlut = None
-        self._hist_glw = None
-
-    def _ensure_right_slot(self):
-        """Guarantee center_split has a widget at index 1 to allow replaceWidget safely."""
+        self._hist_master_enabled = True
+        self._hist_local_enabled = True
+        self._hist_last_split_sizes: Optional[List[int]] = None
+        self._hist_widget = self.viewer.histogram_widget()
+        if self._hist_widget is not None:
+            if self.center_split.indexOf(self._hist_widget) == -1:
+                self.center_split.addWidget(self._hist_widget)
+            try:
+                self.center_split.setStretchFactor(0, 1)
+                self.center_split.setStretchFactor(1, 0)
+            except Exception:
+                pass
         try:
-            while self.center_split.count() < 2:
-                placeholder = QtWidgets.QWidget()
-                placeholder.setMinimumWidth(0)
-                placeholder.setMaximumWidth(0)
-                self.center_split.addWidget(placeholder)
-                placeholder = QtWidgets.QWidget()
-                placeholder.setMinimumWidth(0)
-                placeholder.setMaximumWidth(0)
-                self.center_split.addWidget(placeholder)
+            self.center_split.splitterMoved.connect(self._record_histogram_sizes)
         except Exception:
             pass
-
+        try:
+            self.viewer.configure_histogram_toggle(
+                getter=self.is_histogram_local_enabled,
+                setter=self.set_histogram_local_enabled,
+            )
+        except Exception:
+            pass
+        self._update_histogram_visibility()
 
     def set_data(self, da, coords):
         Z = np.asarray(da.values, float)
@@ -183,124 +186,74 @@ class ViewerFrame(QtWidgets.QFrame):
             self.viewer.set_image(Z, autorange=True)
 
     def set_histogram_visible(self, on: bool):
-        on = bool(on)
-        self._ensure_right_slot()
-        if on:
-            # Create and bind if needed
-            if self.hlut is None or self._hist_glw is None:
-                try:
-                    self._hist_glw = pg.GraphicsLayoutWidget()
-                    self.hlut = pg.HistogramLUTItem()
-                    try:
-                        self.hlut.setImageItem(self.viewer.img_item)
-                    except Exception:
-                        pass
-                    try:
-                        self.hlut.gradient.setColorMap(pg.colormap.get("viridis"))
-                    except Exception:
-                        pass
-                    self._hist_glw.addItem(self.hlut)
-                except Exception:
-                    self.hlut = None; self._hist_glw = None
-            # Ensure index 1 exists, then replace
-            try:
-                if self._hist_glw is not None:
-                    self.center_split.replaceWidget(1, self._hist_glw)
-                    self._hist_glw.setMinimumWidth(220)
-                    self._hist_glw.setMaximumWidth(16777215)
-                    self.center_split.setSizes([1, 0])
-            except Exception:
-                pass
-        else:
-            # Hide by swapping in a zero-width placeholder
-            try:
-                placeholder = QtWidgets.QWidget()
-                placeholder.setMinimumWidth(0); placeholder.setMaximumWidth(0)
-                self.center_split.replaceWidget(1, placeholder)
-            except Exception:
-                pass
-            self.hlut = None
-            self._hist_glw = None
+        self._hist_master_enabled = bool(on)
+        self._update_histogram_visibility()
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAcceptDrops(True)
-        self.frames: List[ViewerFrame] = []
+    def set_histogram_local_enabled(self, on: bool):
+        enabled = bool(on)
+        if self._hist_local_enabled == enabled:
+            return
+        self._hist_local_enabled = enabled
+        self._update_histogram_visibility()
 
-        v = QtWidgets.QVBoxLayout(self); v.setContentsMargins(0,0,0,0)
-        bar = QtWidgets.QHBoxLayout()
-        bar.addWidget(QtWidgets.QLabel("Columns:"))
-        self.col_spin = QtWidgets.QSpinBox(); self.col_spin.setRange(1,12); self.col_spin.setValue(3)
-        self.col_spin.valueChanged.connect(self._reflow); bar.addWidget(self.col_spin)
+    def is_histogram_local_enabled(self) -> bool:
+        return bool(self._hist_local_enabled)
 
-        self.chk_show_hist = QtWidgets.QCheckBox("Show histograms")
-        self.chk_show_hist.setChecked(True)
-        self.chk_show_hist.toggled.connect(self._apply_histogram_visibility)
-        bar.addWidget(self.chk_show_hist)
-
-        bar.addStretch(1)
-        v.addLayout(bar)
-
-        self.vsplit = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        self.vsplit.setChildrenCollapsible(False)
-        v.addWidget(self.vsplit, 1)
-
-    # DnD
-    def dragEnterEvent(self, ev):
-        ev.acceptProposedAction() if ev.mimeData().hasText() else ev.ignore()
-
-    def dropEvent(self, ev):
-        vr = VarRef.from_mime(ev.mimeData().text())
-        if not vr:
-            ev.ignore(); return
+    def _record_histogram_sizes(self, *_):
+        if not self._hist_widget or not self._hist_widget.isVisible():
+            return
         try:
-            da, coords = vr.load()
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Load failed", str(e)); ev.ignore(); return
-        fr = ViewerFrame(title=f"{vr.path.name}:{vr.var}",parent=self)
-        fr.request_close.connect(self._remove_frame)
-        fr.set_data(da, coords)
-        self.frames.append(fr)
-        self._reflow()
-        ev.acceptProposedAction()
-
-    def _remove_frame(self, fr):
-        if fr in self.frames:
-            self.frames.remove(fr)
-        try:
-            fr.setParent(None)
+            sizes = self.center_split.sizes()
         except Exception:
-            pass
-        self._reflow()
+            return
+        if len(sizes) < 2 or sizes[1] <= 0:
+            return
+        self._hist_last_split_sizes = list(sizes)
 
-    def _reflow(self):
-        # detach any children
-        for i in range(self.vsplit.count()):
-            w = self.vsplit.widget(i)
-            if isinstance(w, QtWidgets.QSplitter):
-                while w.count():
-                    cw = w.widget(0); cw.setParent(None)
-        while self.vsplit.count():
-            w = self.vsplit.widget(0); w.setParent(None); w.deleteLater()
+    def _update_histogram_visibility(self):
+        hist_widget = self._hist_widget or self.viewer.histogram_widget()
+        if hist_widget is None:
+            return
+        if self.center_split.indexOf(hist_widget) == -1:
+            self.center_split.addWidget(hist_widget)
+        want_visible = self._hist_master_enabled and self._hist_local_enabled
+        if want_visible:
+            hist_widget.setMinimumWidth(80)
+            hist_widget.setMaximumWidth(16777215)
+            hist_widget.show()
+            sizes = self._hist_last_split_sizes
+            if sizes and len(sizes) >= 2 and sizes[1] > 0:
+                try:
+                    self.center_split.setSizes(list(sizes))
+                except Exception:
+                    pass
+            else:
+                try:
+                    current = self.center_split.sizes()
+                except Exception:
+                    current = []
+                if len(current) < 2 or current[1] == 0:
+                    total = sum(current) if len(current) >= 2 else 0
+                    if total <= 0:
+                        total = 400
+                    hist_width = max(120, total // 4)
+                    main_width = max(120, total - hist_width)
+                    try:
+                        self.center_split.setSizes([int(main_width), int(hist_width)])
+                    except Exception:
+                        pass
+        else:
+            if hist_widget.isVisible():
+                try:
+                    sizes = self.center_split.sizes()
+                except Exception:
+                    sizes = []
+                if len(sizes) >= 2 and sizes[1] > 0:
+                    self._hist_last_split_sizes = list(sizes)
+            hist_widget.hide()
+            hist_widget.setMinimumWidth(0)
+            hist_widget.setMaximumWidth(0)
 
-        cols = max(1, self.col_spin.value())
-        for r_start in range(0, len(self.frames), cols):
-            row_frames = self.frames[r_start:r_start+cols]
-            h = QtWidgets.QSplitter(QtCore.Qt.Horizontal); h.setChildrenCollapsible(False)
-            for fr in row_frames:
-                h.addWidget(fr)
-            self.vsplit.addWidget(h)
-
-        # apply current histogram visibility to all tiles
-        self._apply_histogram_visibility(self.chk_show_hist.isChecked())
-
-    def _apply_histogram_visibility(self, on: bool):
-        on = bool(on)
-        for fr in self.frames:
-            try:
-                fr.set_histogram_visible(on)
-            except Exception:
-                pass
 
 # ---------------------------------------------------------------------------
 # MultiView grid: drag vars to create tiles; master toggle for histograms
@@ -335,6 +288,35 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.chk_show_hist.toggled.connect(self._apply_histogram_visibility)
         bar.addWidget(self.chk_show_hist)
 
+        self.chk_link_levels = QtWidgets.QCheckBox("Lock colorscales")
+        self.chk_link_levels.toggled.connect(self._on_link_levels_toggled)
+        bar.addWidget(self.chk_link_levels)
+
+        self.chk_link_panzoom = QtWidgets.QCheckBox("Lock pan/zoom")
+        self.chk_link_panzoom.toggled.connect(self._on_link_panzoom_toggled)
+        bar.addWidget(self.chk_link_panzoom)
+
+        self.chk_cursor_mirror = QtWidgets.QCheckBox("Mirror cursor")
+        self.chk_cursor_mirror.setChecked(False)
+        self.chk_cursor_mirror.toggled.connect(self._on_link_cursor_toggled)
+        bar.addWidget(self.chk_cursor_mirror)
+
+        self.btn_autoscale = QtWidgets.QPushButton("Autoscale colors")
+        self.btn_autoscale.clicked.connect(self._autoscale_colors)
+        bar.addWidget(self.btn_autoscale)
+
+        self.btn_autopan = QtWidgets.QPushButton("Auto pan/zoom")
+        self.btn_autopan.clicked.connect(self._auto_panzoom)
+        bar.addWidget(self.btn_autopan)
+
+        self.btn_equalize_rows = QtWidgets.QPushButton("Equalize rows")
+        self.btn_equalize_rows.clicked.connect(self.equalize_rows)
+        bar.addWidget(self.btn_equalize_rows)
+
+        self.btn_equalize_cols = QtWidgets.QPushButton("Equalize columns")
+        self.btn_equalize_cols.clicked.connect(self.equalize_columns)
+        bar.addWidget(self.btn_equalize_cols)
+
         bar.addStretch(1)
         v.addLayout(bar)
 
@@ -342,6 +324,12 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.vsplit = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         self.vsplit.setChildrenCollapsible(False)
         v.addWidget(self.vsplit, 1)
+
+        self._level_handlers = {}
+        self._view_handlers = {}
+        self._cursor_handlers = {}
+        self._syncing_levels = False
+        self._syncing_views = False
 
     # ---------- Drag & Drop ----------
     def dragEnterEvent(self, ev: QtGui.QDragEnterEvent):
@@ -363,12 +351,15 @@ class MultiViewGrid(QtWidgets.QWidget):
         fr.request_close.connect(self._remove_frame)
         fr.set_data(da, coords)
         self.frames.append(fr)
+        self._connect_frame_signals(fr)
+        self._sync_new_frame_to_links(fr)
 
         self._reflow()
         ev.acceptProposedAction()
 
     # ---------- Tile management ----------
     def _remove_frame(self, fr: ViewerFrame):
+        self._disconnect_frame_signals(fr)
         if fr in self.frames:
             self.frames.remove(fr)
         try:
@@ -403,6 +394,7 @@ class MultiViewGrid(QtWidgets.QWidget):
 
         # Re-apply current histogram visibility to all tiles
         self._apply_histogram_visibility(self.chk_show_hist.isChecked())
+        self.equalize_columns()
 
     def _apply_histogram_visibility(self, on: bool):
         """Show/hide the classic HistogramLUTItem on every tile."""
@@ -412,6 +404,206 @@ class MultiViewGrid(QtWidgets.QWidget):
                 fr.set_histogram_visible(on)
             except Exception:
                 pass
+
+    def _connect_frame_signals(self, fr: ViewerFrame):
+        viewer = getattr(fr, "viewer", None)
+        if viewer is None:
+            return
+        if viewer not in self._level_handlers:
+            try:
+                handler = partial(self._viewer_levels_changed, viewer)
+                viewer.sigLevelsChanged.connect(handler)
+                self._level_handlers[viewer] = handler
+            except Exception:
+                self._level_handlers.pop(viewer, None)
+        if viewer not in self._view_handlers:
+            try:
+                handler = partial(self._viewer_view_changed, viewer)
+                viewer.sigViewChanged.connect(handler)
+                self._view_handlers[viewer] = handler
+            except Exception:
+                self._view_handlers.pop(viewer, None)
+        if viewer not in self._cursor_handlers:
+            try:
+                viewer.sigCursorMoved.connect(self._viewer_cursor_moved)
+                self._cursor_handlers[viewer] = True
+            except Exception:
+                self._cursor_handlers.pop(viewer, None)
+
+    def _disconnect_frame_signals(self, fr: ViewerFrame):
+        viewer = getattr(fr, "viewer", None)
+        if viewer is None:
+            return
+        handler = self._level_handlers.pop(viewer, None)
+        if handler is not None:
+            try:
+                viewer.sigLevelsChanged.disconnect(handler)
+            except Exception:
+                pass
+        handler = self._view_handlers.pop(viewer, None)
+        if handler is not None:
+            try:
+                viewer.sigViewChanged.disconnect(handler)
+            except Exception:
+                pass
+        if viewer in self._cursor_handlers:
+            try:
+                viewer.sigCursorMoved.disconnect(self._viewer_cursor_moved)
+            except Exception:
+                pass
+            self._cursor_handlers.pop(viewer, None)
+        try:
+            viewer.clear_mirrored_crosshair()
+        except Exception:
+            pass
+
+    def _viewer_levels_changed(self, viewer, levels):
+        if not self.chk_link_levels.isChecked() or self._syncing_levels:
+            return
+        self._syncing_levels = True
+        try:
+            try:
+                lo, hi = (float(levels[0]), float(levels[1]))
+            except Exception:
+                lo, hi = viewer.get_levels()
+            for fr in self.frames:
+                if fr.viewer is viewer:
+                    continue
+                fr.viewer.set_levels(lo, hi)
+        finally:
+            self._syncing_levels = False
+
+    def _viewer_view_changed(self, viewer, xr, yr):
+        if not self.chk_link_panzoom.isChecked() or self._syncing_views:
+            return
+        self._syncing_views = True
+        try:
+            xr_vals = tuple(xr) if xr is not None else viewer.get_view_range()[0]
+            yr_vals = tuple(yr) if yr is not None else viewer.get_view_range()[1]
+            for fr in self.frames:
+                if fr.viewer is viewer:
+                    continue
+                fr.viewer.set_view_range(xr=xr_vals, yr=yr_vals)
+        finally:
+            self._syncing_views = False
+
+    def _on_link_levels_toggled(self, on: bool):
+        if on:
+            self._sync_all_levels()
+
+    def _on_link_panzoom_toggled(self, on: bool):
+        if on:
+            self._sync_all_views()
+
+    def _on_link_cursor_toggled(self, on: bool):
+        if not on:
+            self._clear_mirrored_crosshairs()
+
+    def _sync_all_levels(self):
+        if not self.frames:
+            return
+        ref = self.frames[0].viewer
+        try:
+            lo, hi = ref.get_levels()
+        except Exception:
+            return
+        self._syncing_levels = True
+        try:
+            for fr in self.frames[1:]:
+                fr.viewer.set_levels(lo, hi)
+        finally:
+            self._syncing_levels = False
+
+    def _sync_all_views(self):
+        if not self.frames:
+            return
+        ref = self.frames[0].viewer
+        try:
+            xr, yr = ref.get_view_range()
+        except Exception:
+            return
+        self._syncing_views = True
+        try:
+            for fr in self.frames[1:]:
+                fr.viewer.set_view_range(xr=xr, yr=yr)
+        finally:
+            self._syncing_views = False
+
+    def _viewer_cursor_moved(self, viewer, x, y, value, inside, label):
+        if not inside or not self.chk_cursor_mirror.isChecked():
+            self._clear_mirrored_crosshairs(exclude=viewer)
+            return
+        for fr in self.frames:
+            other = fr.viewer
+            if other is viewer:
+                continue
+            try:
+                other.show_crosshair(x, y, value=value, mirrored=True, label=label)
+            except Exception:
+                pass
+
+    def _clear_mirrored_crosshairs(self, exclude=None):
+        for fr in self.frames:
+            viewer = fr.viewer
+            if exclude is not None and viewer is exclude:
+                continue
+            try:
+                viewer.clear_mirrored_crosshair()
+            except Exception:
+                pass
+
+    def _sync_new_frame_to_links(self, fr: ViewerFrame):
+        others = [f for f in self.frames if f is not fr]
+        if not others:
+            return
+        ref = others[0].viewer
+        if self.chk_link_levels.isChecked():
+            try:
+                lo, hi = ref.get_levels()
+                fr.viewer.set_levels(lo, hi)
+            except Exception:
+                pass
+        if self.chk_link_panzoom.isChecked():
+            try:
+                xr, yr = ref.get_view_range()
+                fr.viewer.set_view_range(xr=xr, yr=yr)
+            except Exception:
+                pass
+
+    def _autoscale_colors(self):
+        if self.chk_link_levels.isChecked():
+            self.chk_link_levels.setChecked(False)
+        for fr in self.frames:
+            try:
+                fr.viewer.autoscale_levels()
+            except Exception:
+                pass
+
+    def _auto_panzoom(self):
+        for fr in self.frames:
+            try:
+                fr.viewer.auto_view_range()
+            except Exception:
+                pass
+
+    def equalize_columns(self):
+        for splitter in self._iter_row_splitters():
+            count = splitter.count()
+            if count <= 0:
+                continue
+            splitter.setSizes([1] * count)
+
+    def equalize_rows(self):
+        count = self.vsplit.count()
+        if count <= 0:
+            return
+        self.vsplit.setSizes([1] * count)
+
+    def _iter_row_splitters(self):
+        for i in range(self.vsplit.count()):
+            w = self.vsplit.widget(i)
+            if isinstance(w, QtWidgets.QSplitter):
+                yield w
 
 # ---------------------------------------------------------------------------
 # Overlay view: simple drag-to-layer

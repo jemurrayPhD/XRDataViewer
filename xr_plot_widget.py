@@ -1,6 +1,6 @@
 from __future__ import annotations
 import numpy as np
-from PySide2 import QtCore, QtWidgets
+from PySide2 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 
 FORCE_SOFT_RENDER = False
@@ -11,37 +11,55 @@ class MyHistogramLUT(pg.HistogramLUTItem):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         QtCore.QTimer.singleShot(0, self._suppress_all_stops)
-    def mouseDoubleClickEvent(self, ev): ev.ignore()
-    def contextMenuEvent(self, ev): ev.ignore()
+
+    def mouseDoubleClickEvent(self, ev):
+        ev.ignore()
+
+    def contextMenuEvent(self, ev):
+        ev.ignore()
+
     def _suppress_all_stops(self):
         try:
             g = self.gradient
             if hasattr(g, "ticks"):
                 for t in list(getattr(g, "ticks", [])):
-                    try: getattr(t, "item", t).setVisible(False)
+                    try:
+                        getattr(t, "item", t).setVisible(False)
                     except Exception:
-                        try: t.setVisible(False)
-                        except Exception: pass
+                        try:
+                            t.setVisible(False)
+                        except Exception:
+                            pass
             if hasattr(g, "listTicks"):
                 try:
                     for _, _, tick in g.listTicks():
-                        try: getattr(tick, "item", tick).setVisible(False)
+                        try:
+                            getattr(tick, "item", tick).setVisible(False)
                         except Exception:
-                            try: tick.setVisible(False)
-                            except Exception: pass
-                except Exception: pass
+                            try:
+                                tick.setVisible(False)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
             try:
                 for ch in g.childItems():
                     br = ch.boundingRect()
                     if br.width() < 15 and br.height() < 15:
                         ch.setVisible(False)
-            except Exception: pass
-        except Exception: pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def rehide_stops(self):
         QtCore.QTimer.singleShot(0, self._suppress_all_stops)
 
 class CentralPlotWidget(QtWidgets.QWidget):
     sigInfoMessage = QtCore.Signal(str)
+    sigLevelsChanged = QtCore.Signal(tuple)
+    sigViewChanged = QtCore.Signal(tuple, tuple)
+    sigCursorMoved = QtCore.Signal(object, float, float, object, bool, str)
     def __init__(self, parent=None):
         super().__init__(parent)
         self.glw = pg.GraphicsLayoutWidget()
@@ -53,52 +71,69 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self.img_item = pg.ImageItem()
         self.plot.addItem(self.img_item)
         self.lut = MyHistogramLUT()
-        self.glw.ci.addItem(self.lut, row=0, col=1)
         self.lut.setImageItem(self.img_item)
 
-        # Histogram overlay: mapping curve + control points (kept from your last build)
-        self.hist_curve = pg.PlotDataItem(pen=pg.mkPen(0, 200, 255, 220), antialias=True)
-        try: self.hist_curve.setIgnoreBounds(True)
-        except Exception: pass
-        ovb = self._ensure_overlay_vb()
-        if isinstance(ovb, pg.ViewBox):
-            ovb.addItem(self.hist_curve); self.hist_curve.setZValue(1e6)
-        else:
-            self.hist_curve.setVisible(False)
+        self._hist_container = None
+        self._block_levels_emit = False
+        self._block_view_emit = False
+        self._last_data = None
+        self._last_rect = None
 
-        self.tf_points = pg.ScatterPlotItem(size=8, brush=(80,170,255), pen=pg.mkPen(20,90,140))
-        self.tf_points.setZValue(1e6)
-        if isinstance(ovb, pg.ViewBox): ovb.addItem(self.tf_points)
-        self._dragging_idx = -1; self._drag_capturing = False
-        self._init_transfer_points(7)
+        self._histogram_menu_getter = None
+        self._histogram_menu_setter = None
+        self._histogram_menu_enabled_getter = None
 
         lay = QtWidgets.QHBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.addWidget(self.glw)
         try:
             cmap = pg.colormap.get("viridis"); self.lut.gradient.setColorMap(cmap)
         except Exception: pass
 
-        try: self.lut.gradient.sigGradientChanged.connect(self._update_image_lut_from_gradient)
-        except Exception: pass
         try:
-            self.lut.sigLevelsChanged.connect(lambda *_: (self._update_hist_overlay_curve(),
-                                                          self._push_tf_points_visual(),
-                                                          self.lut.rehide_stops()))
-            base_vb = self._lut_viewbox()
-            if isinstance(base_vb, pg.ViewBox):
-                base_vb.sigRangeChanged.connect(lambda *_: self._update_hist_overlay_curve())
-                base_vb.sigResized.connect(lambda *_: self._sync_overlay_geom())
-        except Exception: pass
-        ovb = self._ensure_overlay_vb()
-        if isinstance(ovb, pg.ViewBox): ovb.installEventFilter(self)
-
-        QtCore.QTimer.singleShot(0, self._update_image_lut_from_gradient)
-        QtCore.QTimer.singleShot(0, self._update_hist_overlay_curve)
-        QtCore.QTimer.singleShot(50, self._update_hist_overlay_curve)
-        try: self.lut.rehide_stops()
-        except Exception: pass
+            self.lut.gradient.sigGradientChanged.connect(lambda *_: self.lut.rehide_stops())
+        except Exception:
+            pass
+        try:
+            self.lut.sigLevelsChanged.connect(self._on_levels_changed)
+        except Exception:
+            pass
+        try:
+            self.plot.vb.sigRangeChanged.connect(self._on_viewbox_range_changed)
+        except Exception:
+            pass
+        try:
+            self.lut.rehide_stops()
+        except Exception:
+            pass
 
         # sample grid items (on main plot)
         self._grid_items = []
+
+        # crosshair overlay
+        cross_pen = pg.mkPen((255, 230, 150, 200), width=1)
+        mirror_pen = pg.mkPen((120, 210, 255, 200), width=1)
+        self._crosshair_pen = cross_pen
+        self._crosshair_pen_mirror = mirror_pen
+        self._crosshair_v = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
+        self._crosshair_h = pg.InfiniteLine(angle=0, movable=False, pen=cross_pen)
+        self._crosshair_label = pg.TextItem(color=(255, 255, 220), anchor=(0.0, 1.0))
+        for it in (self._crosshair_v, self._crosshair_h):
+            self.plot.addItem(it, ignoreBounds=True)
+            it.setVisible(False)
+        self.plot.addItem(self._crosshair_label, ignoreBounds=True)
+        self._crosshair_label.setVisible(False)
+        self._crosshair_is_mirrored = False
+        self._local_crosshair_enabled = False
+        self._local_crosshair_visible = False
+        self._last_local_crosshair = None
+
+        try:
+            self.plot.scene().sigMouseMoved.connect(self._on_scene_mouse_moved)
+        except Exception:
+            pass
+        try:
+            self.plot.scene().sigMouseClicked.connect(self._on_scene_mouse_clicked)
+        except Exception:
+            pass
 
     # ---------- public API ----------
     def set_labels(self, xlabel: str = "X", ylabel: str = "Y"):
@@ -109,20 +144,91 @@ class CentralPlotWidget(QtWidgets.QWidget):
         except Exception: return (0.0, 1.0)
 
     def set_levels(self, lo, hi):
+        self._block_levels_emit = True
         try:
             self.lut.setLevels(float(lo), float(hi))
-            self._update_hist_overlay_curve(); self._update_image_lut_from_gradient()
-        except Exception: pass
+        except Exception:
+            pass
+        finally:
+            self._block_levels_emit = False
 
     def get_view_range(self):
         try: xr, yr = self.plot.vb.viewRange(); return (tuple(xr), tuple(yr))
         except Exception: return ((0,1),(0,1))
 
     def set_view_range(self, xr=None, yr=None):
+        self._block_view_emit = True
         try:
             if xr is not None: self.plot.vb.setXRange(float(xr[0]), float(xr[1]), padding=0.0)
             if yr is not None: self.plot.vb.setYRange(float(yr[0]), float(yr[1]), padding=0.0)
-        except Exception: pass
+        except Exception:
+            pass
+        finally:
+            self._block_view_emit = False
+
+    def autoscale_levels(self):
+        img = getattr(self.img_item, 'image', None)
+        if img is None:
+            return
+        try:
+            data = np.asarray(img, float)
+            finite = np.isfinite(data)
+            if not finite.any():
+                return
+            lo = float(data[finite].min())
+            hi = float(data[finite].max())
+            if lo == hi:
+                hi = lo + 1.0
+            self.set_levels(lo, hi)
+        except Exception:
+            pass
+
+    def auto_view_range(self):
+        try:
+            rect = self.img_item.mapRectToParent(self.img_item.boundingRect())
+        except Exception:
+            rect = None
+        if not rect or rect.isNull():
+            return
+        try:
+            self.plot.vb.setRange(rect=rect, padding=0.0)
+        except Exception:
+            pass
+
+    def histogram_widget(self):
+        if getattr(self, "lut", None) is None:
+            return None
+        if getattr(self, "_hist_container", None) is None:
+            try:
+                glw = pg.GraphicsLayoutWidget()
+                glw.addItem(self.lut, row=0, col=0)
+                glw.setObjectName("HistogramLUTContainer")
+                glw.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+                self._hist_container = glw
+            except Exception:
+                self._hist_container = None
+        return self._hist_container
+
+    def _on_levels_changed(self, *_):
+        try:
+            self.lut.rehide_stops()
+        except Exception:
+            pass
+        if self._block_levels_emit:
+            return
+        try:
+            self.sigLevelsChanged.emit(self.get_levels())
+        except Exception:
+            pass
+
+    def _on_viewbox_range_changed(self, *_args):
+        if self._block_view_emit:
+            return
+        try:
+            xr, yr = self.get_view_range()
+            self.sigViewChanged.emit(xr, yr)
+        except Exception:
+            pass
 
     # ---------- data display ----------
     def set_image(self, Z: np.ndarray, autorange: bool = True, rect=None):
@@ -134,6 +240,11 @@ class CentralPlotWidget(QtWidgets.QWidget):
                 Ny, Nx = Z.shape; rect = QRectF(0.0, 0.0, float(Nx), float(Ny))
             self.img_item.setRect(rect)
         except Exception: pass
+        self._last_data = np.asarray(Z, float)
+        try:
+            self._last_rect = rect
+        except Exception:
+            self._last_rect = None
         if autorange: self.plot.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
 
     def set_rectilinear(self, x1: np.ndarray, y1: np.ndarray, Z: np.ndarray, autorange: bool = True):
@@ -175,6 +286,202 @@ class CentralPlotWidget(QtWidgets.QWidget):
             except Exception: pass
         self._grid_items = []
 
+    def show_crosshair(self, x: float, y: float, value=None, *, mirrored: bool = False, label: str | None = None):
+        try:
+            self._crosshair_v.setPen(self._crosshair_pen_mirror if mirrored else self._crosshair_pen)
+            self._crosshair_h.setPen(self._crosshair_pen_mirror if mirrored else self._crosshair_pen)
+            self._crosshair_v.setPos(float(x))
+            self._crosshair_h.setPos(float(y))
+        except Exception:
+            return
+        if label is None:
+            label = self._format_crosshair_text(x, y, value)
+        if mirrored:
+            self._crosshair_label.setColor((185, 235, 255))
+            self._crosshair_label.setAnchor((1.0, 0.0))
+            self._crosshair_label.setPos(float(x), float(y))
+        else:
+            self._crosshair_label.setColor((255, 255, 220))
+            self._crosshair_label.setAnchor((0.0, 1.0))
+            self._crosshair_label.setPos(float(x), float(y))
+        self._crosshair_label.setText(label)
+        self._crosshair_is_mirrored = bool(mirrored)
+        self._crosshair_v.setVisible(True)
+        self._crosshair_h.setVisible(True)
+        self._crosshair_label.setVisible(True)
+        self._local_crosshair_visible = not mirrored
+
+    def hide_crosshair(self):
+        for it in (self._crosshair_v, self._crosshair_h):
+            try:
+                it.setVisible(False)
+            except Exception:
+                pass
+        try:
+            self._crosshair_label.setVisible(False)
+        except Exception:
+            pass
+        self._crosshair_is_mirrored = False
+        self._local_crosshair_visible = False
+
+    def clear_mirrored_crosshair(self):
+        if self._crosshair_is_mirrored:
+            self.hide_crosshair()
+
+    def _format_crosshair_text(self, x, y, value):
+        def fmt(val):
+            if val is None:
+                return "—"
+            try:
+                if isinstance(val, (float, int, np.floating, np.integer)):
+                    if np.isnan(val):
+                        return "nan"
+                    return f"{float(val):.4g}"
+            except Exception:
+                pass
+            return str(val)
+        return f"x={fmt(x)}\ny={fmt(y)}\nvalue={fmt(value)}"
+
+    def _value_at(self, x: float, y: float):
+        data = self._last_data
+        rect = self._last_rect
+        if data is None or rect is None:
+            return None
+        try:
+            x0 = float(rect.left()); y0 = float(rect.top())
+            w = float(rect.width()); h = float(rect.height())
+        except Exception:
+            return None
+        if w == 0 or h == 0:
+            return None
+        Ny, Nx = data.shape
+        fx = (x - x0) / w * Nx
+        fy = (y - y0) / h * Ny
+        if fx < 0 or fx >= Nx or fy < 0 or fy >= Ny:
+            return None
+        try:
+            ix = int(np.clip(np.floor(fx + 0.5), 0, Nx - 1))
+            iy = int(np.clip(np.floor(fy + 0.5), 0, Ny - 1))
+            return data[iy, ix]
+        except Exception:
+            return None
+
+    def _set_last_local_crosshair(self, x: float, y: float, value, label: str | None):
+        self._last_local_crosshair = (x, y, value, label)
+
+    def set_local_crosshair_enabled(self, enabled: bool):
+        enabled = bool(enabled)
+        if self._local_crosshair_enabled == enabled:
+            return
+        self._local_crosshair_enabled = enabled
+        self._update_local_crosshair()
+
+    def _update_local_crosshair(self):
+        if self._local_crosshair_enabled and self._last_local_crosshair:
+            x, y, value, label = self._last_local_crosshair
+            self.show_crosshair(x, y, value, mirrored=False, label=label)
+        elif self._local_crosshair_visible:
+            self.hide_crosshair()
+
+    def _on_scene_mouse_moved(self, pos):
+        try:
+            scene_rect = self.plot.sceneBoundingRect()
+        except Exception:
+            scene_rect = None
+        inside = bool(scene_rect and scene_rect.contains(pos))
+        if not inside:
+            self._last_local_crosshair = None
+            self._update_local_crosshair()
+            try:
+                self.sigCursorMoved.emit(self, float("nan"), float("nan"), None, False, "")
+            except Exception:
+                pass
+            return
+        try:
+            mouse_point = self.plot.vb.mapSceneToView(pos)
+        except Exception:
+            return
+        x = float(mouse_point.x())
+        y = float(mouse_point.y())
+        value = self._value_at(x, y)
+        label = self._format_crosshair_text(x, y, value)
+        self._set_last_local_crosshair(x, y, value, label)
+        self._update_local_crosshair()
+        try:
+            self.sigCursorMoved.emit(self, x, y, value, True, label)
+        except Exception:
+            pass
+
+    def _on_scene_mouse_clicked(self, event):
+        try:
+            button = event.button()
+        except Exception:
+            return
+        if button != QtCore.Qt.RightButton:
+            return
+        try:
+            scene_pos = event.scenePos()
+        except Exception:
+            scene_pos = None
+        if scene_pos is None:
+            return
+        try:
+            scene_rect = self.plot.sceneBoundingRect()
+        except Exception:
+            scene_rect = None
+        if not (scene_rect and scene_rect.contains(scene_pos)):
+            return
+        event.accept()
+        try:
+            view_point = self.plot.vb.mapSceneToView(scene_pos)
+        except Exception:
+            view_point = None
+        if view_point is not None:
+            x = float(view_point.x())
+            y = float(view_point.y())
+            value = self._value_at(x, y)
+            label = self._format_crosshair_text(x, y, value)
+            self._set_last_local_crosshair(x, y, value, label)
+            if self._local_crosshair_enabled:
+                self._update_local_crosshair()
+        menu = QtWidgets.QMenu()
+        act_crosshair = menu.addAction("Show crosshair")
+        act_crosshair.setCheckable(True)
+        act_crosshair.setChecked(self._local_crosshair_enabled)
+        act_crosshair.toggled.connect(self.set_local_crosshair_enabled)
+
+        if self._histogram_menu_getter and self._histogram_menu_setter:
+            menu.addSeparator()
+            act_hist = menu.addAction("Show histogram")
+            act_hist.setCheckable(True)
+            try:
+                act_hist.setChecked(bool(self._histogram_menu_getter()))
+            except Exception:
+                act_hist.setChecked(True)
+            if self._histogram_menu_enabled_getter is not None:
+                try:
+                    act_hist.setEnabled(bool(self._histogram_menu_enabled_getter()))
+                except Exception:
+                    pass
+            act_hist.toggled.connect(self._histogram_menu_setter)
+        try:
+            screen_pos = event.screenPos()
+        except Exception:
+            screen_pos = None
+        if screen_pos is not None:
+            try:
+                point = QtCore.QPoint(int(screen_pos.x()), int(screen_pos.y()))
+            except Exception:
+                point = QtGui.QCursor.pos()
+        else:
+            point = QtGui.QCursor.pos()
+        menu.exec_(point)
+
+    def configure_histogram_toggle(self, *, getter=None, setter=None, enabled_getter=None):
+        self._histogram_menu_getter = getter
+        self._histogram_menu_setter = setter
+        self._histogram_menu_enabled_getter = enabled_getter
+
     # ---------- resampling helpers ----------
     def _rect_to_qrectf(self, x0, x1, y0, y1):
         from PySide2.QtCore import QRectF; return QRectF(float(x0), float(y0), float(x1 - x0), float(y1 - y0))
@@ -211,96 +518,3 @@ class CentralPlotWidget(QtWidgets.QWidget):
         rect = self._rect_to_qrectf(x_t[0], x_t[-1], y_t[0], y_t[-1])
         return (np.asarray(Zu, float), rect) if return_rect else np.asarray(Zu, float)
 
-    # ---------- histogram overlay (mapping curve) ----------
-    def _lut_viewbox(self):
-        try:
-            vb = self.lut.vb
-            if isinstance(vb, pg.ViewBox): return vb
-        except Exception: pass
-        try:
-            vb = self.lut.getViewBox()
-            if isinstance(vb, pg.ViewBox): return vb
-        except Exception: pass
-        try:
-            for ch in self.lut.childItems():
-                if isinstance(ch, pg.ViewBox): return ch
-        except Exception: pass
-        return None
-
-    def _sync_overlay_geom(self):
-        base_vb = self._lut_viewbox(); ovb = getattr(self, "_lut_overlay_vb", None)
-        try:
-            if isinstance(base_vb, pg.ViewBox) and isinstance(ovb, pg.ViewBox):
-                ovb.setGeometry(base_vb.sceneBoundingRect())
-        except Exception: pass
-
-    def _ensure_overlay_vb(self):
-        if getattr(self, "_lut_overlay_vb", None) is not None:
-            return self._lut_overlay_vb
-        base_vb = self._lut_viewbox()
-        if not isinstance(base_vb, pg.ViewBox):
-            self._lut_overlay_vb = None; return None
-        ovb = pg.ViewBox(enableMenu=False); ovb.setMouseEnabled(x=False, y=False); ovb.setZValue(1e6)
-        base_vb.scene().addItem(ovb); self._lut_overlay_vb = ovb; self._sync_overlay_geom()
-        try: base_vb.sigRangeChanged.connect(lambda *_: self._sync_overlay_geom())
-        except Exception: pass
-        try: base_vb.sigResized.connect(lambda *_: self._sync_overlay_geom())
-        except Exception: pass
-        return ovb
-
-    def _update_hist_overlay_curve(self):
-        try: lo, hi = self.lut.getLevels()
-        except Exception: lo, hi = 0.0, 1.0
-        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo: lo, hi = 0.0, 1.0
-        ovb = self._ensure_overlay_vb()
-        if not isinstance(ovb, pg.ViewBox): self.hist_curve.setVisible(False); return
-        self.hist_curve.setVisible(True)
-        try:
-            ovb.enableAutoRange(x=False, y=False); ovb.setXRange(lo, hi, padding=0.0); ovb.setYRange(lo, hi, padding=0.0)
-        except Exception: pass
-        u = np.linspace(0.0, 1.0, 200); v = self._eval_transfer(u)
-        x = lo + v * (hi - lo); y = lo + u * (hi - lo)
-        try:
-            self.hist_curve.setData(x, y); self.hist_curve.setIgnoreBounds(True); self.lut.rehide_stops()
-        except Exception: pass
-
-    # ---------- transfer curve logic (fixed-v controls) ----------
-    def _init_transfer_points(self, n=7):
-        n = max(2, int(n)); self._v_ctrl = np.linspace(0.0, 1.0, n); self._u_ctrl = self._v_ctrl.copy()
-        self._push_tf_points_visual()
-
-    def _push_tf_points_visual(self):
-        try: lo, hi = self.lut.getLevels()
-        except Exception: lo, hi = 0.0, 1.0
-        x = lo + self._v_ctrl * (hi - lo); y = lo + self._u_ctrl * (hi - lo)
-        try: self.tf_points.setData(x=x, y=y, data=list(range(len(x)))); self.tf_points.setVisible(True)
-        except Exception: pass
-
-    def _on_transfer_changed(self):
-        self._push_tf_points_visual(); self._update_image_lut_from_gradient(); self._update_hist_overlay_curve()
-
-    def _eval_transfer(self, u: np.ndarray) -> np.ndarray:
-        u = np.asarray(u, float)
-        if getattr(self, "_v_ctrl", None) is None or getattr(self, "_u_ctrl", None) is None:
-            return np.clip(u, 0.0, 1.0)
-        u_of_v = np.maximum.accumulate(self._u_ctrl.copy())
-        u_of_v[0] = 0.0; u_of_v[-1] = 1.0; v_grid = self._v_ctrl
-        v = np.interp(u, u_of_v, v_grid); return np.clip(v, 0.0, 1.0)
-
-    def reset_transfer_curve(self, n_points: int = 7):
-        n = max(2, int(n_points)); self._v_ctrl = np.linspace(0.0, 1.0, n); self._u_ctrl = self._v_ctrl.copy(); self._on_transfer_changed()
-
-    def _update_image_lut_from_gradient(self):
-        try: cm = self.lut.gradient.colorMap()
-        except Exception: return
-        pos = np.linspace(0.0, 1.0, 256); v = self._eval_transfer(pos)
-        try:
-            rgba = cm.map(v, mode='byte')
-            if isinstance(rgba, np.ndarray) and rgba.ndim == 2 and rgba.shape[1] >= 3: lut = rgba
-            else: raise Exception("Bad colormap output")
-        except Exception:
-            base = cm.getLookupTable(0.0,1.0,256,alpha=True); xi = v*(base.shape[0]-1)
-            i0 = np.floor(xi).astype(int); i1 = np.clip(i0+1, 0, base.shape[0]-1); t = (xi - i0)[:,None]
-            lut = (base[i0]*(1-t) + base[i1]*t).astype(np.uint8)
-        try: self.img_item.setLookupTable(lut)
-        except Exception: pass
