@@ -1,6 +1,6 @@
 from __future__ import annotations
 import numpy as np
-from PySide2 import QtCore, QtWidgets
+from PySide2 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 
 FORCE_SOFT_RENDER = False
@@ -115,12 +115,19 @@ class CentralPlotWidget(QtWidgets.QWidget):
         for it in (self._crosshair_v, self._crosshair_h):
             self.plot.addItem(it, ignoreBounds=True)
             it.setVisible(False)
-        self.plot.addItem(self._crosshair_label)
+        self.plot.addItem(self._crosshair_label, ignoreBounds=True)
         self._crosshair_label.setVisible(False)
         self._crosshair_is_mirrored = False
+        self._local_crosshair_enabled = False
+        self._local_crosshair_visible = False
+        self._last_local_crosshair = None
 
         try:
             self.plot.scene().sigMouseMoved.connect(self._on_scene_mouse_moved)
+        except Exception:
+            pass
+        try:
+            self.plot.scene().sigMouseClicked.connect(self._on_scene_mouse_clicked)
         except Exception:
             pass
 
@@ -298,6 +305,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._crosshair_v.setVisible(True)
         self._crosshair_h.setVisible(True)
         self._crosshair_label.setVisible(True)
+        self._local_crosshair_visible = not mirrored
 
     def hide_crosshair(self):
         for it in (self._crosshair_v, self._crosshair_h):
@@ -310,6 +318,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
         except Exception:
             pass
         self._crosshair_is_mirrored = False
+        self._local_crosshair_visible = False
 
     def clear_mirrored_crosshair(self):
         if self._crosshair_is_mirrored:
@@ -353,6 +362,23 @@ class CentralPlotWidget(QtWidgets.QWidget):
         except Exception:
             return None
 
+    def _set_last_local_crosshair(self, x: float, y: float, value, label: str | None):
+        self._last_local_crosshair = (x, y, value, label)
+
+    def set_local_crosshair_enabled(self, enabled: bool):
+        enabled = bool(enabled)
+        if self._local_crosshair_enabled == enabled:
+            return
+        self._local_crosshair_enabled = enabled
+        self._update_local_crosshair()
+
+    def _update_local_crosshair(self):
+        if self._local_crosshair_enabled and self._last_local_crosshair:
+            x, y, value, label = self._last_local_crosshair
+            self.show_crosshair(x, y, value, mirrored=False, label=label)
+        elif self._local_crosshair_visible:
+            self.hide_crosshair()
+
     def _on_scene_mouse_moved(self, pos):
         try:
             scene_rect = self.plot.sceneBoundingRect()
@@ -360,7 +386,8 @@ class CentralPlotWidget(QtWidgets.QWidget):
             scene_rect = None
         inside = bool(scene_rect and scene_rect.contains(pos))
         if not inside:
-            self.hide_crosshair()
+            self._last_local_crosshair = None
+            self._update_local_crosshair()
             try:
                 self.sigCursorMoved.emit(self, float("nan"), float("nan"), None, False, "")
             except Exception:
@@ -374,11 +401,62 @@ class CentralPlotWidget(QtWidgets.QWidget):
         y = float(mouse_point.y())
         value = self._value_at(x, y)
         label = self._format_crosshair_text(x, y, value)
-        self.show_crosshair(x, y, value, mirrored=False, label=label)
+        self._set_last_local_crosshair(x, y, value, label)
+        self._update_local_crosshair()
         try:
             self.sigCursorMoved.emit(self, x, y, value, True, label)
         except Exception:
             pass
+
+    def _on_scene_mouse_clicked(self, event):
+        try:
+            button = event.button()
+        except Exception:
+            return
+        if button != QtCore.Qt.RightButton:
+            return
+        try:
+            scene_pos = event.scenePos()
+        except Exception:
+            scene_pos = None
+        if scene_pos is None:
+            return
+        try:
+            scene_rect = self.plot.sceneBoundingRect()
+        except Exception:
+            scene_rect = None
+        if not (scene_rect and scene_rect.contains(scene_pos)):
+            return
+        event.accept()
+        try:
+            view_point = self.plot.vb.mapSceneToView(scene_pos)
+        except Exception:
+            view_point = None
+        if view_point is not None:
+            x = float(view_point.x())
+            y = float(view_point.y())
+            value = self._value_at(x, y)
+            label = self._format_crosshair_text(x, y, value)
+            self._set_last_local_crosshair(x, y, value, label)
+            if self._local_crosshair_enabled:
+                self._update_local_crosshair()
+        menu = QtWidgets.QMenu()
+        act_crosshair = menu.addAction("Show crosshair")
+        act_crosshair.setCheckable(True)
+        act_crosshair.setChecked(self._local_crosshair_enabled)
+        act_crosshair.toggled.connect(self.set_local_crosshair_enabled)
+        try:
+            screen_pos = event.screenPos()
+        except Exception:
+            screen_pos = None
+        if screen_pos is not None:
+            try:
+                point = QtCore.QPoint(int(screen_pos.x()), int(screen_pos.y()))
+            except Exception:
+                point = QtGui.QCursor.pos()
+        else:
+            point = QtGui.QCursor.pos()
+        menu.exec_(point)
 
     # ---------- resampling helpers ----------
     def _rect_to_qrectf(self, x0, x1, y0, y1):
