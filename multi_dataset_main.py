@@ -370,9 +370,158 @@ class PipelineEditorDialog(QtWidgets.QDialog):
 # ---------------------------------------------------------------------------
 
 
-class ProcessingDockWidget(QtWidgets.QGroupBox):
+class ProcessingDockContainer(QtWidgets.QWidget):
+    def __init__(self, title: str, widget: QtWidgets.QWidget, parent=None):
+        super().__init__(parent)
+        self._title = title
+        self._content_widget = widget
+        self._floating_window: Optional[QtWidgets.QDialog] = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QtWidgets.QWidget()
+        header_layout = QtWidgets.QHBoxLayout(header)
+        header_layout.setContentsMargins(6, 6, 6, 6)
+        header_layout.setSpacing(6)
+        lbl = QtWidgets.QLabel(title)
+        font = lbl.font()
+        font.setBold(True)
+        lbl.setFont(font)
+        header_layout.addWidget(lbl)
+        header_layout.addStretch(1)
+
+        self.btn_float = QtWidgets.QToolButton()
+        self.btn_float.setText("Float")
+        self.btn_float.setAutoRaise(True)
+        self.btn_float.setToolTip("Undock processing pane to a floating window")
+        self.btn_float.clicked.connect(self._on_float_clicked)
+        header_layout.addWidget(self.btn_float)
+
+        self.btn_toggle = QtWidgets.QToolButton()
+        self.btn_toggle.setCheckable(True)
+        self.btn_toggle.setChecked(True)
+        self.btn_toggle.setAutoRaise(True)
+        self.btn_toggle.setArrowType(QtCore.Qt.DownArrow)
+        self.btn_toggle.setToolTip("Hide processing pane")
+        self.btn_toggle.toggled.connect(self._on_toggle_toggled)
+        header_layout.addWidget(self.btn_toggle)
+
+        layout.addWidget(header)
+
+        self._content_frame = QtWidgets.QWidget()
+        self._content_layout = QtWidgets.QVBoxLayout(self._content_frame)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(0)
+        self._content_layout.addWidget(self._content_widget)
+        layout.addWidget(self._content_frame, 1)
+
+        self._placeholder = QtWidgets.QLabel(
+            "Processing pane is undocked. Click Dock to return it to the sidebar."
+        )
+        self._placeholder.setAlignment(QtCore.Qt.AlignCenter)
+        self._placeholder.setWordWrap(True)
+        self._placeholder.hide()
+        layout.addWidget(self._placeholder, 1)
+
+        self._update_toggle_visuals()
+        self._update_content_visibility()
+        self._update_float_button()
+
+    def _on_toggle_toggled(self, checked: bool):
+        del checked
+        self._update_toggle_visuals()
+        self._update_content_visibility()
+
+    def _on_float_clicked(self):
+        if self._floating_window is not None:
+            self.dock()
+        else:
+            self.undock()
+
+    def undock(self):
+        if self._floating_window is not None:
+            try:
+                self._floating_window.raise_()
+                self._floating_window.activateWindow()
+            except Exception:
+                pass
+            return
+        self.btn_toggle.setChecked(True)
+        self._update_toggle_visuals()
+        self._update_content_visibility()
+        self._content_layout.removeWidget(self._content_widget)
+        self._content_widget.setParent(None)
+        dialog = QtWidgets.QDialog(self.window())
+        dialog.setWindowTitle(self._title)
+        dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
+        dlg_layout = QtWidgets.QVBoxLayout(dialog)
+        dlg_layout.setContentsMargins(0, 0, 0, 0)
+        dlg_layout.setSpacing(0)
+        dlg_layout.addWidget(self._content_widget)
+        dialog.finished.connect(self._on_floating_closed)
+        dialog.resize(self.width(), self.height())
+        dialog.show()
+        self._floating_window = dialog
+        self._update_float_button()
+        self._update_content_visibility()
+
+    def dock(self):
+        floating = self._floating_window
+        if floating is None:
+            return
+        self._floating_window = None
+        try:
+            floating.finished.disconnect(self._on_floating_closed)
+        except Exception:
+            pass
+        layout = floating.layout()
+        if layout is not None:
+            layout.removeWidget(self._content_widget)
+        self._content_widget.setParent(self._content_frame)
+        self._content_layout.addWidget(self._content_widget)
+        self._content_widget.show()
+        floating.hide()
+        floating.deleteLater()
+        self._update_float_button()
+        self._update_content_visibility()
+
+    def _on_floating_closed(self, *_):
+        if self._floating_window is None:
+            return
+        self.dock()
+
+    def _update_toggle_visuals(self):
+        if self.btn_toggle.isChecked():
+            self.btn_toggle.setArrowType(QtCore.Qt.DownArrow)
+            self.btn_toggle.setToolTip("Hide processing pane")
+        else:
+            self.btn_toggle.setArrowType(QtCore.Qt.RightArrow)
+            self.btn_toggle.setToolTip("Show processing pane")
+
+    def _update_float_button(self):
+        if self._floating_window is not None:
+            self.btn_float.setText("Dock")
+            self.btn_float.setToolTip("Dock processing pane back to the sidebar")
+        else:
+            self.btn_float.setText("Float")
+            self.btn_float.setToolTip("Undock processing pane to a floating window")
+
+    def _update_content_visibility(self):
+        if self._floating_window is not None:
+            self._content_frame.hide()
+            self._placeholder.show()
+            self.btn_toggle.setEnabled(False)
+        else:
+            self._placeholder.hide()
+            self.btn_toggle.setEnabled(True)
+            self._content_frame.setVisible(self.btn_toggle.isChecked())
+
+
+class ProcessingDockWidget(QtWidgets.QWidget):
     def __init__(self, manager: ProcessingManager, parent=None):
-        super().__init__("Processing Pipelines", parent)
+        super().__init__(parent)
         self.manager = manager
         self.steps: List[ProcessingStep] = []
 
@@ -1479,7 +1628,11 @@ class MultiViewGrid(QtWidgets.QWidget):
             if other is viewer:
                 continue
             try:
-                other.show_crosshair(x, y, value=value, mirrored=True, label=label)
+                local_value = other.value_at(x, y) if hasattr(other, "value_at") else None
+            except Exception:
+                local_value = None
+            try:
+                other.show_crosshair(x, y, value=local_value, mirrored=True)
             except Exception:
                 pass
 
@@ -2242,16 +2395,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.processing_manager = ProcessingManager()
 
-        left_panel = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(6)
+        left_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        left_splitter.setChildrenCollapsible(False)
+        left_splitter.setHandleWidth(8)
         self.datasets = DatasetsPane()
-        left_layout.addWidget(self.datasets, 1)
+        left_splitter.addWidget(self.datasets)
         self.processing_dock = ProcessingDockWidget(self.processing_manager)
-        left_layout.addWidget(self.processing_dock)
-        left_layout.addStretch(1)
-        main.addWidget(left_panel)
+        self.processing_panel = ProcessingDockContainer("Processing Pipelines", self.processing_dock)
+        left_splitter.addWidget(self.processing_panel)
+        left_splitter.setStretchFactor(0, 1)
+        left_splitter.setStretchFactor(1, 1)
+        main.addWidget(left_splitter)
+
+        QtCore.QTimer.singleShot(0, lambda: left_splitter.setSizes([1, 1]))
 
         self.tabs = QtWidgets.QTabWidget()
         main.addWidget(self.tabs)
