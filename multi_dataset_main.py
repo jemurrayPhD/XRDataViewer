@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Optional, List
+from functools import partial
 
 import numpy as np
 import xarray as xr
@@ -143,6 +144,8 @@ class ViewerFrame(QtWidgets.QFrame):
 
         # Center: image on left, histogram on right (toggle visibility)
         self.center_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.center_split.setChildrenCollapsible(False)
+        self.center_split.setHandleWidth(6)
         lay.addWidget(self.center_split, 1)
 
         self.viewer = CentralPlotWidget(self)
@@ -164,27 +167,30 @@ class ViewerFrame(QtWidgets.QFrame):
         if not hist_widget:
             return
 
+        if self.center_split.indexOf(hist_widget) == -1:
+            self.center_split.addWidget(hist_widget)
+            try:
+                self.center_split.setStretchFactor(0, 1)
+                self.center_split.setStretchFactor(1, 0)
+            except Exception:
+                pass
+
         if on:
-            if hist_widget.parent() is not self.center_split:
-                try:
-                    hist_widget.setParent(None)
-                except Exception:
-                    pass
-                self.center_split.addWidget(hist_widget)
             hist_widget.show()
             hist_widget.setMinimumWidth(220)
             hist_widget.setMaximumWidth(16777215)
             try:
-                self.center_split.setSizes([1, 0])
+                self.center_split.setSizes([3, 1])
             except Exception:
                 pass
         else:
-            if hist_widget.parent() is self.center_split:
-                try:
-                    hist_widget.setParent(None)
-                except Exception:
-                    pass
             hist_widget.hide()
+            hist_widget.setMinimumWidth(0)
+            hist_widget.setMaximumWidth(0)
+            try:
+                self.center_split.setSizes([1, 0])
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +226,14 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.chk_show_hist.toggled.connect(self._apply_histogram_visibility)
         bar.addWidget(self.chk_show_hist)
 
+        self.chk_link_levels = QtWidgets.QCheckBox("Lock colorscales")
+        self.chk_link_levels.toggled.connect(self._on_link_levels_toggled)
+        bar.addWidget(self.chk_link_levels)
+
+        self.chk_link_panzoom = QtWidgets.QCheckBox("Lock pan/zoom")
+        self.chk_link_panzoom.toggled.connect(self._on_link_panzoom_toggled)
+        bar.addWidget(self.chk_link_panzoom)
+
         bar.addStretch(1)
         v.addLayout(bar)
 
@@ -227,6 +241,11 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.vsplit = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         self.vsplit.setChildrenCollapsible(False)
         v.addWidget(self.vsplit, 1)
+
+        self._level_handlers = {}
+        self._view_handlers = {}
+        self._syncing_levels = False
+        self._syncing_views = False
 
     # ---------- Drag & Drop ----------
     def dragEnterEvent(self, ev: QtGui.QDragEnterEvent):
@@ -248,12 +267,15 @@ class MultiViewGrid(QtWidgets.QWidget):
         fr.request_close.connect(self._remove_frame)
         fr.set_data(da, coords)
         self.frames.append(fr)
+        self._connect_frame_signals(fr)
+        self._sync_new_frame_to_links(fr)
 
         self._reflow()
         ev.acceptProposedAction()
 
     # ---------- Tile management ----------
     def _remove_frame(self, fr: ViewerFrame):
+        self._disconnect_frame_signals(fr)
         if fr in self.frames:
             self.frames.remove(fr)
         try:
@@ -295,6 +317,128 @@ class MultiViewGrid(QtWidgets.QWidget):
         for fr in self.frames:
             try:
                 fr.set_histogram_visible(on)
+            except Exception:
+                pass
+
+    def _connect_frame_signals(self, fr: ViewerFrame):
+        viewer = getattr(fr, "viewer", None)
+        if viewer is None:
+            return
+        if viewer not in self._level_handlers:
+            try:
+                handler = partial(self._viewer_levels_changed, viewer)
+                viewer.sigLevelsChanged.connect(handler)
+                self._level_handlers[viewer] = handler
+            except Exception:
+                self._level_handlers.pop(viewer, None)
+        if viewer not in self._view_handlers:
+            try:
+                handler = partial(self._viewer_view_changed, viewer)
+                viewer.sigViewChanged.connect(handler)
+                self._view_handlers[viewer] = handler
+            except Exception:
+                self._view_handlers.pop(viewer, None)
+
+    def _disconnect_frame_signals(self, fr: ViewerFrame):
+        viewer = getattr(fr, "viewer", None)
+        if viewer is None:
+            return
+        handler = self._level_handlers.pop(viewer, None)
+        if handler is not None:
+            try:
+                viewer.sigLevelsChanged.disconnect(handler)
+            except Exception:
+                pass
+        handler = self._view_handlers.pop(viewer, None)
+        if handler is not None:
+            try:
+                viewer.sigViewChanged.disconnect(handler)
+            except Exception:
+                pass
+
+    def _viewer_levels_changed(self, viewer, levels):
+        if not self.chk_link_levels.isChecked() or self._syncing_levels:
+            return
+        self._syncing_levels = True
+        try:
+            try:
+                lo, hi = (float(levels[0]), float(levels[1]))
+            except Exception:
+                lo, hi = viewer.get_levels()
+            for fr in self.frames:
+                if fr.viewer is viewer:
+                    continue
+                fr.viewer.set_levels(lo, hi)
+        finally:
+            self._syncing_levels = False
+
+    def _viewer_view_changed(self, viewer, xr, yr):
+        if not self.chk_link_panzoom.isChecked() or self._syncing_views:
+            return
+        self._syncing_views = True
+        try:
+            xr_vals = tuple(xr) if xr is not None else viewer.get_view_range()[0]
+            yr_vals = tuple(yr) if yr is not None else viewer.get_view_range()[1]
+            for fr in self.frames:
+                if fr.viewer is viewer:
+                    continue
+                fr.viewer.set_view_range(xr=xr_vals, yr=yr_vals)
+        finally:
+            self._syncing_views = False
+
+    def _on_link_levels_toggled(self, on: bool):
+        if on:
+            self._sync_all_levels()
+
+    def _on_link_panzoom_toggled(self, on: bool):
+        if on:
+            self._sync_all_views()
+
+    def _sync_all_levels(self):
+        if not self.frames:
+            return
+        ref = self.frames[0].viewer
+        try:
+            lo, hi = ref.get_levels()
+        except Exception:
+            return
+        self._syncing_levels = True
+        try:
+            for fr in self.frames[1:]:
+                fr.viewer.set_levels(lo, hi)
+        finally:
+            self._syncing_levels = False
+
+    def _sync_all_views(self):
+        if not self.frames:
+            return
+        ref = self.frames[0].viewer
+        try:
+            xr, yr = ref.get_view_range()
+        except Exception:
+            return
+        self._syncing_views = True
+        try:
+            for fr in self.frames[1:]:
+                fr.viewer.set_view_range(xr=xr, yr=yr)
+        finally:
+            self._syncing_views = False
+
+    def _sync_new_frame_to_links(self, fr: ViewerFrame):
+        others = [f for f in self.frames if f is not fr]
+        if not others:
+            return
+        ref = others[0].viewer
+        if self.chk_link_levels.isChecked():
+            try:
+                lo, hi = ref.get_levels()
+                fr.viewer.set_levels(lo, hi)
+            except Exception:
+                pass
+        if self.chk_link_panzoom.isChecked():
+            try:
+                xr, yr = ref.get_view_range()
+                fr.viewer.set_view_range(xr=xr, yr=yr)
             except Exception:
                 pass
 

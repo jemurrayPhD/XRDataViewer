@@ -57,6 +57,8 @@ class MyHistogramLUT(pg.HistogramLUTItem):
 
 class CentralPlotWidget(QtWidgets.QWidget):
     sigInfoMessage = QtCore.Signal(str)
+    sigLevelsChanged = QtCore.Signal(tuple)
+    sigViewChanged = QtCore.Signal(tuple, tuple)
     def __init__(self, parent=None):
         super().__init__(parent)
         self.glw = pg.GraphicsLayoutWidget()
@@ -71,6 +73,8 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self.lut.setImageItem(self.img_item)
 
         self._hist_container = None
+        self._block_levels_emit = False
+        self._block_view_emit = False
 
         lay = QtWidgets.QHBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.addWidget(self.glw)
         try:
@@ -82,7 +86,11 @@ class CentralPlotWidget(QtWidgets.QWidget):
         except Exception:
             pass
         try:
-            self.lut.sigLevelsChanged.connect(lambda *_: self.lut.rehide_stops())
+            self.lut.sigLevelsChanged.connect(self._on_levels_changed)
+        except Exception:
+            pass
+        try:
+            self.plot.vb.sigRangeChanged.connect(self._on_viewbox_range_changed)
         except Exception:
             pass
         try:
@@ -102,19 +110,27 @@ class CentralPlotWidget(QtWidgets.QWidget):
         except Exception: return (0.0, 1.0)
 
     def set_levels(self, lo, hi):
+        self._block_levels_emit = True
         try:
             self.lut.setLevels(float(lo), float(hi))
-        except Exception: pass
+        except Exception:
+            pass
+        finally:
+            self._block_levels_emit = False
 
     def get_view_range(self):
         try: xr, yr = self.plot.vb.viewRange(); return (tuple(xr), tuple(yr))
         except Exception: return ((0,1),(0,1))
 
     def set_view_range(self, xr=None, yr=None):
+        self._block_view_emit = True
         try:
             if xr is not None: self.plot.vb.setXRange(float(xr[0]), float(xr[1]), padding=0.0)
             if yr is not None: self.plot.vb.setYRange(float(yr[0]), float(yr[1]), padding=0.0)
-        except Exception: pass
+        except Exception:
+            pass
+        finally:
+            self._block_view_emit = False
 
     def histogram_widget(self):
         if getattr(self, "lut", None) is None:
@@ -129,6 +145,27 @@ class CentralPlotWidget(QtWidgets.QWidget):
             except Exception:
                 self._hist_container = None
         return self._hist_container
+
+    def _on_levels_changed(self, *_):
+        try:
+            self.lut.rehide_stops()
+        except Exception:
+            pass
+        if self._block_levels_emit:
+            return
+        try:
+            self.sigLevelsChanged.emit(self.get_levels())
+        except Exception:
+            pass
+
+    def _on_viewbox_range_changed(self, *_args):
+        if self._block_view_emit:
+            return
+        try:
+            xr, yr = self.get_view_range()
+            self.sigViewChanged.emit(xr, yr)
+        except Exception:
+            pass
 
     # ---------- data display ----------
     def set_image(self, Z: np.ndarray, autorange: bool = True, rect=None):
