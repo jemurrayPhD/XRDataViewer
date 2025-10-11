@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from functools import partial
 
 import numpy as np
@@ -15,6 +15,7 @@ import pyqtgraph as pg
 
 from xr_plot_widget import CentralPlotWidget
 from xr_coords import guess_phys_coords
+from data_processing import poly2d_detrend, gaussian_blur, median_filter, butterworth
 
 # ---------------------------------------------------------------------------
 # Helper: open_dataset
@@ -606,30 +607,610 @@ class MultiViewGrid(QtWidgets.QWidget):
                 yield w
 
 # ---------------------------------------------------------------------------
-# Overlay view: simple drag-to-layer
+# Overlay view: stack multiple layers with per-layer controls
 # ---------------------------------------------------------------------------
+class OverlayLayer(QtCore.QObject):
+    def __init__(self, view: "OverlayView", title: str, data: np.ndarray, rect: QtCore.QRectF | None):
+        super().__init__(view)
+        self.view = view
+        self.title = title
+        self.base_data = np.asarray(data, float)
+        self.processed_data = np.array(self.base_data, copy=True)
+        self.rect = rect
+        self.image_item = pg.ImageItem()
+        self.image_item.setImage(self.processed_data, autoLevels=False)
+        if rect is not None:
+            try:
+                self.image_item.setRect(rect)
+            except Exception:
+                pass
+        self.image_item.setOpacity(1.0)
+        self.image_item.setVisible(True)
+        self._levels = self._compute_levels(self.processed_data)
+        try:
+            self.image_item.setLevels(self._levels)
+        except Exception:
+            pass
+        self.colormap_name = "viridis"
+        self.visible = True
+        self.opacity = 1.0
+        self.current_processing = "none"
+        self.processing_params: dict = {}
+        self.widget: Optional["OverlayLayerWidget"] = None
+        self.set_colormap(self.colormap_name)
+
+    # ---------- helpers ----------
+    def _compute_levels(self, data: np.ndarray) -> Tuple[float, float]:
+        data = np.asarray(data, float)
+        finite = np.isfinite(data)
+        if not finite.any():
+            return (0.0, 1.0)
+        vals = data[finite]
+        try:
+            lo = float(np.nanmin(vals))
+            hi = float(np.nanmax(vals))
+        except Exception:
+            lo, hi = 0.0, 1.0
+        if not np.isfinite(lo):
+            lo = 0.0
+        if not np.isfinite(hi):
+            hi = 1.0
+        if hi == lo:
+            hi = lo + 1.0
+        return (lo, hi)
+
+    def set_widget(self, widget: "OverlayLayerWidget"):
+        self.widget = widget
+        widget.update_from_layer()
+
+    # ---------- layer controls ----------
+    def set_visible(self, on: bool):
+        self.visible = bool(on)
+        try:
+            self.image_item.setVisible(self.visible)
+        except Exception:
+            pass
+
+    def set_opacity(self, alpha: float):
+        alpha = float(np.clip(alpha, 0.0, 1.0))
+        self.opacity = alpha
+        try:
+            self.image_item.setOpacity(alpha)
+        except Exception:
+            pass
+        if self.widget:
+            self.widget.update_opacity_label(alpha)
+
+    def set_colormap(self, name: str):
+        self.colormap_name = name or "viridis"
+        try:
+            cmap = pg.colormap.get(self.colormap_name)
+            if hasattr(cmap, "getLookupTable"):
+                lut = cmap.getLookupTable(0.0, 1.0, 256)
+                self.image_item.setLookupTable(lut)
+        except Exception:
+            pass
+
+    def set_levels(self, lo: float, hi: float, *, update_widget: bool = True):
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            return
+        if hi <= lo:
+            hi = lo + max(abs(lo) * 1e-6, 1e-6)
+        self._levels = (float(lo), float(hi))
+        try:
+            self.image_item.setLevels(self._levels)
+        except Exception:
+            pass
+        if update_widget and self.widget:
+            self.widget.update_level_spins(self._levels[0], self._levels[1])
+
+    def auto_levels(self):
+        lo, hi = self._compute_levels(self.processed_data)
+        self.set_levels(lo, hi, update_widget=True)
+
+    def apply_processing(self, mode: str, params: dict):
+        data = np.asarray(self.base_data, float)
+        mode = mode or "none"
+        try:
+            if mode == "gaussian":
+                sigma = float(max(params.get("sigma", 1.0), 0.0))
+                data = gaussian_blur(data, sigma=sigma)
+            elif mode == "median":
+                ksize = int(max(params.get("ksize", 3), 1))
+                if ksize % 2 == 0:
+                    ksize += 1
+                data = median_filter(data, ksize=ksize)
+            elif mode == "poly":
+                ox = int(max(params.get("order_x", 2), 0))
+                oy = int(max(params.get("order_y", 2), 0))
+                data = poly2d_detrend(data, order_x=ox, order_y=oy)
+            elif mode == "butterworth":
+                cutoff = float(params.get("cutoff", 0.1))
+                order = int(max(params.get("order", 3), 1))
+                btype = params.get("btype", "low") or "low"
+                data = butterworth(data, cutoff=cutoff, order=order, btype=btype)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self.view, "Processing failed", str(e))
+            return
+
+        self.current_processing = mode
+        self.processing_params = dict(params)
+        self.processed_data = np.asarray(data, float)
+        try:
+            self.image_item.setImage(self.processed_data, autoLevels=False)
+        except Exception:
+            pass
+        self.auto_levels()
+
+    def get_display_rect(self):
+        rect = self.rect
+        if rect is None:
+            try:
+                rect = self.image_item.mapRectToParent(self.image_item.boundingRect())
+            except Exception:
+                rect = None
+        return rect
+
+
+class OverlayLayerWidget(QtWidgets.QGroupBox):
+    def __init__(self, view: "OverlayView", layer: OverlayLayer):
+        super().__init__(layer.title)
+        self.view = view
+        self.layer = layer
+        self._ready = False
+
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setSpacing(6)
+
+        # Visibility / remove
+        header = QtWidgets.QHBoxLayout()
+        self.chk_visible = QtWidgets.QCheckBox("Visible")
+        self.chk_visible.setChecked(True)
+        self.chk_visible.toggled.connect(self._on_visibility)
+        header.addWidget(self.chk_visible)
+        header.addStretch(1)
+        self.btn_remove = QtWidgets.QToolButton()
+        self.btn_remove.setText("✕")
+        self.btn_remove.setToolTip("Remove layer")
+        self.btn_remove.clicked.connect(self._on_remove)
+        header.addWidget(self.btn_remove)
+        lay.addLayout(header)
+
+        # Colormap selection
+        cmap_row = QtWidgets.QHBoxLayout()
+        cmap_row.addWidget(QtWidgets.QLabel("Colormap:"))
+        self.cmb_colormap = QtWidgets.QComboBox()
+        try:
+            cmaps = sorted(pg.colormap.listMaps())
+        except Exception:
+            cmaps = ["viridis", "plasma", "magma", "cividis", "gray"]
+        for name in cmaps:
+            self.cmb_colormap.addItem(name)
+        self.cmb_colormap.currentTextChanged.connect(self._on_colormap)
+        cmap_row.addWidget(self.cmb_colormap, 1)
+        lay.addLayout(cmap_row)
+
+        # Levels controls
+        lvl_row = QtWidgets.QHBoxLayout()
+        lvl_row.addWidget(QtWidgets.QLabel("Levels:"))
+        self.spin_min = QtWidgets.QDoubleSpinBox()
+        self.spin_min.setDecimals(6)
+        self.spin_min.setRange(-1e12, 1e12)
+        self.spin_min.valueChanged.connect(self._on_levels_changed)
+        lvl_row.addWidget(self.spin_min)
+        lvl_row.addWidget(QtWidgets.QLabel("→"))
+        self.spin_max = QtWidgets.QDoubleSpinBox()
+        self.spin_max.setDecimals(6)
+        self.spin_max.setRange(-1e12, 1e12)
+        self.spin_max.valueChanged.connect(self._on_levels_changed)
+        lvl_row.addWidget(self.spin_max)
+        self.btn_autoscale = QtWidgets.QPushButton("Auto")
+        self.btn_autoscale.clicked.connect(self._on_autoscale)
+        lvl_row.addWidget(self.btn_autoscale)
+        lay.addLayout(lvl_row)
+
+        # Opacity slider
+        opacity_row = QtWidgets.QHBoxLayout()
+        opacity_row.addWidget(QtWidgets.QLabel("Opacity:"))
+        self.sld_opacity = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.sld_opacity.setRange(0, 100)
+        self.sld_opacity.setValue(100)
+        self.sld_opacity.valueChanged.connect(self._on_opacity)
+        opacity_row.addWidget(self.sld_opacity, 1)
+        self.lbl_opacity = QtWidgets.QLabel("100%")
+        opacity_row.addWidget(self.lbl_opacity)
+        lay.addLayout(opacity_row)
+
+        # Processing controls
+        proc_box = QtWidgets.QGroupBox("Processing")
+        proc_layout = QtWidgets.QVBoxLayout(proc_box)
+        proc_layout.setContentsMargins(6, 6, 6, 6)
+        proc_layout.setSpacing(4)
+
+        proc_row = QtWidgets.QHBoxLayout()
+        proc_row.addWidget(QtWidgets.QLabel("Operation:"))
+        self.cmb_processing = QtWidgets.QComboBox()
+        self.cmb_processing.addItem("None", "none")
+        self.cmb_processing.addItem("Gaussian blur", "gaussian")
+        self.cmb_processing.addItem("Median filter", "median")
+        self.cmb_processing.addItem("Poly detrend", "poly")
+        self.cmb_processing.addItem("Butterworth", "butterworth")
+        self.cmb_processing.currentIndexChanged.connect(self._on_processing_mode_changed)
+        proc_row.addWidget(self.cmb_processing, 1)
+        proc_layout.addLayout(proc_row)
+
+        self.param_stack = QtWidgets.QStackedWidget()
+        # None
+        self.param_stack.addWidget(QtWidgets.QWidget())
+        # Gaussian
+        gauss_widget = QtWidgets.QWidget()
+        gauss_layout = QtWidgets.QFormLayout(gauss_widget)
+        self.spin_sigma = QtWidgets.QDoubleSpinBox()
+        self.spin_sigma.setDecimals(2)
+        self.spin_sigma.setRange(0.1, 50.0)
+        self.spin_sigma.setSingleStep(0.1)
+        self.spin_sigma.setValue(1.0)
+        self.spin_sigma.valueChanged.connect(self._on_processing_params_changed)
+        gauss_layout.addRow("Sigma", self.spin_sigma)
+        self.param_stack.addWidget(gauss_widget)
+        # Median
+        median_widget = QtWidgets.QWidget()
+        median_layout = QtWidgets.QFormLayout(median_widget)
+        self.spin_kernel = QtWidgets.QSpinBox()
+        self.spin_kernel.setRange(1, 99)
+        self.spin_kernel.setSingleStep(2)
+        self.spin_kernel.setValue(3)
+        self.spin_kernel.valueChanged.connect(self._on_processing_params_changed)
+        median_layout.addRow("Kernel", self.spin_kernel)
+        self.param_stack.addWidget(median_widget)
+        # Poly detrend
+        poly_widget = QtWidgets.QWidget()
+        poly_layout = QtWidgets.QFormLayout(poly_widget)
+        self.spin_order_x = QtWidgets.QSpinBox(); self.spin_order_x.setRange(0, 6); self.spin_order_x.setValue(2)
+        self.spin_order_y = QtWidgets.QSpinBox(); self.spin_order_y.setRange(0, 6); self.spin_order_y.setValue(2)
+        self.spin_order_x.valueChanged.connect(self._on_processing_params_changed)
+        self.spin_order_y.valueChanged.connect(self._on_processing_params_changed)
+        poly_layout.addRow("Order X", self.spin_order_x)
+        poly_layout.addRow("Order Y", self.spin_order_y)
+        self.param_stack.addWidget(poly_widget)
+        # Butterworth
+        bw_widget = QtWidgets.QWidget()
+        bw_layout = QtWidgets.QFormLayout(bw_widget)
+        self.spin_cutoff = QtWidgets.QDoubleSpinBox(); self.spin_cutoff.setDecimals(3); self.spin_cutoff.setRange(0.001, 0.5); self.spin_cutoff.setSingleStep(0.01); self.spin_cutoff.setValue(0.1)
+        self.spin_bw_order = QtWidgets.QSpinBox(); self.spin_bw_order.setRange(1, 10); self.spin_bw_order.setValue(3)
+        self.spin_cutoff.valueChanged.connect(self._on_processing_params_changed)
+        self.spin_bw_order.valueChanged.connect(self._on_processing_params_changed)
+        bw_layout.addRow("Cutoff", self.spin_cutoff)
+        bw_layout.addRow("Order", self.spin_bw_order)
+        self.param_stack.addWidget(bw_widget)
+
+        proc_layout.addWidget(self.param_stack)
+        self.btn_apply = QtWidgets.QPushButton("Apply")
+        self.btn_apply.clicked.connect(self._apply_processing)
+        proc_layout.addWidget(self.btn_apply, alignment=QtCore.Qt.AlignRight)
+        lay.addWidget(proc_box)
+
+        self._ready = True
+        self._on_processing_mode_changed()
+
+    # ---------- UI helpers ----------
+    def update_from_layer(self):
+        self._ready = False
+        self.setTitle(self.layer.title)
+        self.chk_visible.setChecked(self.layer.visible)
+        self._set_colormap_selection(self.layer.colormap_name)
+        lo, hi = getattr(self.layer, "_levels", (0.0, 1.0))
+        self.update_level_spins(lo, hi)
+        self.update_opacity_label(self.layer.opacity)
+        self.sld_opacity.setValue(int(round(self.layer.opacity * 100)))
+        self.cmb_processing.setCurrentText(self._processing_label(self.layer.current_processing))
+        self._update_param_stack()
+        self._ready = True
+        self._apply_processing()
+
+    def _processing_label(self, mode: str) -> str:
+        mapping = {
+            "none": "None",
+            "gaussian": "Gaussian blur",
+            "median": "Median filter",
+            "poly": "Poly detrend",
+            "butterworth": "Butterworth",
+        }
+        return mapping.get(mode, "None")
+
+    def _set_colormap_selection(self, name: str):
+        idx = self.cmb_colormap.findText(name, QtCore.Qt.MatchFixedString)
+        if idx < 0:
+            idx = self.cmb_colormap.findText("viridis", QtCore.Qt.MatchFixedString)
+        if idx >= 0:
+            block = self.cmb_colormap.blockSignals(True)
+            self.cmb_colormap.setCurrentIndex(idx)
+            self.cmb_colormap.blockSignals(block)
+
+    def update_level_spins(self, lo: float, hi: float):
+        block = self.spin_min.blockSignals(True)
+        self.spin_min.setValue(float(lo))
+        self.spin_min.blockSignals(block)
+        block = self.spin_max.blockSignals(True)
+        self.spin_max.setValue(float(hi))
+        self.spin_max.blockSignals(block)
+
+    def update_opacity_label(self, alpha: float):
+        pct = int(round(float(alpha) * 100))
+        self.lbl_opacity.setText(f"{pct}%")
+
+    def processing_parameters(self) -> dict:
+        mode = self.current_processing()
+        if mode == "gaussian":
+            return {"sigma": self.spin_sigma.value()}
+        if mode == "median":
+            return {"ksize": self.spin_kernel.value()}
+        if mode == "poly":
+            return {"order_x": self.spin_order_x.value(), "order_y": self.spin_order_y.value()}
+        if mode == "butterworth":
+            return {"cutoff": self.spin_cutoff.value(), "order": self.spin_bw_order.value(), "btype": "low"}
+        return {}
+
+    def current_processing(self) -> str:
+        data = self.cmb_processing.currentData()
+        return data or "none"
+
+    # ---------- Slots ----------
+    def _on_visibility(self, on: bool):
+        self.layer.set_visible(on)
+        if on:
+            self.view.auto_view_range()
+
+    def _on_remove(self):
+        self.view.remove_layer(self.layer)
+
+    def _on_colormap(self, name: str):
+        if not self._ready:
+            return
+        self.layer.set_colormap(name)
+
+    def _on_levels_changed(self):
+        if not self._ready:
+            return
+        lo = self.spin_min.value()
+        hi = self.spin_max.value()
+        if hi <= lo:
+            hi = lo + max(abs(lo) * 1e-6, 1e-6)
+            block = self.spin_max.blockSignals(True)
+            self.spin_max.setValue(hi)
+            self.spin_max.blockSignals(block)
+        self.layer.set_levels(lo, hi, update_widget=False)
+
+    def _on_autoscale(self):
+        self.layer.auto_levels()
+
+    def _on_opacity(self, value: int):
+        alpha = float(value) / 100.0
+        self.layer.set_opacity(alpha)
+
+    def _on_processing_mode_changed(self):
+        self._update_param_stack()
+        self._apply_processing()
+
+    def _on_processing_params_changed(self, *_):
+        self._apply_processing()
+
+    def _apply_processing(self):
+        if not self._ready:
+            return
+        mode = self.current_processing()
+        params = self.processing_parameters()
+        self.layer.apply_processing(mode, params)
+
+    def _update_param_stack(self):
+        mode = self.current_processing()
+        mapping = {"none": 0, "gaussian": 1, "median": 2, "poly": 3, "butterworth": 4}
+        idx = mapping.get(mode, 0)
+        try:
+            self.param_stack.setCurrentIndex(idx)
+        except Exception:
+            pass
+
+
 class OverlayView(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        v = QtWidgets.QVBoxLayout(self); v.setContentsMargins(6,6,6,6)
-        self.glw = pg.GraphicsLayoutWidget(); v.addWidget(self.glw, 1)
-        self.plot = self.glw.addPlot(row=0, col=0); self.plot.invertY(True); self.plot.showGrid(x=False, y=False)
-        self.setAcceptDrops(True); self.layers: List[pg.ImageItem] = []
+        self.setAcceptDrops(True)
+        self.layers: List[OverlayLayer] = []
 
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        toolbar = QtWidgets.QHBoxLayout()
+        self.btn_auto_view = QtWidgets.QPushButton("Auto view")
+        self.btn_auto_view.clicked.connect(self.auto_view_range)
+        toolbar.addWidget(self.btn_auto_view)
+        self.btn_clear = QtWidgets.QPushButton("Clear layers")
+        self.btn_clear.clicked.connect(self.clear_layers)
+        toolbar.addWidget(self.btn_clear)
+        toolbar.addStretch(1)
+        layout.addLayout(toolbar)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        layout.addWidget(splitter, 1)
+
+        # Layer controls panel
+        panel = QtWidgets.QWidget()
+        panel_layout = QtWidgets.QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(6)
+
+        self.layer_scroll = QtWidgets.QScrollArea()
+        self.layer_scroll.setWidgetResizable(True)
+        self.layer_list_widget = QtWidgets.QWidget()
+        self.layer_list_layout = QtWidgets.QVBoxLayout(self.layer_list_widget)
+        self.layer_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.layer_list_layout.setSpacing(6)
+        self.layer_list_layout.addStretch(1)
+        self.layer_scroll.setWidget(self.layer_list_widget)
+        panel_layout.addWidget(self.layer_scroll, 1)
+
+        self.lbl_hint = QtWidgets.QLabel("Drag datasets here to overlay them.")
+        self.lbl_hint.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_hint.setWordWrap(True)
+        panel_layout.addWidget(self.lbl_hint)
+
+        splitter.addWidget(panel)
+
+        # Plot area
+        self.glw = pg.GraphicsLayoutWidget()
+        self.plot = self.glw.addPlot(row=0, col=0)
+        self.plot.invertY(True)
+        self.plot.showGrid(x=False, y=False)
+        self.plot.setLabel("left", "Y")
+        self.plot.setLabel("bottom", "X")
+        splitter.addWidget(self.glw)
+        splitter.setStretchFactor(1, 1)
+
+    # ---------- drag & drop ----------
     def dragEnterEvent(self, ev):
         ev.acceptProposedAction() if ev.mimeData().hasText() else ev.ignore()
 
     def dropEvent(self, ev):
         vr = VarRef.from_mime(ev.mimeData().text())
-        if not vr: ev.ignore(); return
+        if not vr:
+            ev.ignore()
+            return
         try:
             da, coords = vr.load()
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Load failed", str(e)); return
-        Z = np.asarray(da.values, float)
-        item = pg.ImageItem(); item.setImage(Z.T, autoLevels=True)
-        self.plot.addItem(item); self.layers.append(item)
+            QtWidgets.QMessageBox.warning(self, "Load failed", str(e))
+            return
+        data, rect = self._prepare_image(da, coords)
+        layer = OverlayLayer(self, f"{vr.path.name}:{vr.var}", data, rect)
+        self.plot.addItem(layer.image_item)
+        widget = OverlayLayerWidget(self, layer)
+        layer.set_widget(widget)
+        self.layers.append(layer)
+        self._insert_layer_widget(widget)
+        self._update_hint()
+        self.auto_view_range()
         ev.acceptProposedAction()
+
+    # ---------- layer management ----------
+    def _insert_layer_widget(self, widget: OverlayLayerWidget):
+        stretch = self.layer_list_layout.itemAt(self.layer_list_layout.count() - 1)
+        if stretch and stretch.spacerItem():
+            self.layer_list_layout.insertWidget(self.layer_list_layout.count() - 1, widget)
+        else:
+            self.layer_list_layout.addWidget(widget)
+
+    def remove_layer(self, layer: OverlayLayer):
+        if layer in self.layers:
+            self.layers.remove(layer)
+        try:
+            self.plot.removeItem(layer.image_item)
+        except Exception:
+            pass
+        if layer.widget:
+            w = layer.widget
+            layer.widget = None
+            w.setParent(None)
+            w.deleteLater()
+        self._update_hint()
+        self.auto_view_range()
+
+    def clear_layers(self):
+        for layer in list(self.layers):
+            self.remove_layer(layer)
+
+    def auto_view_range(self):
+        rects = []
+        for layer in self.layers:
+            if not layer.visible:
+                continue
+            rect = layer.get_display_rect()
+            if rect is None or rect.isNull():
+                continue
+            rects.append(rect)
+        if not rects:
+            return
+        union = rects[0]
+        for r in rects[1:]:
+            try:
+                union = union.united(r)
+            except Exception:
+                pass
+        try:
+            self.plot.vb.setRange(rect=union, padding=0.0)
+        except Exception:
+            pass
+
+    def _update_hint(self):
+        self.lbl_hint.setVisible(not self.layers)
+
+    # ---------- data prep ----------
+    def _prepare_image(self, da, coords):
+        Z = np.asarray(da.values, float)
+        if "X" in coords and "Y" in coords:
+            return self._resample_warped(coords["X"], coords["Y"], Z)
+        if "x" in coords and "y" in coords:
+            return self._resample_rectilinear(coords["x"], coords["y"], Z)
+        Ny, Nx = Z.shape
+        rect = self._rect_to_qrectf(0.0, float(Nx), 0.0, float(Ny))
+        return np.asarray(Z, float), rect
+
+    def _rect_to_qrectf(self, x0, x1, y0, y1):
+        from PySide2.QtCore import QRectF
+        return QRectF(float(x0), float(y0), float(x1 - x0), float(y1 - y0))
+
+    def _resample_rectilinear(self, x1, y1, Z):
+        x1 = np.asarray(x1, float)
+        y1 = np.asarray(y1, float)
+        Z = np.asarray(Z, float)
+        Ny, Nx = Z.shape
+        xs = np.argsort(x1)
+        ys = np.argsort(y1)
+        x_sorted = x1[xs]
+        y_sorted = y1[ys]
+        Zs = Z[np.ix_(ys, xs)]
+        x_uni = np.linspace(x_sorted[0], x_sorted[-1], Nx)
+        y_uni = np.linspace(y_sorted[0], y_sorted[-1], Ny)
+        Zx = np.empty((Ny, Nx), float)
+        for i in range(Ny):
+            Zx[i, :] = np.interp(x_uni, x_sorted, Zs[i, :], left=np.nan, right=np.nan)
+        Zu = np.empty((Ny, Nx), float)
+        for j in range(Nx):
+            col = Zx[:, j]
+            m = np.isfinite(col)
+            if m.sum() >= 2:
+                Zu[:, j] = np.interp(y_uni, y_sorted[m], col[m], left=np.nan, right=np.nan)
+            else:
+                Zu[:, j] = np.nan
+        rect = self._rect_to_qrectf(x_uni[0], x_uni[-1], y_uni[0], y_uni[-1])
+        return Zu, rect
+
+    def _resample_warped(self, X, Y, Z):
+        try:
+            from scipy.interpolate import griddata
+        except Exception:
+            rect = self._rect_to_qrectf(0.0, float(Z.shape[1]), 0.0, float(Z.shape[0]))
+            return np.asarray(Z, float), rect
+        X = np.asarray(X, float)
+        Y = np.asarray(Y, float)
+        Z = np.asarray(Z, float)
+        Ny, Nx = Z.shape
+        xmin, xmax = np.nanmin(X), np.nanmax(X)
+        ymin, ymax = np.nanmin(Y), np.nanmax(Y)
+        x_t = np.linspace(xmin, xmax, Nx)
+        y_t = np.linspace(ymin, ymax, Ny)
+        XX, YY = np.meshgrid(x_t, y_t)
+        pts = np.column_stack([X.ravel(), Y.ravel()])
+        vals = Z.ravel()
+        Zu = griddata(pts, vals, (XX, YY), method="linear")
+        if np.isnan(Zu).any():
+            Zun = griddata(pts, vals, (XX, YY), method="nearest")
+            mask = np.isnan(Zu)
+            Zu[mask] = Zun[mask]
+        rect = self._rect_to_qrectf(x_t[0], x_t[-1], y_t[0], y_t[-1])
+        return np.asarray(Zu, float), rect
 
 
 # ---------------------------------------------------------------------------
