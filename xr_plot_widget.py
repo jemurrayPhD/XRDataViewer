@@ -59,6 +59,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
     sigInfoMessage = QtCore.Signal(str)
     sigLevelsChanged = QtCore.Signal(tuple)
     sigViewChanged = QtCore.Signal(tuple, tuple)
+    sigCursorMoved = QtCore.Signal(object, float, float, object, bool, str)
     def __init__(self, parent=None):
         super().__init__(parent)
         self.glw = pg.GraphicsLayoutWidget()
@@ -75,6 +76,8 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._hist_container = None
         self._block_levels_emit = False
         self._block_view_emit = False
+        self._last_data = None
+        self._last_rect = None
 
         lay = QtWidgets.QHBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.addWidget(self.glw)
         try:
@@ -100,6 +103,26 @@ class CentralPlotWidget(QtWidgets.QWidget):
 
         # sample grid items (on main plot)
         self._grid_items = []
+
+        # crosshair overlay
+        cross_pen = pg.mkPen((255, 230, 150, 200), width=1)
+        mirror_pen = pg.mkPen((120, 210, 255, 200), width=1)
+        self._crosshair_pen = cross_pen
+        self._crosshair_pen_mirror = mirror_pen
+        self._crosshair_v = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
+        self._crosshair_h = pg.InfiniteLine(angle=0, movable=False, pen=cross_pen)
+        self._crosshair_label = pg.TextItem(color=(255, 255, 220), anchor=(0.0, 1.0))
+        for it in (self._crosshair_v, self._crosshair_h):
+            self.plot.addItem(it, ignoreBounds=True)
+            it.setVisible(False)
+        self.plot.addItem(self._crosshair_label)
+        self._crosshair_label.setVisible(False)
+        self._crosshair_is_mirrored = False
+
+        try:
+            self.plot.scene().sigMouseMoved.connect(self._on_scene_mouse_moved)
+        except Exception:
+            pass
 
     # ---------- public API ----------
     def set_labels(self, xlabel: str = "X", ylabel: str = "Y"):
@@ -206,6 +229,11 @@ class CentralPlotWidget(QtWidgets.QWidget):
                 Ny, Nx = Z.shape; rect = QRectF(0.0, 0.0, float(Nx), float(Ny))
             self.img_item.setRect(rect)
         except Exception: pass
+        self._last_data = np.asarray(Z, float)
+        try:
+            self._last_rect = rect
+        except Exception:
+            self._last_rect = None
         if autorange: self.plot.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
 
     def set_rectilinear(self, x1: np.ndarray, y1: np.ndarray, Z: np.ndarray, autorange: bool = True):
@@ -246,6 +274,111 @@ class CentralPlotWidget(QtWidgets.QWidget):
             try: self.plot.removeItem(it)
             except Exception: pass
         self._grid_items = []
+
+    def show_crosshair(self, x: float, y: float, value=None, *, mirrored: bool = False, label: str | None = None):
+        try:
+            self._crosshair_v.setPen(self._crosshair_pen_mirror if mirrored else self._crosshair_pen)
+            self._crosshair_h.setPen(self._crosshair_pen_mirror if mirrored else self._crosshair_pen)
+            self._crosshair_v.setPos(float(x))
+            self._crosshair_h.setPos(float(y))
+        except Exception:
+            return
+        if label is None:
+            label = self._format_crosshair_text(x, y, value)
+        if mirrored:
+            self._crosshair_label.setColor((185, 235, 255))
+            self._crosshair_label.setAnchor((1.0, 0.0))
+            self._crosshair_label.setPos(float(x), float(y))
+        else:
+            self._crosshair_label.setColor((255, 255, 220))
+            self._crosshair_label.setAnchor((0.0, 1.0))
+            self._crosshair_label.setPos(float(x), float(y))
+        self._crosshair_label.setText(label)
+        self._crosshair_is_mirrored = bool(mirrored)
+        self._crosshair_v.setVisible(True)
+        self._crosshair_h.setVisible(True)
+        self._crosshair_label.setVisible(True)
+
+    def hide_crosshair(self):
+        for it in (self._crosshair_v, self._crosshair_h):
+            try:
+                it.setVisible(False)
+            except Exception:
+                pass
+        try:
+            self._crosshair_label.setVisible(False)
+        except Exception:
+            pass
+        self._crosshair_is_mirrored = False
+
+    def clear_mirrored_crosshair(self):
+        if self._crosshair_is_mirrored:
+            self.hide_crosshair()
+
+    def _format_crosshair_text(self, x, y, value):
+        def fmt(val):
+            if val is None:
+                return "—"
+            try:
+                if isinstance(val, (float, int, np.floating, np.integer)):
+                    if np.isnan(val):
+                        return "nan"
+                    return f"{float(val):.4g}"
+            except Exception:
+                pass
+            return str(val)
+        return f"x={fmt(x)}\ny={fmt(y)}\nvalue={fmt(value)}"
+
+    def _value_at(self, x: float, y: float):
+        data = self._last_data
+        rect = self._last_rect
+        if data is None or rect is None:
+            return None
+        try:
+            x0 = float(rect.left()); y0 = float(rect.top())
+            w = float(rect.width()); h = float(rect.height())
+        except Exception:
+            return None
+        if w == 0 or h == 0:
+            return None
+        Ny, Nx = data.shape
+        fx = (x - x0) / w * Nx
+        fy = (y - y0) / h * Ny
+        if fx < 0 or fx >= Nx or fy < 0 or fy >= Ny:
+            return None
+        try:
+            ix = int(np.clip(np.floor(fx + 0.5), 0, Nx - 1))
+            iy = int(np.clip(np.floor(fy + 0.5), 0, Ny - 1))
+            return data[iy, ix]
+        except Exception:
+            return None
+
+    def _on_scene_mouse_moved(self, pos):
+        try:
+            scene_rect = self.plot.sceneBoundingRect()
+        except Exception:
+            scene_rect = None
+        inside = bool(scene_rect and scene_rect.contains(pos))
+        if not inside:
+            self.hide_crosshair()
+            try:
+                self.sigCursorMoved.emit(self, float("nan"), float("nan"), None, False, "")
+            except Exception:
+                pass
+            return
+        try:
+            mouse_point = self.plot.vb.mapSceneToView(pos)
+        except Exception:
+            return
+        x = float(mouse_point.x())
+        y = float(mouse_point.y())
+        value = self._value_at(x, y)
+        label = self._format_crosshair_text(x, y, value)
+        self.show_crosshair(x, y, value, mirrored=False, label=label)
+        try:
+            self.sigCursorMoved.emit(self, x, y, value, True, label)
+        except Exception:
+            pass
 
     # ---------- resampling helpers ----------
     def _rect_to_qrectf(self, x0, x1, y0, y1):

@@ -234,6 +234,11 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.chk_link_panzoom.toggled.connect(self._on_link_panzoom_toggled)
         bar.addWidget(self.chk_link_panzoom)
 
+        self.chk_cursor_mirror = QtWidgets.QCheckBox("Mirror cursor")
+        self.chk_cursor_mirror.setChecked(False)
+        self.chk_cursor_mirror.toggled.connect(self._on_link_cursor_toggled)
+        bar.addWidget(self.chk_cursor_mirror)
+
         self.btn_autoscale = QtWidgets.QPushButton("Autoscale colors")
         self.btn_autoscale.clicked.connect(self._autoscale_colors)
         bar.addWidget(self.btn_autoscale)
@@ -260,6 +265,7 @@ class MultiViewGrid(QtWidgets.QWidget):
 
         self._level_handlers = {}
         self._view_handlers = {}
+        self._cursor_handlers = {}
         self._syncing_levels = False
         self._syncing_views = False
 
@@ -355,6 +361,12 @@ class MultiViewGrid(QtWidgets.QWidget):
                 self._view_handlers[viewer] = handler
             except Exception:
                 self._view_handlers.pop(viewer, None)
+        if viewer not in self._cursor_handlers:
+            try:
+                viewer.sigCursorMoved.connect(self._viewer_cursor_moved)
+                self._cursor_handlers[viewer] = True
+            except Exception:
+                self._cursor_handlers.pop(viewer, None)
 
     def _disconnect_frame_signals(self, fr: ViewerFrame):
         viewer = getattr(fr, "viewer", None)
@@ -372,6 +384,16 @@ class MultiViewGrid(QtWidgets.QWidget):
                 viewer.sigViewChanged.disconnect(handler)
             except Exception:
                 pass
+        if viewer in self._cursor_handlers:
+            try:
+                viewer.sigCursorMoved.disconnect(self._viewer_cursor_moved)
+            except Exception:
+                pass
+            self._cursor_handlers.pop(viewer, None)
+        try:
+            viewer.clear_mirrored_crosshair()
+        except Exception:
+            pass
 
     def _viewer_levels_changed(self, viewer, levels):
         if not self.chk_link_levels.isChecked() or self._syncing_levels:
@@ -411,6 +433,10 @@ class MultiViewGrid(QtWidgets.QWidget):
         if on:
             self._sync_all_views()
 
+    def _on_link_cursor_toggled(self, on: bool):
+        if not on:
+            self._clear_mirrored_crosshairs()
+
     def _sync_all_levels(self):
         if not self.frames:
             return
@@ -440,6 +466,29 @@ class MultiViewGrid(QtWidgets.QWidget):
                 fr.viewer.set_view_range(xr=xr, yr=yr)
         finally:
             self._syncing_views = False
+
+    def _viewer_cursor_moved(self, viewer, x, y, value, inside, label):
+        if not inside or not self.chk_cursor_mirror.isChecked():
+            self._clear_mirrored_crosshairs(exclude=viewer)
+            return
+        for fr in self.frames:
+            other = fr.viewer
+            if other is viewer:
+                continue
+            try:
+                other.show_crosshair(x, y, value=value, mirrored=True, label=label)
+            except Exception:
+                pass
+
+    def _clear_mirrored_crosshairs(self, exclude=None):
+        for fr in self.frames:
+            viewer = fr.viewer
+            if exclude is not None and viewer is exclude:
+                continue
+            try:
+                viewer.clear_mirrored_crosshair()
+            except Exception:
+                pass
 
     def _sync_new_frame_to_links(self, fr: ViewerFrame):
         others = [f for f in self.frames if f is not fr]
