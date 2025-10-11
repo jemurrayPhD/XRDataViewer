@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 from functools import partial
 
 import numpy as np
@@ -15,7 +15,15 @@ import pyqtgraph as pg
 
 from xr_plot_widget import CentralPlotWidget
 from xr_coords import guess_phys_coords
-from data_processing import poly2d_detrend, gaussian_blur, median_filter, butterworth
+from data_processing import (
+    ParameterDefinition,
+    ProcessingPipeline,
+    ProcessingStep,
+    apply_processing_step,
+    get_processing_function,
+    list_processing_functions,
+    summarize_parameters,
+)
 
 # ---------------------------------------------------------------------------
 # Helper: open_dataset
@@ -61,6 +69,752 @@ class VarRef(QtCore.QObject):
         coords = guess_phys_coords(da)
         return da, coords
 
+
+# ---------------------------------------------------------------------------
+# Parameter editing helpers
+# ---------------------------------------------------------------------------
+
+
+class ParameterForm(QtWidgets.QWidget):
+    parametersChanged = QtCore.Signal()
+
+    def __init__(self, parameters: Iterable[ParameterDefinition], parent=None):
+        super().__init__(parent)
+        self._definitions = list(parameters)
+        self._widgets: Dict[str, QtWidgets.QWidget] = {}
+
+        layout = QtWidgets.QFormLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        if not self._definitions:
+            lbl = QtWidgets.QLabel("No parameters")
+            lbl.setAlignment(QtCore.Qt.AlignCenter)
+            layout.addRow(lbl)
+            return
+
+        for definition in self._definitions:
+            widget: Optional[QtWidgets.QWidget] = None
+            if definition.kind == "float":
+                spin = QtWidgets.QDoubleSpinBox()
+                spin.setDecimals(6)
+                lo = float(definition.minimum) if definition.minimum is not None else -1e9
+                hi = float(definition.maximum) if definition.maximum is not None else 1e9
+                spin.setRange(lo, hi)
+                if definition.step is not None:
+                    spin.setSingleStep(float(definition.step))
+                spin.setValue(float(definition.default))
+                spin.valueChanged.connect(lambda *_: self.parametersChanged.emit())
+                widget = spin
+            elif definition.kind == "int":
+                spin_i = QtWidgets.QSpinBox()
+                lo = int(definition.minimum) if definition.minimum is not None else -1_000_000
+                hi = int(definition.maximum) if definition.maximum is not None else 1_000_000
+                spin_i.setRange(lo, hi)
+                if definition.step is not None:
+                    spin_i.setSingleStep(int(definition.step))
+                spin_i.setValue(int(definition.default))
+                spin_i.valueChanged.connect(lambda *_: self.parametersChanged.emit())
+                widget = spin_i
+            elif definition.kind == "enum":
+                combo = QtWidgets.QComboBox()
+                if definition.choices:
+                    for label, value in definition.choices:
+                        combo.addItem(label, value)
+                combo.setCurrentIndex(max(combo.findData(definition.default), 0))
+                combo.currentIndexChanged.connect(lambda *_: self.parametersChanged.emit())
+                widget = combo
+            else:
+                line = QtWidgets.QLineEdit(str(definition.default))
+                line.textChanged.connect(lambda *_: self.parametersChanged.emit())
+                widget = line
+
+            self._widgets[definition.name] = widget
+            layout.addRow(definition.label, widget)
+
+    def values(self) -> Dict[str, object]:
+        values: Dict[str, object] = {}
+        for definition in self._definitions:
+            widget = self._widgets.get(definition.name)
+            if widget is None:
+                continue
+            if isinstance(widget, QtWidgets.QDoubleSpinBox):
+                values[definition.name] = float(widget.value())
+            elif isinstance(widget, QtWidgets.QSpinBox):
+                values[definition.name] = int(widget.value())
+            elif isinstance(widget, QtWidgets.QComboBox):
+                data = widget.currentData()
+                values[definition.name] = data if data is not None else widget.currentText()
+            elif isinstance(widget, QtWidgets.QLineEdit):
+                values[definition.name] = widget.text()
+        return values
+
+    def set_values(self, params: Dict[str, object]):
+        for definition in self._definitions:
+            widget = self._widgets.get(definition.name)
+            if widget is None:
+                continue
+            value = params.get(definition.name, definition.default)
+            block = widget.blockSignals(True)
+            try:
+                if isinstance(widget, QtWidgets.QDoubleSpinBox):
+                    widget.setValue(float(value))
+                elif isinstance(widget, QtWidgets.QSpinBox):
+                    widget.setValue(int(value))
+                elif isinstance(widget, QtWidgets.QComboBox):
+                    idx = widget.findData(value)
+                    if idx < 0:
+                        idx = widget.findText(str(value))
+                    widget.setCurrentIndex(max(idx, 0))
+                elif isinstance(widget, QtWidgets.QLineEdit):
+                    widget.setText(str(value))
+            finally:
+                widget.blockSignals(block)
+
+
+# ---------------------------------------------------------------------------
+# Processing manager and dialogs
+# ---------------------------------------------------------------------------
+
+
+class ProcessingManager(QtCore.QObject):
+    pipelines_changed = QtCore.Signal()
+
+    def __init__(self):
+        super().__init__()
+        self._pipelines: Dict[str, ProcessingPipeline] = {}
+
+    def list_pipelines(self) -> List[ProcessingPipeline]:
+        return [self._clone_pipeline(p) for p in self._pipelines.values()]
+
+    def pipeline_names(self) -> List[str]:
+        return sorted(self._pipelines.keys())
+
+    def get_pipeline(self, name: str) -> Optional[ProcessingPipeline]:
+        if name not in self._pipelines:
+            return None
+        return self._clone_pipeline(self._pipelines[name])
+
+    def save_pipeline(self, pipeline: ProcessingPipeline):
+        name = pipeline.name.strip()
+        if not name:
+            raise ValueError("Pipeline name cannot be empty")
+        self._pipelines[name] = self._clone_pipeline(pipeline)
+        self.pipelines_changed.emit()
+
+    def delete_pipeline(self, name: str):
+        if name in self._pipelines:
+            del self._pipelines[name]
+            self.pipelines_changed.emit()
+
+    def _clone_pipeline(self, pipeline: ProcessingPipeline) -> ProcessingPipeline:
+        return ProcessingPipeline(
+            name=pipeline.name,
+            steps=[ProcessingStep(step.key, dict(step.params)) for step in pipeline.steps],
+        )
+
+
+class PipelineEditorDialog(QtWidgets.QDialog):
+    def __init__(self, manager: ProcessingManager, pipeline: ProcessingPipeline, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.pipeline = ProcessingPipeline(
+            name=pipeline.name,
+            steps=[ProcessingStep(step.key, dict(step.params)) for step in pipeline.steps],
+        )
+        self._raw_data: Optional[np.ndarray] = None
+        self.setWindowTitle(f"Edit Pipeline – {self.pipeline.name or 'Untitled'}")
+        self.resize(800, 700)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        top_row = QtWidgets.QHBoxLayout()
+        self.lbl_data = QtWidgets.QLabel("No data loaded")
+        self.lbl_data.setStyleSheet("color: #555;")
+        top_row.addWidget(self.lbl_data, 1)
+        self.btn_load_data = QtWidgets.QPushButton("Load data…")
+        self.btn_load_data.clicked.connect(self._load_data)
+        top_row.addWidget(self.btn_load_data, 0)
+        layout.addLayout(top_row)
+
+        self.image_view = pg.ImageView()
+        try:
+            self.image_view.getView().invertY(True)
+        except Exception:
+            pass
+        layout.addWidget(self.image_view, 2)
+
+        self.steps_scroll = QtWidgets.QScrollArea()
+        self.steps_scroll.setWidgetResizable(True)
+        self.steps_container = QtWidgets.QWidget()
+        self.steps_layout = QtWidgets.QVBoxLayout(self.steps_container)
+        self.steps_layout.setContentsMargins(0, 0, 0, 0)
+        self.steps_layout.setSpacing(8)
+        self.steps_scroll.setWidget(self.steps_container)
+        layout.addWidget(self.steps_scroll, 1)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._forms: List[tuple[ProcessingStep, ParameterForm]] = []
+        self._rebuild_forms()
+
+    # ----- helpers -----
+    def result_pipeline(self) -> ProcessingPipeline:
+        return ProcessingPipeline(
+            name=self.pipeline.name,
+            steps=[ProcessingStep(step.key, dict(step.params)) for step in self.pipeline.steps],
+        )
+
+    def _rebuild_forms(self):
+        while self.steps_layout.count():
+            item = self.steps_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self._forms.clear()
+
+        if not self.pipeline.steps:
+            lbl = QtWidgets.QLabel("Pipeline has no steps.")
+            lbl.setAlignment(QtCore.Qt.AlignCenter)
+            lbl.setStyleSheet("color: #777;")
+            self.steps_layout.addWidget(lbl)
+            return
+
+        for idx, step in enumerate(self.pipeline.steps, start=1):
+            spec = get_processing_function(step.key)
+            title = spec.label if spec else step.key
+            box = QtWidgets.QGroupBox(f"Step {idx}: {title}")
+            vbox = QtWidgets.QVBoxLayout(box)
+            if spec is None:
+                lbl = QtWidgets.QLabel("Unknown processing function")
+                lbl.setAlignment(QtCore.Qt.AlignLeft)
+                vbox.addWidget(lbl)
+            else:
+                form = ParameterForm(spec.parameters)
+                form.set_values(step.params)
+                form.parametersChanged.connect(self._on_parameters_changed)
+                vbox.addWidget(form)
+                self._forms.append((step, form))
+            self.steps_layout.addWidget(box)
+        self.steps_layout.addStretch(1)
+        self._apply_pipeline()
+
+    def _update_steps_from_forms(self):
+        for step, form in self._forms:
+            step.params = form.values()
+
+    def _apply_pipeline(self):
+        if self._raw_data is None:
+            return
+        data = np.asarray(self._raw_data, float)
+        try:
+            for step in self.pipeline.steps:
+                data = apply_processing_step(step.key, data, step.params)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Processing failed", str(e))
+            return
+        try:
+            self.image_view.setImage(data, autoLevels=True)
+        except Exception:
+            pass
+
+    # ----- slots -----
+    def _on_parameters_changed(self):
+        self._update_steps_from_forms()
+        self._apply_pipeline()
+
+    def _load_data(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select dataset",
+            "",
+            "NetCDF / Zarr (*.nc *.zarr);;All files (*)",
+        )
+        if not path:
+            return
+        p = Path(path)
+        try:
+            ds = open_dataset(p)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Load failed", str(e))
+            return
+        choices = [var for var in ds.data_vars if ds[var].ndim == 2]
+        if not choices:
+            QtWidgets.QMessageBox.information(self, "No 2D variables", "The dataset has no 2D variables to preview.")
+            return
+        var, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "Select variable",
+            "Variable:",
+            choices,
+            0,
+            False,
+        )
+        if not ok or not var:
+            return
+        da = ds[var]
+        self._raw_data = np.asarray(da.values, float)
+        self.lbl_data.setText(f"{p.name}:{var}")
+        try:
+            self.image_view.setImage(self._raw_data, autoLevels=True)
+        except Exception:
+            pass
+        self._apply_pipeline()
+
+# ---------------------------------------------------------------------------
+# Processing dock widget
+# ---------------------------------------------------------------------------
+
+
+class ProcessingDockWidget(QtWidgets.QGroupBox):
+    def __init__(self, manager: ProcessingManager, parent=None):
+        super().__init__("Processing Pipelines", parent)
+        self.manager = manager
+        self.steps: List[ProcessingStep] = []
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setSpacing(8)
+
+        # --- Step builder ---
+        builder = QtWidgets.QGroupBox("Build step")
+        builder_layout = QtWidgets.QVBoxLayout(builder)
+        builder_layout.setContentsMargins(6, 6, 6, 6)
+        builder_layout.setSpacing(6)
+
+        func_row = QtWidgets.QHBoxLayout()
+        func_row.addWidget(QtWidgets.QLabel("Function:"))
+        self.cmb_function = QtWidgets.QComboBox()
+        self.cmb_function.addItem("Select…", "")
+        self._stack_indices: Dict[str, int] = {}
+        self.param_stack = QtWidgets.QStackedWidget()
+        self.param_stack.addWidget(QtWidgets.QWidget())
+        for spec in list_processing_functions():
+            self.cmb_function.addItem(spec.label, spec.key)
+            form = ParameterForm(spec.parameters)
+            form.parametersChanged.connect(self._on_function_params_changed)
+            idx = self.param_stack.addWidget(form)
+            self._stack_indices[spec.key] = idx
+        self.cmb_function.currentIndexChanged.connect(self._on_function_changed)
+        func_row.addWidget(self.cmb_function, 1)
+        builder_layout.addLayout(func_row)
+        builder_layout.addWidget(self.param_stack)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_add_step = QtWidgets.QPushButton("Add step")
+        self.btn_add_step.clicked.connect(self._add_step)
+        btn_row.addWidget(self.btn_add_step)
+        self.btn_update_step = QtWidgets.QPushButton("Update selected")
+        self.btn_update_step.clicked.connect(self._update_step)
+        btn_row.addWidget(self.btn_update_step)
+        builder_layout.addLayout(btn_row)
+
+        outer.addWidget(builder)
+
+        # --- Steps list ---
+        self.list_steps = QtWidgets.QListWidget()
+        self.list_steps.currentRowChanged.connect(self._on_step_selected)
+        outer.addWidget(self.list_steps, 1)
+
+        step_btns = QtWidgets.QHBoxLayout()
+        self.btn_move_up = QtWidgets.QPushButton("Move up")
+        self.btn_move_up.clicked.connect(lambda: self._move_step(-1))
+        step_btns.addWidget(self.btn_move_up)
+        self.btn_move_down = QtWidgets.QPushButton("Move down")
+        self.btn_move_down.clicked.connect(lambda: self._move_step(1))
+        step_btns.addWidget(self.btn_move_down)
+        self.btn_remove_step = QtWidgets.QPushButton("Remove")
+        self.btn_remove_step.clicked.connect(self._remove_step)
+        step_btns.addWidget(self.btn_remove_step)
+        self.btn_clear_steps = QtWidgets.QPushButton("Clear")
+        self.btn_clear_steps.clicked.connect(self._clear_steps)
+        step_btns.addWidget(self.btn_clear_steps)
+        outer.addLayout(step_btns)
+
+        # --- Pipeline info ---
+        name_row = QtWidgets.QHBoxLayout()
+        name_row.addWidget(QtWidgets.QLabel("Pipeline name:"))
+        self.edit_name = QtWidgets.QLineEdit()
+        self.edit_name.textChanged.connect(lambda _: self._update_buttons())
+        name_row.addWidget(self.edit_name, 1)
+        outer.addLayout(name_row)
+
+        save_row = QtWidgets.QHBoxLayout()
+        self.btn_save_pipeline = QtWidgets.QPushButton("Save pipeline")
+        self.btn_save_pipeline.clicked.connect(self._save_pipeline)
+        save_row.addWidget(self.btn_save_pipeline)
+        self.btn_interactive = QtWidgets.QPushButton("Interactive edit…")
+        self.btn_interactive.clicked.connect(self._interactive_edit)
+        save_row.addWidget(self.btn_interactive)
+        outer.addLayout(save_row)
+
+        # --- Saved pipelines ---
+        saved_box = QtWidgets.QGroupBox("Saved pipelines")
+        saved_layout = QtWidgets.QVBoxLayout(saved_box)
+        saved_layout.setContentsMargins(6, 6, 6, 6)
+        saved_layout.setSpacing(6)
+        self.list_saved = QtWidgets.QListWidget()
+        self.list_saved.itemSelectionChanged.connect(self._update_buttons)
+        self.list_saved.itemDoubleClicked.connect(lambda _: self._load_saved())
+        saved_layout.addWidget(self.list_saved)
+
+        saved_btns = QtWidgets.QHBoxLayout()
+        self.btn_load_saved = QtWidgets.QPushButton("Load")
+        self.btn_load_saved.clicked.connect(self._load_saved)
+        saved_btns.addWidget(self.btn_load_saved)
+        self.btn_delete_saved = QtWidgets.QPushButton("Delete")
+        self.btn_delete_saved.clicked.connect(self._delete_saved)
+        saved_btns.addWidget(self.btn_delete_saved)
+        self.btn_export_saved = QtWidgets.QPushButton("Export…")
+        self.btn_export_saved.clicked.connect(self._export_saved)
+        saved_btns.addWidget(self.btn_export_saved)
+        self.btn_import_saved = QtWidgets.QPushButton("Import…")
+        self.btn_import_saved.clicked.connect(self._import_saved)
+        saved_btns.addWidget(self.btn_import_saved)
+        saved_layout.addLayout(saved_btns)
+
+        outer.addWidget(saved_box)
+        outer.addStretch(1)
+
+        self.manager.pipelines_changed.connect(self._refresh_saved)
+        self._refresh_saved()
+        self._update_buttons()
+
+    # ----- helpers -----
+    def _current_spec(self):
+        key = self.cmb_function.currentData()
+        if not key:
+            return None
+        return get_processing_function(str(key))
+
+    def _current_form(self) -> Optional[ParameterForm]:
+        key = self.cmb_function.currentData()
+        if not key:
+            return None
+        idx = self._stack_indices.get(str(key))
+        if idx is None:
+            return None
+        widget = self.param_stack.widget(idx)
+        return widget if isinstance(widget, ParameterForm) else None
+
+    def _selected_step_index(self) -> int:
+        return self.list_steps.currentRow()
+
+    def _selected_saved_name(self) -> Optional[str]:
+        items = self.list_saved.selectedItems()
+        if not items:
+            return None
+        return str(items[0].data(QtCore.Qt.UserRole) or items[0].text())
+
+    def _refresh_step_list(self):
+        self.list_steps.clear()
+        for step in self.steps:
+            spec = get_processing_function(step.key)
+            label = spec.label if spec else step.key
+            summary = summarize_parameters(step.key, step.params)
+            text = label
+            if summary:
+                text += f" ({summary})"
+            self.list_steps.addItem(text)
+        self._update_buttons()
+
+    def _set_function_selection(self, key: str):
+        block = self.cmb_function.blockSignals(True)
+        idx = self.cmb_function.findData(key)
+        if idx >= 0:
+            self.cmb_function.setCurrentIndex(idx)
+        self.cmb_function.blockSignals(block)
+        self._on_function_changed()
+
+    def _build_pipeline(self) -> ProcessingPipeline:
+        name = self.edit_name.text().strip() or "Untitled"
+        return ProcessingPipeline(name=name, steps=[ProcessingStep(step.key, dict(step.params)) for step in self.steps])
+
+    # ----- button state -----
+    def _update_buttons(self):
+        idx = self._selected_step_index()
+        has_selection = 0 <= idx < len(self.steps)
+        has_steps = bool(self.steps)
+        self.btn_update_step.setEnabled(has_selection)
+        self.btn_move_up.setEnabled(has_selection and idx > 0)
+        self.btn_move_down.setEnabled(has_selection and idx < len(self.steps) - 1)
+        self.btn_remove_step.setEnabled(has_selection)
+        self.btn_clear_steps.setEnabled(has_steps)
+        self.btn_interactive.setEnabled(has_steps)
+        self.btn_save_pipeline.setEnabled(has_steps and bool(self.edit_name.text().strip()))
+        has_saved = self._selected_saved_name() is not None
+        self.btn_load_saved.setEnabled(has_saved)
+        self.btn_delete_saved.setEnabled(has_saved)
+        self.btn_export_saved.setEnabled(has_saved)
+
+    # ----- slots -----
+    def _on_function_changed(self):
+        key = self.cmb_function.currentData()
+        if key and key in self._stack_indices:
+            self.param_stack.setCurrentIndex(self._stack_indices[str(key)])
+        else:
+            self.param_stack.setCurrentIndex(0)
+        self._update_buttons()
+
+    def _on_function_params_changed(self):
+        self._update_buttons()
+
+    def _add_step(self):
+        spec = self._current_spec()
+        form = self._current_form()
+        if spec is None or form is None:
+            return
+        self.steps.append(ProcessingStep(spec.key, form.values()))
+        self._refresh_step_list()
+        self.list_steps.setCurrentRow(len(self.steps) - 1)
+
+    def _update_step(self):
+        idx = self._selected_step_index()
+        spec = self._current_spec()
+        form = self._current_form()
+        if idx < 0 or idx >= len(self.steps) or spec is None or form is None:
+            return
+        self.steps[idx] = ProcessingStep(spec.key, form.values())
+        self._refresh_step_list()
+        self.list_steps.setCurrentRow(idx)
+
+    def _on_step_selected(self, index: int):
+        if index < 0 or index >= len(self.steps):
+            self._update_buttons()
+            return
+        step = self.steps[index]
+        self._set_function_selection(step.key)
+        form = self._current_form()
+        if form:
+            form.set_values(step.params)
+        self._update_buttons()
+
+    def _move_step(self, delta: int):
+        idx = self._selected_step_index()
+        new_idx = idx + delta
+        if idx < 0 or new_idx < 0 or new_idx >= len(self.steps):
+            return
+        self.steps[idx], self.steps[new_idx] = self.steps[new_idx], self.steps[idx]
+        self._refresh_step_list()
+        self.list_steps.setCurrentRow(new_idx)
+
+    def _remove_step(self):
+        idx = self._selected_step_index()
+        if idx < 0 or idx >= len(self.steps):
+            return
+        del self.steps[idx]
+        self._refresh_step_list()
+        if self.steps:
+            self.list_steps.setCurrentRow(min(idx, len(self.steps) - 1))
+
+    def _clear_steps(self):
+        if QtWidgets.QMessageBox.question(self, "Clear steps", "Remove all steps from the pipeline?") != QtWidgets.QMessageBox.Yes:
+            return
+        self.steps.clear()
+        self._refresh_step_list()
+
+    def _save_pipeline(self):
+        if not self.steps:
+            return
+        name = self.edit_name.text().strip()
+        if not name:
+            QtWidgets.QMessageBox.warning(self, "Missing name", "Please enter a name for the pipeline.")
+            return
+        pipeline = ProcessingPipeline(name=name, steps=[ProcessingStep(step.key, dict(step.params)) for step in self.steps])
+        try:
+            self.manager.save_pipeline(pipeline)
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, "Save failed", str(e))
+            return
+        self._refresh_saved()
+        items = self.list_saved.findItems(name, QtCore.Qt.MatchExactly)
+        if items:
+            self.list_saved.setCurrentItem(items[0])
+        QtWidgets.QMessageBox.information(self, "Pipeline saved", f"Pipeline '{name}' saved.")
+
+    def _interactive_edit(self):
+        if not self.steps:
+            return
+        pipeline = self._build_pipeline()
+        dlg = PipelineEditorDialog(self.manager, pipeline, self)
+        dlg.exec_()
+        updated = dlg.result_pipeline()
+        self.steps = [ProcessingStep(step.key, dict(step.params)) for step in updated.steps]
+        self._refresh_step_list()
+
+    def _refresh_saved(self):
+        selected = self._selected_saved_name()
+        self.list_saved.blockSignals(True)
+        self.list_saved.clear()
+        for name in self.manager.pipeline_names():
+            item = QtWidgets.QListWidgetItem(name)
+            item.setData(QtCore.Qt.UserRole, name)
+            self.list_saved.addItem(item)
+            if selected and name == selected:
+                item.setSelected(True)
+        if selected is None and self.list_saved.count() > 0:
+            self.list_saved.setCurrentRow(0)
+        self.list_saved.blockSignals(False)
+        self._update_buttons()
+
+    def _load_saved(self):
+        name = self._selected_saved_name()
+        if not name:
+            return
+        pipeline = self.manager.get_pipeline(name)
+        if pipeline is None:
+            return
+        self.edit_name.setText(pipeline.name)
+        self.steps = [ProcessingStep(step.key, dict(step.params)) for step in pipeline.steps]
+        self._refresh_step_list()
+        if self.steps:
+            self.list_steps.setCurrentRow(0)
+
+    def _delete_saved(self):
+        name = self._selected_saved_name()
+        if not name:
+            return
+        if QtWidgets.QMessageBox.question(self, "Delete pipeline", f"Delete pipeline '{name}'?") != QtWidgets.QMessageBox.Yes:
+            return
+        self.manager.delete_pipeline(name)
+        self._refresh_saved()
+
+    def _export_saved(self):
+        name = self._selected_saved_name()
+        if not name:
+            return
+        pipeline = self.manager.get_pipeline(name)
+        if pipeline is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export pipeline", f"{name}.json", "Pipeline JSON (*.json);;All files (*)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(pipeline.to_dict(), fh, indent=2)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Export failed", str(e))
+
+    def _import_saved(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import pipeline", "", "Pipeline JSON (*.json);;All files (*)")
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            pipeline = ProcessingPipeline.from_dict(data)
+            if not pipeline.name:
+                pipeline.name = Path(path).stem
+            self.manager.save_pipeline(pipeline)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Import failed", str(e))
+            return
+        self._refresh_saved()
+        items = self.list_saved.findItems(pipeline.name, QtCore.Qt.MatchExactly)
+        if items:
+            self.list_saved.setCurrentItem(items[0])
+
+
+class ProcessingSelectionDialog(QtWidgets.QDialog):
+    def __init__(self, manager: Optional[ProcessingManager], parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.setWindowTitle("Apply Processing")
+        self.resize(420, 360)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        layout.addWidget(QtWidgets.QLabel("Choose a processing function or pipeline:"))
+
+        self.cmb_mode = QtWidgets.QComboBox()
+        layout.addWidget(self.cmb_mode)
+
+        self.stack = QtWidgets.QStackedWidget()
+        layout.addWidget(self.stack, 1)
+
+        self._function_forms: Dict[str, ParameterForm] = {}
+
+        none_widget = QtWidgets.QWidget()
+        self._none_index = self.stack.addWidget(none_widget)
+        self._add_mode_item("No processing", {"type": "none", "stack": self._none_index})
+
+        for spec in list_processing_functions():
+            form = ParameterForm(spec.parameters)
+            idx = self.stack.addWidget(form)
+            self._function_forms[spec.key] = form
+            self._add_mode_item(
+                f"Function: {spec.label}",
+                {"type": "function", "key": spec.key, "stack": idx},
+            )
+
+        pipelines = self.manager.list_pipelines() if self.manager else []
+        if pipelines:
+            self.cmb_mode.insertSeparator(self.cmb_mode.count())
+            for pipeline in pipelines:
+                summary = QtWidgets.QPlainTextEdit()
+                summary.setReadOnly(True)
+                summary.setPlainText(self._summarize_pipeline(pipeline))
+                summary.setMinimumHeight(160)
+                idx = self.stack.addWidget(summary)
+                self._add_mode_item(
+                    f"Pipeline: {pipeline.name}",
+                    {"type": "pipeline", "name": pipeline.name, "stack": idx},
+                )
+
+        self.cmb_mode.currentIndexChanged.connect(self._on_mode_changed)
+        self.stack.setCurrentIndex(self._none_index)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _add_mode_item(self, label: str, data: Dict[str, object]):
+        self.cmb_mode.addItem(label)
+        index = self.cmb_mode.count() - 1
+        self.cmb_mode.setItemData(index, data)
+
+    def _on_mode_changed(self, index: int):
+        data = self.cmb_mode.itemData(index) or {}
+        stack_index = data.get("stack", self._none_index)
+        try:
+            self.stack.setCurrentIndex(int(stack_index))
+        except Exception:
+            self.stack.setCurrentIndex(self._none_index)
+
+    def _summarize_pipeline(self, pipeline: ProcessingPipeline) -> str:
+        if not pipeline.steps:
+            return "(No steps)"
+        lines: List[str] = []
+        for i, step in enumerate(pipeline.steps, 1):
+            spec = get_processing_function(step.key)
+            label = spec.label if spec else step.key
+            summary = summarize_parameters(step.key, step.params)
+            text = f"{i}. {label}"
+            if summary:
+                text += f" — {summary}"
+            lines.append(text)
+        return "\n".join(lines)
+
+    def selected_processing(self) -> Tuple[str, Dict[str, object]]:
+        index = self.cmb_mode.currentIndex()
+        data = self.cmb_mode.itemData(index) or {}
+        mode_type = data.get("type")
+        if mode_type == "function":
+            key = str(data.get("key", ""))
+            form = self._function_forms.get(key)
+            params = form.values() if form else {}
+            return key, params
+        if mode_type == "pipeline":
+            name = str(data.get("name", ""))
+            return f"pipeline:{name}", {}
+        return "none", {}
 
 # ---------------------------------------------------------------------------
 # Datasets pane (left): load a dataset and list 2D variables (drag from here)
@@ -132,7 +886,21 @@ class ViewerFrame(QtWidgets.QFrame):
     def __init__(self, title: str = "", parent=None):
         super().__init__(parent)
         self.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.setStyleSheet("QFrame { border: 1px solid #888; }")
+        self.setObjectName("viewerFrame")
+        self.setProperty("selected", False)
+        self.setStyleSheet(
+            "QFrame#viewerFrame { border: 1px solid #888; border-radius: 2px; }"
+            "QFrame#viewerFrame[selected=\"true\"] { border: 2px solid #1d72b8; "
+            "background-color: rgba(29, 114, 184, 40); }"
+        )
+
+        self._raw_data: Optional[np.ndarray] = None
+        self._processed_data: Optional[np.ndarray] = None
+        self._coords: Dict[str, np.ndarray] = {}
+        self._display_mode: str = "image"
+        self._current_processing: str = "none"
+        self._processing_params: Dict[str, object] = {}
+        self._selected: bool = False
 
         lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(2,2,2,2); lay.setSpacing(2)
         # Header
@@ -178,13 +946,82 @@ class ViewerFrame(QtWidgets.QFrame):
         self._update_histogram_visibility()
 
     def set_data(self, da, coords):
-        Z = np.asarray(da.values, float)
+        Z = np.asarray(getattr(da, "values", da), float)
+        self._raw_data = np.asarray(Z, float)
+        self._processed_data = np.asarray(Z, float)
+        self._coords = {}
+        coords = dict(coords or {})
         if "X" in coords and "Y" in coords:
-            self.viewer.set_warped(coords["X"], coords["Y"], Z, autorange=True)
+            self._display_mode = "warped"
+            self._coords["X"] = np.asarray(coords["X"], float)
+            self._coords["Y"] = np.asarray(coords["Y"], float)
         elif "x" in coords and "y" in coords:
-            self.viewer.set_rectilinear(coords["x"], coords["y"], Z, autorange=True)
+            self._display_mode = "rectilinear"
+            self._coords["x"] = np.asarray(coords["x"], float)
+            self._coords["y"] = np.asarray(coords["y"], float)
         else:
-            self.viewer.set_image(Z, autorange=True)
+            self._display_mode = "image"
+        self._current_processing = "none"
+        self._processing_params = {}
+        self._display_data(self._processed_data, autorange=True)
+
+    def set_selected(self, selected: bool):
+        selected = bool(selected)
+        if self._selected == selected:
+            return
+        self._selected = selected
+        self.setProperty("selected", selected)
+        try:
+            self.style().unpolish(self)
+            self.style().polish(self)
+        except Exception:
+            pass
+        self.update()
+
+    def is_selected(self) -> bool:
+        return bool(self._selected)
+
+    def apply_processing(self, mode: str, params: Dict[str, object], manager: Optional["ProcessingManager"]):
+        if self._raw_data is None:
+            return
+        data = np.asarray(self._raw_data, float)
+        mode = mode or "none"
+        params = dict(params or {})
+
+        if mode.startswith("pipeline:"):
+            if not manager:
+                raise RuntimeError("No processing manager is available for pipelines.")
+            name = mode.split(":", 1)[1]
+            pipeline = manager.get_pipeline(name)
+            if pipeline is None:
+                raise RuntimeError(f"Pipeline '{name}' is not available.")
+            processed = pipeline.apply(data)
+            params = {}
+        elif mode != "none":
+            processed = apply_processing_step(mode, data, params)
+        else:
+            processed = data
+
+        self._processed_data = np.asarray(processed, float)
+        self._current_processing = mode
+        self._processing_params = dict(params)
+        self._display_data(self._processed_data, autorange=True)
+
+    def reset_processing(self):
+        if self._raw_data is None:
+            return
+        self._processed_data = np.asarray(self._raw_data, float)
+        self._current_processing = "none"
+        self._processing_params = {}
+        self._display_data(self._processed_data, autorange=True)
+
+    def _display_data(self, data: np.ndarray, *, autorange: bool = False):
+        if self._display_mode == "warped" and "X" in self._coords and "Y" in self._coords:
+            self.viewer.set_warped(self._coords["X"], self._coords["Y"], data, autorange=autorange)
+        elif self._display_mode == "rectilinear" and "x" in self._coords and "y" in self._coords:
+            self.viewer.set_rectilinear(self._coords["x"], self._coords["y"], data, autorange=autorange)
+        else:
+            self.viewer.set_image(data, autorange=autorange)
 
     def set_histogram_visible(self, on: bool):
         self._hist_master_enabled = bool(on)
@@ -266,10 +1103,19 @@ class MultiViewGrid(QtWidgets.QWidget):
     - 'Columns' spinbox controls how many tiles per row.
     - 'Show histograms' toggles the classic HistogramLUTItem to the right of each tile.
     """
-    def __init__(self, parent=None):
+    def __init__(self, processing_manager: Optional[ProcessingManager] = None, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.frames: List[ViewerFrame] = []
+        self.processing_manager = processing_manager
+        self._selected_frames: Set[ViewerFrame] = set()
+        self._mouse_down = False
+        self._drag_select_active = False
+        self._drag_select_add = True
+
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -318,6 +1164,11 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.btn_equalize_cols.clicked.connect(self.equalize_columns)
         bar.addWidget(self.btn_equalize_cols)
 
+        self.btn_apply_processing = QtWidgets.QPushButton("Apply processing…")
+        self.btn_apply_processing.setEnabled(False)
+        self.btn_apply_processing.clicked.connect(self._on_apply_processing_clicked)
+        bar.addWidget(self.btn_apply_processing)
+
         bar.addStretch(1)
         v.addLayout(bar)
 
@@ -354,8 +1205,10 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.frames.append(fr)
         self._connect_frame_signals(fr)
         self._sync_new_frame_to_links(fr)
+        fr.set_selected(False)
 
         self._reflow()
+        self._update_apply_button_state()
         ev.acceptProposedAction()
 
     # ---------- Tile management ----------
@@ -363,11 +1216,98 @@ class MultiViewGrid(QtWidgets.QWidget):
         self._disconnect_frame_signals(fr)
         if fr in self.frames:
             self.frames.remove(fr)
+        if fr in self._selected_frames:
+            self._selected_frames.remove(fr)
+            fr.set_selected(False)
         try:
             fr.setParent(None)
         except Exception:
             pass
         self._reflow()
+        self._update_apply_button_state()
+
+    def selected_frames(self) -> List[ViewerFrame]:
+        return [fr for fr in self.frames if fr in self._selected_frames]
+
+    def _update_apply_button_state(self):
+        if hasattr(self, "btn_apply_processing"):
+            self.btn_apply_processing.setEnabled(bool(self._selected_frames))
+
+    def _set_frame_selected(self, frame: Optional[ViewerFrame], selected: bool, *, clear: bool = False):
+        if frame is None or frame not in self.frames:
+            if clear:
+                self._clear_selection()
+            return
+        if clear:
+            self._clear_selection(exclude=frame if selected else None)
+        if selected:
+            self._selected_frames.add(frame)
+        else:
+            self._selected_frames.discard(frame)
+        frame.set_selected(selected)
+        self._update_apply_button_state()
+
+    def _clear_selection(self, exclude: Optional[ViewerFrame] = None):
+        changed = False
+        for fr in list(self._selected_frames):
+            if exclude is not None and fr is exclude:
+                continue
+            fr.set_selected(False)
+            self._selected_frames.discard(fr)
+            changed = True
+        if changed:
+            self._update_apply_button_state()
+
+    def _frame_at_global_pos(self, global_pos: QtCore.QPoint) -> Optional[ViewerFrame]:
+        widget = QtWidgets.QApplication.widgetAt(global_pos)
+        while widget is not None:
+            if isinstance(widget, ViewerFrame):
+                return widget if widget in self.frames else None
+            widget = widget.parentWidget()
+        return None
+
+    def eventFilter(self, obj, event):
+        if isinstance(event, QtGui.QMouseEvent):
+            etype = event.type()
+            if etype == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
+                frame = self._frame_at_global_pos(event.globalPos())
+                if frame is not None:
+                    ctrl = bool(event.modifiers() & QtCore.Qt.ControlModifier)
+                    if ctrl:
+                        target_state = frame not in self._selected_frames
+                        self._set_frame_selected(frame, target_state, clear=False)
+                        self._drag_select_active = True
+                        self._drag_select_add = target_state
+                    else:
+                        self._set_frame_selected(frame, True, clear=True)
+                        self._drag_select_active = False
+                    self._mouse_down = True
+            elif etype == QtCore.QEvent.MouseMove:
+                if self._mouse_down and self._drag_select_active and event.buttons() & QtCore.Qt.LeftButton:
+                    frame = self._frame_at_global_pos(event.globalPos())
+                    if frame is not None:
+                        self._set_frame_selected(frame, self._drag_select_add, clear=False)
+            elif etype == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton:
+                if self._mouse_down:
+                    self._mouse_down = False
+                    self._drag_select_active = False
+        return super().eventFilter(obj, event)
+
+    def _on_apply_processing_clicked(self):
+        frames = self.selected_frames()
+        if not frames:
+            return
+        dialog = ProcessingSelectionDialog(self.processing_manager, self)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        mode, params = dialog.selected_processing()
+        for frame in frames:
+            try:
+                frame.apply_processing(mode, params, self.processing_manager)
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(self, "Processing failed", str(exc))
+                break
+
 
     def _reflow(self):
         """Rebuild the splitter grid according to the current column count."""
@@ -711,27 +1651,30 @@ class OverlayLayer(QtCore.QObject):
     def apply_processing(self, mode: str, params: dict):
         data = np.asarray(self.base_data, float)
         mode = mode or "none"
-        try:
-            if mode == "gaussian":
-                sigma = float(max(params.get("sigma", 1.0), 0.0))
-                data = gaussian_blur(data, sigma=sigma)
-            elif mode == "median":
-                ksize = int(max(params.get("ksize", 3), 1))
-                if ksize % 2 == 0:
-                    ksize += 1
-                data = median_filter(data, ksize=ksize)
-            elif mode == "poly":
-                ox = int(max(params.get("order_x", 2), 0))
-                oy = int(max(params.get("order_y", 2), 0))
-                data = poly2d_detrend(data, order_x=ox, order_y=oy)
-            elif mode == "butterworth":
-                cutoff = float(params.get("cutoff", 0.1))
-                order = int(max(params.get("order", 3), 1))
-                btype = params.get("btype", "low") or "low"
-                data = butterworth(data, cutoff=cutoff, order=order, btype=btype)
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self.view, "Processing failed", str(e))
-            return
+        params = dict(params or {})
+
+        if mode.startswith("pipeline:"):
+            name = mode.split(":", 1)[1]
+            manager = getattr(self.view, "processing_manager", None)
+            pipeline = manager.get_pipeline(name) if manager else None
+            if pipeline is None:
+                QtWidgets.QMessageBox.warning(self.view, "Processing failed", f"Pipeline '{name}' is not available.")
+                return
+            try:
+                data = pipeline.apply(data)
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self.view, "Processing failed", str(e))
+                return
+            params = {}
+        elif mode != "none":
+            try:
+                data = apply_processing_step(mode, data, params)
+            except KeyError:
+                QtWidgets.QMessageBox.warning(self.view, "Processing failed", f"Unknown processing mode: {mode}")
+                return
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self.view, "Processing failed", str(e))
+                return
 
         self.current_processing = mode
         self.processing_params = dict(params)
@@ -823,6 +1766,8 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         lay.addLayout(opacity_row)
 
         # Processing controls
+        manager_ref = getattr(view, "processing_manager", None)
+        self.manager: Optional[ProcessingManager] = None
         proc_box = QtWidgets.QGroupBox("Processing")
         proc_layout = QtWidgets.QVBoxLayout(proc_box)
         proc_layout.setContentsMargins(6, 6, 6, 6)
@@ -831,65 +1776,36 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         proc_row = QtWidgets.QHBoxLayout()
         proc_row.addWidget(QtWidgets.QLabel("Operation:"))
         self.cmb_processing = QtWidgets.QComboBox()
-        self.cmb_processing.addItem("None", "none")
-        self.cmb_processing.addItem("Gaussian blur", "gaussian")
-        self.cmb_processing.addItem("Median filter", "median")
-        self.cmb_processing.addItem("Poly detrend", "poly")
-        self.cmb_processing.addItem("Butterworth", "butterworth")
         self.cmb_processing.currentIndexChanged.connect(self._on_processing_mode_changed)
         proc_row.addWidget(self.cmb_processing, 1)
         proc_layout.addLayout(proc_row)
 
         self.param_stack = QtWidgets.QStackedWidget()
-        # None
-        self.param_stack.addWidget(QtWidgets.QWidget())
-        # Gaussian
-        gauss_widget = QtWidgets.QWidget()
-        gauss_layout = QtWidgets.QFormLayout(gauss_widget)
-        self.spin_sigma = QtWidgets.QDoubleSpinBox()
-        self.spin_sigma.setDecimals(2)
-        self.spin_sigma.setRange(0.1, 50.0)
-        self.spin_sigma.setSingleStep(0.1)
-        self.spin_sigma.setValue(1.0)
-        self.spin_sigma.valueChanged.connect(self._on_processing_params_changed)
-        gauss_layout.addRow("Sigma", self.spin_sigma)
-        self.param_stack.addWidget(gauss_widget)
-        # Median
-        median_widget = QtWidgets.QWidget()
-        median_layout = QtWidgets.QFormLayout(median_widget)
-        self.spin_kernel = QtWidgets.QSpinBox()
-        self.spin_kernel.setRange(1, 99)
-        self.spin_kernel.setSingleStep(2)
-        self.spin_kernel.setValue(3)
-        self.spin_kernel.valueChanged.connect(self._on_processing_params_changed)
-        median_layout.addRow("Kernel", self.spin_kernel)
-        self.param_stack.addWidget(median_widget)
-        # Poly detrend
-        poly_widget = QtWidgets.QWidget()
-        poly_layout = QtWidgets.QFormLayout(poly_widget)
-        self.spin_order_x = QtWidgets.QSpinBox(); self.spin_order_x.setRange(0, 6); self.spin_order_x.setValue(2)
-        self.spin_order_y = QtWidgets.QSpinBox(); self.spin_order_y.setRange(0, 6); self.spin_order_y.setValue(2)
-        self.spin_order_x.valueChanged.connect(self._on_processing_params_changed)
-        self.spin_order_y.valueChanged.connect(self._on_processing_params_changed)
-        poly_layout.addRow("Order X", self.spin_order_x)
-        poly_layout.addRow("Order Y", self.spin_order_y)
-        self.param_stack.addWidget(poly_widget)
-        # Butterworth
-        bw_widget = QtWidgets.QWidget()
-        bw_layout = QtWidgets.QFormLayout(bw_widget)
-        self.spin_cutoff = QtWidgets.QDoubleSpinBox(); self.spin_cutoff.setDecimals(3); self.spin_cutoff.setRange(0.001, 0.5); self.spin_cutoff.setSingleStep(0.01); self.spin_cutoff.setValue(0.1)
-        self.spin_bw_order = QtWidgets.QSpinBox(); self.spin_bw_order.setRange(1, 10); self.spin_bw_order.setValue(3)
-        self.spin_cutoff.valueChanged.connect(self._on_processing_params_changed)
-        self.spin_bw_order.valueChanged.connect(self._on_processing_params_changed)
-        bw_layout.addRow("Cutoff", self.spin_cutoff)
-        bw_layout.addRow("Order", self.spin_bw_order)
-        self.param_stack.addWidget(bw_widget)
+        self.param_stack.addWidget(QtWidgets.QWidget())  # None placeholder
+        self._function_forms: Dict[str, ParameterForm] = {}
+        self._function_indices: Dict[str, int] = {}
+        for spec in list_processing_functions():
+            form = ParameterForm(spec.parameters)
+            form.parametersChanged.connect(self._on_processing_params_changed)
+            idx = self.param_stack.addWidget(form)
+            self._function_forms[spec.key] = form
+            self._function_indices[spec.key] = idx
+        summary_container = QtWidgets.QWidget()
+        summary_layout = QtWidgets.QVBoxLayout(summary_container)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setSpacing(0)
+        self.lbl_pipeline_summary = QtWidgets.QLabel("Select a pipeline to view steps.")
+        self.lbl_pipeline_summary.setWordWrap(True)
+        self.lbl_pipeline_summary.setStyleSheet("color: #666;")
+        summary_layout.addWidget(self.lbl_pipeline_summary)
+        self._pipeline_summary_index = self.param_stack.addWidget(summary_container)
 
         proc_layout.addWidget(self.param_stack)
         self.btn_apply = QtWidgets.QPushButton("Apply")
         self.btn_apply.clicked.connect(self._apply_processing)
         proc_layout.addWidget(self.btn_apply, alignment=QtCore.Qt.AlignRight)
         lay.addWidget(proc_box)
+        self.set_processing_manager(manager_ref)
 
         self._ready = True
         self._on_processing_mode_changed()
@@ -904,20 +1820,18 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.update_level_spins(lo, hi)
         self.update_opacity_label(self.layer.opacity)
         self.sld_opacity.setValue(int(round(self.layer.opacity * 100)))
-        self.cmb_processing.setCurrentText(self._processing_label(self.layer.current_processing))
-        self._update_param_stack()
+        current_mode = self.layer.current_processing or "none"
+        self._refresh_processing_options()
+        self._select_processing_mode(current_mode)
+        if current_mode.startswith("pipeline:"):
+            name = current_mode.split(":", 1)[1]
+            self._update_pipeline_summary(name)
+        else:
+            form = self._function_forms.get(current_mode)
+            if form:
+                form.set_values(self.layer.processing_params)
         self._ready = True
         self._apply_processing()
-
-    def _processing_label(self, mode: str) -> str:
-        mapping = {
-            "none": "None",
-            "gaussian": "Gaussian blur",
-            "median": "Median filter",
-            "poly": "Poly detrend",
-            "butterworth": "Butterworth",
-        }
-        return mapping.get(mode, "None")
 
     def _set_colormap_selection(self, name: str):
         idx = self.cmb_colormap.findText(name, QtCore.Qt.MatchFixedString)
@@ -941,20 +1855,90 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.lbl_opacity.setText(f"{pct}%")
 
     def processing_parameters(self) -> dict:
-        mode = self.current_processing()
-        if mode == "gaussian":
-            return {"sigma": self.spin_sigma.value()}
-        if mode == "median":
-            return {"ksize": self.spin_kernel.value()}
-        if mode == "poly":
-            return {"order_x": self.spin_order_x.value(), "order_y": self.spin_order_y.value()}
-        if mode == "butterworth":
-            return {"cutoff": self.spin_cutoff.value(), "order": self.spin_bw_order.value(), "btype": "low"}
+        data = self._current_processing_data()
+        if data.get("type") == "function":
+            form = self._function_forms.get(data.get("key", ""))
+            if form:
+                return form.values()
         return {}
 
     def current_processing(self) -> str:
+        data = self._current_processing_data()
+        if data.get("type") == "function":
+            return data.get("key", "none")
+        if data.get("type") == "pipeline":
+            return f"pipeline:{data.get('name', '')}"
+        return "none"
+
+    def _current_processing_data(self) -> Dict[str, object]:
         data = self.cmb_processing.currentData()
-        return data or "none"
+        if isinstance(data, dict):
+            return data
+        return {"type": "none"}
+
+    def _find_data_index(self, target: Dict[str, object]) -> int:
+        for idx in range(self.cmb_processing.count()):
+            data = self.cmb_processing.itemData(idx)
+            if isinstance(data, dict) and data.get("type") == target.get("type"):
+                if data.get("type") == "function" and data.get("key") == target.get("key"):
+                    return idx
+                if data.get("type") == "pipeline" and data.get("name") == target.get("name"):
+                    return idx
+                if data.get("type") == "none":
+                    return idx
+        return -1
+
+    def _refresh_processing_options(self):
+        current = self._current_processing_data()
+        block = self.cmb_processing.blockSignals(True)
+        self.cmb_processing.clear()
+        self.cmb_processing.addItem("None", {"type": "none"})
+        for spec in list_processing_functions():
+            self.cmb_processing.addItem(spec.label, {"type": "function", "key": spec.key})
+        if self.manager:
+            for name in self.manager.pipeline_names():
+                self.cmb_processing.addItem(f"Pipeline: {name}", {"type": "pipeline", "name": name})
+        idx = self._find_data_index(current)
+        if idx < 0:
+            idx = 0
+        self.cmb_processing.setCurrentIndex(idx)
+        self.cmb_processing.blockSignals(block)
+        self._on_processing_mode_changed()
+
+    def _update_pipeline_summary(self, name: str):
+        if not self.manager:
+            self.lbl_pipeline_summary.setText("No processing manager available.")
+            return
+        pipeline = self.manager.get_pipeline(name)
+        if pipeline is None:
+            self.lbl_pipeline_summary.setText(f"Pipeline '{name}' not found.")
+            return
+        lines = []
+        for i, step in enumerate(pipeline.steps, start=1):
+            spec = get_processing_function(step.key)
+            label = spec.label if spec else step.key
+            params = summarize_parameters(step.key, step.params)
+            if params:
+                lines.append(f"{i}. {label} ({params})")
+            else:
+                lines.append(f"{i}. {label}")
+        self.lbl_pipeline_summary.setText("\n".join(lines))
+
+    def set_processing_manager(self, manager: Optional[ProcessingManager]):
+        if getattr(self, "manager", None) is manager:
+            return
+        if getattr(self, "manager", None):
+            try:
+                self.manager.pipelines_changed.disconnect(self._on_pipelines_changed)
+            except Exception:
+                pass
+        self.manager = manager
+        if manager:
+            manager.pipelines_changed.connect(self._on_pipelines_changed)
+        self._refresh_processing_options()
+
+    def _on_pipelines_changed(self):
+        self._refresh_processing_options()
 
     # ---------- Slots ----------
     def _on_visibility(self, on: bool):
@@ -990,7 +1974,24 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.layer.set_opacity(alpha)
 
     def _on_processing_mode_changed(self):
-        self._update_param_stack()
+        data = self._current_processing_data()
+        if data.get("type") == "function":
+            idx = self._function_indices.get(data.get("key", ""), 0)
+            try:
+                self.param_stack.setCurrentIndex(idx)
+            except Exception:
+                pass
+        elif data.get("type") == "pipeline":
+            self._update_pipeline_summary(str(data.get("name", "")))
+            try:
+                self.param_stack.setCurrentIndex(self._pipeline_summary_index)
+            except Exception:
+                pass
+        else:
+            try:
+                self.param_stack.setCurrentIndex(0)
+            except Exception:
+                pass
         self._apply_processing()
 
     def _on_processing_params_changed(self, *_):
@@ -1003,21 +2004,29 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         params = self.processing_parameters()
         self.layer.apply_processing(mode, params)
 
-    def _update_param_stack(self):
-        mode = self.current_processing()
-        mapping = {"none": 0, "gaussian": 1, "median": 2, "poly": 3, "butterworth": 4}
-        idx = mapping.get(mode, 0)
-        try:
-            self.param_stack.setCurrentIndex(idx)
-        except Exception:
-            pass
+    def _select_processing_mode(self, mode: str):
+        if mode.startswith("pipeline:"):
+            name = mode.split(":", 1)[1]
+            target = {"type": "pipeline", "name": name}
+        elif mode and mode != "none":
+            target = {"type": "function", "key": mode}
+        else:
+            target = {"type": "none"}
+        idx = self._find_data_index(target)
+        if idx < 0:
+            idx = 0
+        block = self.cmb_processing.blockSignals(True)
+        self.cmb_processing.setCurrentIndex(idx)
+        self.cmb_processing.blockSignals(block)
+        self._on_processing_mode_changed()
 
 
 class OverlayView(QtWidgets.QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, processing_manager: Optional[ProcessingManager] = None, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.layers: List[OverlayLayer] = []
+        self.processing_manager: Optional[ProcessingManager] = processing_manager
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -1087,6 +2096,7 @@ class OverlayView(QtWidgets.QWidget):
         layer = OverlayLayer(self, f"{vr.path.name}:{vr.var}", data, rect)
         self.plot.addItem(layer.image_item)
         widget = OverlayLayerWidget(self, layer)
+        widget.set_processing_manager(self.processing_manager)
         layer.set_widget(widget)
         self.layers.append(layer)
         self._insert_layer_widget(widget)
@@ -1120,6 +2130,12 @@ class OverlayView(QtWidgets.QWidget):
     def clear_layers(self):
         for layer in list(self.layers):
             self.remove_layer(layer)
+
+    def set_processing_manager(self, manager: Optional[ProcessingManager]):
+        self.processing_manager = manager
+        for layer in self.layers:
+            if layer.widget:
+                layer.widget.set_processing_manager(manager)
 
     def auto_view_range(self):
         rects = []
@@ -1224,12 +2240,28 @@ class MainWindow(QtWidgets.QMainWindow):
         main = QtWidgets.QSplitter()
         self.setCentralWidget(main)
 
-        self.datasets = DatasetsPane(); main.addWidget(self.datasets)
-        self.tabs = QtWidgets.QTabWidget(); main.addWidget(self.tabs)
+        self.processing_manager = ProcessingManager()
+
+        left_panel = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+        self.datasets = DatasetsPane()
+        left_layout.addWidget(self.datasets, 1)
+        self.processing_dock = ProcessingDockWidget(self.processing_manager)
+        left_layout.addWidget(self.processing_dock)
+        left_layout.addStretch(1)
+        main.addWidget(left_panel)
+
+        self.tabs = QtWidgets.QTabWidget()
+        main.addWidget(self.tabs)
         main.setStretchFactor(1, 1)
 
-        self.tab_multiview = MultiViewGrid(); self.tabs.addTab(self.tab_multiview, "MultiView")
-        self.tab_overlay = OverlayView();     self.tabs.addTab(self.tab_overlay, "Overlay")
+        self.tab_multiview = MultiViewGrid(self.processing_manager)
+        self.tabs.addTab(self.tab_multiview, "MultiView")
+        self.tab_overlay = OverlayView(self.processing_manager)
+        self.tabs.addTab(self.tab_overlay, "Overlay")
+        self.tab_overlay.set_processing_manager(self.processing_manager)
 
         self.resize(1500, 900)
 
