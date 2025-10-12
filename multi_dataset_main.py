@@ -2736,7 +2736,7 @@ class SequentialView(QtWidgets.QWidget):
 
     def _rebuild_fixed_indices(self):
         self._clear_fixed_dim_widgets()
-        if not self._current_da:
+        if self._current_da is None:
             return
         for dim in self._current_da.dims:
             if dim in (self._slice_axis, self._row_axis, self._col_axis):
