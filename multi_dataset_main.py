@@ -39,28 +39,6 @@ def open_dataset(path: Path) -> xr.Dataset:
     return xr.open_dataset(str(path))
 
 
-# ---------------------------------------------------------------------------
-# Dataset / variable references used for drag & drop
-# ---------------------------------------------------------------------------
-class DataSetRef(QtCore.QObject):
-    def __init__(self, path: Path):
-        super().__init__()
-        self.path = Path(path)
-
-    def to_mime(self) -> str:
-        return "DatasetRef:" + json.dumps({"path": str(self.path)})
-
-    @staticmethod
-    def from_mime(txt: str) -> Optional["DataSetRef"]:
-        if not txt or not txt.startswith("DatasetRef:"):
-            return None
-        try:
-            data = json.loads(txt.split(":", 1)[1])
-            return DataSetRef(Path(data["path"]))
-        except Exception:
-            return None
-
-
 def _nan_aware_reducer(func):
     def wrapped(arr, axis=None):
         data = np.asarray(arr, float)
@@ -96,6 +74,30 @@ def _nan_aware_reducer(func):
             pass
         return result
 
+
+    return wrapped
+
+
+# ---------------------------------------------------------------------------
+# Dataset / variable references used for drag & drop
+# ---------------------------------------------------------------------------
+class DataSetRef(QtCore.QObject):
+    def __init__(self, path: Path):
+        super().__init__()
+        self.path = Path(path)
+
+    def to_mime(self) -> str:
+        return "DatasetRef:" + json.dumps({"path": str(self.path)})
+
+    @staticmethod
+    def from_mime(txt: str) -> Optional["DataSetRef"]:
+        if not txt or not txt.startswith("DatasetRef:"):
+            return None
+        try:
+            data = json.loads(txt.split(":", 1)[1])
+            return DataSetRef(Path(data["path"]))
+        except Exception:
+            return None
 
     def load(self) -> xr.Dataset:
         return open_dataset(self.path)
