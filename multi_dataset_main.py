@@ -2821,7 +2821,6 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self._data_min: float = 0.0
         self._data_max: float = 1.0
         self._colormap_name: str = "viridis"
-        self._alpha_mode: str = "value"
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -2841,19 +2840,18 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
 
         controls = QtWidgets.QHBoxLayout()
         controls.setSpacing(6)
-        controls.addWidget(QtWidgets.QLabel("Opacity curve:"))
+        controls.addWidget(QtWidgets.QLabel("Opacity curves:"))
 
         self.btn_reset_curve = QtWidgets.QPushButton("Reset curve")
         self.btn_reset_curve.clicked.connect(self._on_reset_curve)
         controls.addWidget(self.btn_reset_curve)
 
-        controls.addWidget(QtWidgets.QLabel("Mode:"))
+        controls.addWidget(QtWidgets.QLabel("Edit:"))
 
-        self.cmb_alpha_mode = QtWidgets.QComboBox()
-        self.cmb_alpha_mode.addItem("By value", "value")
-        self.cmb_alpha_mode.addItem("By slice", "slice")
-        self.cmb_alpha_mode.currentIndexChanged.connect(self._on_alpha_mode_changed)
-        controls.addWidget(self.cmb_alpha_mode)
+        self.cmb_curve_target = QtWidgets.QComboBox()
+        self.cmb_curve_target.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        self.cmb_curve_target.currentIndexChanged.connect(self._on_curve_target_changed)
+        controls.addWidget(self.cmb_curve_target)
 
         controls.addStretch(1)
         layout.addLayout(controls)
@@ -2870,14 +2868,30 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
 
         self._volume_item: Optional[gl.GLVolumeItem] = None
         self._volume_scalar: Optional[np.ndarray] = None
-        self._alpha_curve: List[Tuple[float, float]] = [(0.0, 0.0), (1.0, 1.0)]
-        self._alpha_lut_x = np.array([0.0, 1.0], dtype=float)
-        self._alpha_lut_y = np.array([0.0, 1.0], dtype=float)
+        self._curve_keys: Tuple[str, ...] = ("value", "slice", "row", "column")
+        default_points = self.alpha_widget.curve_points()
+        xs = np.array([float(x) for x, _ in default_points], dtype=float)
+        ys = np.array([float(y) for _, y in default_points], dtype=float)
+        self._curve_points: Dict[str, List[Tuple[float, float]]] = {
+            key: [(float(x), float(y)) for x, y in zip(xs, ys)] for key in self._curve_keys
+        }
+        self._curve_lut_x: Dict[str, np.ndarray] = {key: xs.copy() for key in self._curve_keys}
+        self._curve_lut_y: Dict[str, np.ndarray] = {key: ys.copy() for key in self._curve_keys}
+        self._active_curve: str = "value"
+        self._updating_curve_widget: bool = False
+        self._axis_labels: Dict[str, str] = {
+            "value": "Value",
+            "slice": "Slice axis",
+            "row": "Row axis",
+            "column": "Column axis",
+        }
         self._alpha_scale_base: float = 101.0
 
         self._populate_colormap_choices()
+        self._populate_curve_target_choices()
         self._update_alpha_controls()
-        self._on_alpha_curve_changed(self.alpha_widget.curve_points())
+        self._sync_curve_target_labels()
+        self._sync_curve_widget_from_state()
 
         self.view = gl.GLViewWidget()
         self.view.setSizePolicy(
@@ -2982,19 +2996,30 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         norm = (scalar - data_min) / scale
         norm = np.clip(norm, 0.0, 1.0)
         rgba = cmap.map(norm.reshape(-1), mode="byte").reshape(scalar.shape + (4,))
-        if self._alpha_mode == "slice":
-            depth = scalar.shape[0] if scalar.ndim >= 1 else 1
-            if depth <= 1:
-                alpha_norm = np.ones_like(scalar, dtype=float)
-            else:
-                slice_positions = np.linspace(0.0, 1.0, depth, dtype=float)
-                slice_alpha = self._sample_alpha_curve(slice_positions)
-                slice_alpha = self._apply_alpha_scale(slice_alpha)
-                alpha_norm = np.broadcast_to(slice_alpha[:, np.newaxis, np.newaxis], scalar.shape)
-        else:
-            alpha_sample = self._sample_alpha_curve(norm)
-            alpha_norm = self._apply_alpha_scale(alpha_sample)
-        alpha = np.clip(alpha_norm * 255.0, 0.0, 255.0)
+
+        alpha_value = self._apply_alpha_scale(self._sample_alpha_curve("value", norm))
+        alpha_total = alpha_value
+        if scalar.ndim >= 3:
+            col_len, row_len, slice_len = scalar.shape
+            if slice_len > 1:
+                slice_positions = np.linspace(0.0, 1.0, slice_len, dtype=float)
+                slice_alpha = self._apply_alpha_scale(
+                    self._sample_alpha_curve("slice", slice_positions)
+                ).reshape(1, 1, slice_len)
+                alpha_total = alpha_total * slice_alpha
+            if row_len > 1:
+                row_positions = np.linspace(0.0, 1.0, row_len, dtype=float)
+                row_alpha = self._apply_alpha_scale(
+                    self._sample_alpha_curve("row", row_positions)
+                ).reshape(1, row_len, 1)
+                alpha_total = alpha_total * row_alpha
+            if col_len > 1:
+                col_positions = np.linspace(0.0, 1.0, col_len, dtype=float)
+                col_alpha = self._apply_alpha_scale(
+                    self._sample_alpha_curve("column", col_positions)
+                ).reshape(col_len, 1, 1)
+                alpha_total = alpha_total * col_alpha
+        alpha = np.clip(alpha_total * 255.0, 0.0, 255.0)
         rgba = rgba.copy()
         rgba[..., 3] = alpha.astype(np.uint8)
         return np.ascontiguousarray(rgba, dtype=np.ubyte)
@@ -3075,41 +3100,124 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         has_data = self._data is not None
         self.alpha_widget.setEnabled(has_data)
         self.btn_reset_curve.setEnabled(has_data)
-        if hasattr(self, "cmb_alpha_mode"):
-            self.cmb_alpha_mode.setEnabled(has_data)
+        if hasattr(self, "cmb_curve_target"):
+            self.cmb_curve_target.setEnabled(has_data)
 
-    def _on_alpha_curve_changed(self, points: List[Tuple[float, float]]):
-        if not points:
+    def _populate_curve_target_choices(self):
+        if not hasattr(self, "cmb_curve_target"):
             return
+        self.cmb_curve_target.blockSignals(True)
+        self.cmb_curve_target.clear()
+        labels = {
+            "value": "Value",
+            "slice": "Slice axis",
+            "row": "Row axis",
+            "column": "Column axis",
+        }
+        for key in self._curve_keys:
+            text = labels.get(key, key.title())
+            self.cmb_curve_target.addItem(text, key)
+        self.cmb_curve_target.blockSignals(False)
+        self.cmb_curve_target.setCurrentIndex(0)
+
+    def _sync_curve_target_labels(self):
+        if not hasattr(self, "cmb_curve_target"):
+            return
+        block = self.cmb_curve_target.blockSignals(True)
+        for index in range(self.cmb_curve_target.count()):
+            key = self.cmb_curve_target.itemData(index)
+            label = self._axis_labels.get(str(key), None)
+            if label:
+                if str(key) == "value":
+                    text = label
+                else:
+                    pretty = str(label)
+                    lower = pretty.lower()
+                    if lower.endswith("axis"):
+                        text = pretty
+                    else:
+                        text = f"{pretty} axis"
+                self.cmb_curve_target.setItemText(index, text)
+        self.cmb_curve_target.blockSignals(block)
+
+    def set_axis_labels(self, slice_label: str, row_label: str, column_label: str):
+        self._axis_labels.update(
+            {
+                "slice": slice_label or "Slice axis",
+                "row": row_label or "Row axis",
+                "column": column_label or "Column axis",
+                "value": "Value",
+            }
+        )
+        self._sync_curve_target_labels()
+
+    def _on_curve_target_changed(self):
+        if not hasattr(self, "cmb_curve_target"):
+            return
+        key = self.cmb_curve_target.currentData()
+        if key not in self._curve_keys:
+            key = "value"
+        if key == self._active_curve:
+            self._sync_curve_widget_from_state()
+            return
+        self._active_curve = key
+        self._sync_curve_widget_from_state()
+
+    def _sync_curve_widget_from_state(self):
+        key = self._active_curve
+        points = self._curve_points.get(key)
+        if not points:
+            default_points = [(float(p), float(p)) for p in getattr(self.alpha_widget, "_default_positions", [0.0, 1.0])]
+            points = default_points
+        self._updating_curve_widget = True
+        try:
+            self.alpha_widget.set_curve(points)
+        finally:
+            self._updating_curve_widget = False
+
+    def _store_curve(self, key: str, points: List[Tuple[float, float]]):
         xs = np.array([max(0.0, min(1.0, float(x))) for x, _ in points], dtype=float)
         ys = np.array([max(0.0, min(1.0, float(y))) for _, y in points], dtype=float)
+        if xs.size == 0 or ys.size == 0:
+            xs = np.array([0.0, 1.0], dtype=float)
+            ys = np.array([0.0, 1.0], dtype=float)
         order = np.argsort(xs)
         xs = xs[order]
         ys = ys[order]
-        self._alpha_curve = [(float(x), float(y)) for x, y in zip(xs, ys)]
-        self._alpha_lut_x = xs
-        self._alpha_lut_y = ys
-        self._update_volume_visual()
+        normalized_points = [(float(x), float(y)) for x, y in zip(xs, ys)]
+        previous = self._curve_points.get(key)
+        self._curve_points[key] = normalized_points
+        self._curve_lut_x[key] = xs
+        self._curve_lut_y[key] = ys
+        changed = previous is None or len(previous) != len(normalized_points) or any(
+            abs(px - nx) > 1e-6 or abs(py - ny) > 1e-6
+            for (px, py), (nx, ny) in zip(previous or [], normalized_points)
+        )
+        if changed:
+            self._update_volume_visual()
+
+    def _on_alpha_curve_changed(self, points: List[Tuple[float, float]]):
+        if self._updating_curve_widget:
+            return
+        key = self._active_curve
+        if key not in self._curve_keys:
+            key = "value"
+        if not points:
+            points = [(0.0, 0.0), (1.0, 1.0)]
+        self._store_curve(key, points)
 
     def _on_reset_curve(self):
         self.alpha_widget.reset_curve()
 
-    def _on_alpha_mode_changed(self):
-        mode = self.cmb_alpha_mode.currentData()
-        if mode not in {"value", "slice"}:
-            mode = "value"
-        if mode == self._alpha_mode:
-            return
-        self._alpha_mode = mode
-        self._update_volume_visual()
-
-    def _sample_alpha_curve(self, values: np.ndarray) -> np.ndarray:
+    def _sample_alpha_curve(self, key: str, values: np.ndarray) -> np.ndarray:
         clipped = np.clip(values, 0.0, 1.0)
         flat = clipped.reshape(-1)
-        if self._alpha_lut_x.size < 2:
+        lut_x = self._curve_lut_x.get(key)
+        lut_y = self._curve_lut_y.get(key)
+        if lut_x is None or lut_y is None or lut_x.size < 2:
             mapped = flat
         else:
-            mapped = np.interp(flat, self._alpha_lut_x, self._alpha_lut_y)
+            mapped = np.interp(flat, lut_x, lut_y)
         return mapped.reshape(clipped.shape)
 
     def _apply_alpha_scale(self, alpha_norm: np.ndarray) -> np.ndarray:
@@ -3625,6 +3733,7 @@ class SequentialView(QtWidgets.QWidget):
         self._row_axis = self.cmb_row_axis.currentData()
         self._col_axis = self.cmb_col_axis.currentData()
         self._update_axis_coords()
+        self._update_volume_window_axis_labels()
 
     def _update_axis_coords(self):
         axis = self._slice_axis
@@ -3991,6 +4100,10 @@ class SequentialView(QtWidgets.QWidget):
         except RuntimeError as exc:
             QtWidgets.QMessageBox.warning(self, "Volume rendering error", str(exc))
             return
+        slice_label = self._axis_display_name(self._slice_axis)
+        row_label = self._axis_display_name(self._row_axis)
+        col_label = self._axis_display_name(self._col_axis)
+        window.set_axis_labels(slice_label, row_label, col_label)
         window.set_volume(volume)
         cmap_name = self.cmb_colormap.currentData() or "viridis"
         window.set_colormap(cmap_name)
@@ -4058,6 +4171,17 @@ class SequentialView(QtWidgets.QWidget):
             return
         cmap_name = self.cmb_colormap.currentData() or "viridis"
         self._volume_window.set_colormap(cmap_name)
+
+    def _update_volume_window_axis_labels(self):
+        if self._volume_window is None:
+            return
+        try:
+            slice_label = self._axis_display_name(self._slice_axis)
+            row_label = self._axis_display_name(self._row_axis)
+            col_label = self._axis_display_name(self._col_axis)
+            self._volume_window.set_axis_labels(slice_label, row_label, col_label)
+        except Exception:
+            pass
 
     # ---------- ROI controls ----------
     def _ensure_roi_window(self) -> SequentialRoiWindow:
