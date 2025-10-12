@@ -193,6 +193,14 @@ class EmbeddedJupyterManager(QtCore.QObject):
                 proc.kill()
         except Exception:
             pass
+        for attr in ("_stdout_thread", "_stderr_thread", "_watcher_thread"):
+            thread = getattr(self, attr, None)
+            if thread and thread.is_alive():
+                try:
+                    thread.join(timeout=1)
+                except Exception:
+                    pass
+            setattr(self, attr, None)
         self._port = None
         self._token = None
         self._url = None
@@ -520,6 +528,7 @@ class VsCodeWebWidget(QtWidgets.QWidget):
         self.server_manager.failed.connect(self._on_server_failed)
         self.server_manager.stopped.connect(self._on_server_stopped)
 
+        self._js_warning_shown = False
         if QtWebEngineWidgets is not None:
             self._profile = QtWebEngineWidgets.QWebEngineProfile(self)
             self._profile.setHttpUserAgent(
@@ -562,6 +571,8 @@ class VsCodeWebWidget(QtWidgets.QWidget):
         self.btn_start_local.clicked.connect(self._start_local_server)
         self.btn_stop_local.clicked.connect(self._stop_local_server)
         self._update_server_buttons()
+        self._shutdown_called = False
+        self.destroyed.connect(lambda *_: self.shutdown())
 
     def _relay_status(self, text: str):
         if text:
@@ -632,16 +643,28 @@ class VsCodeWebWidget(QtWidgets.QWidget):
     def _handle_console_message(self, level: int, message: str, line: int, source: str):
         if QtWebEngineWidgets is None:
             return
+        cleaned = (message or "").strip()
+        location = source or "unknown source"
+        if line:
+            location = f"{location}:{line}"
         if level == QtWebEngineWidgets.QWebEnginePage.JavaScriptConsoleMessageLevel.ErrorMessageLevel:
-            if "Unexpected token" in message:
-                self._toggle_error_banner(
-                    True,
-                    (
-                        "The embedded browser could not load this VS Code page (JavaScript error). "
-                        "Try launching a local code-server or open the URL in an external browser."
-                    ),
+            log_action(f"VS Code JS error ({location}): {cleaned}")
+            if "Unexpected token" in cleaned:
+                hint = (
+                    "The embedded browser hit a syntax error while loading the VS Code workspace. "
+                    "This usually means the page requires a newer Chromium engine than the bundled Qt version. "
+                    "Open the URL in an external browser or upgrade QtWebEngine."
                 )
-            self.set_status(message)
+                self._toggle_error_banner(True, hint)
+                if not getattr(self, "_js_warning_shown", False):
+                    self.set_status(hint)
+                    self._js_warning_shown = True
+            else:
+                self._toggle_error_banner(False)
+                self.set_status(cleaned or "JavaScript error in VS Code view.")
+        else:
+            if cleaned:
+                log_action(f"VS Code JS message ({location}): {cleaned}")
 
     def _toggle_error_banner(self, show: bool, text: Optional[str] = None):
         if not self._error_banner:
@@ -665,7 +688,38 @@ class VsCodeWebWidget(QtWidgets.QWidget):
         self.btn_stop_local.setEnabled(running)
 
     def shutdown(self):
+        if self._shutdown_called:
+            return
+        self._shutdown_called = True
         self.server_manager.stop()
+        if QtWebEngineWidgets is not None:
+            if getattr(self, "web_view", None) is not None:
+                page = self.web_view.page()
+                self.web_view.setPage(None)
+                if page is not None:
+                    try:
+                        page.deleteLater()
+                    except Exception:
+                        pass
+                try:
+                    self.web_view.deleteLater()
+                except Exception:
+                    pass
+                self.web_view = None
+            banner = getattr(self, "_error_banner", None)
+            if banner is not None:
+                try:
+                    banner.deleteLater()
+                except Exception:
+                    pass
+                self._error_banner = None
+            profile = getattr(self, "_profile", None)
+            if profile is not None:
+                try:
+                    profile.deleteLater()
+                except Exception:
+                    pass
+                self._profile = None
 
 def _nan_aware_reducer(func):
     def wrapped(arr, axis=None):
@@ -4245,6 +4299,8 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
 
         self.cmb_mode.currentIndexChanged.connect(self._on_mode_changed)
         self._on_mode_changed(self.cmb_mode.currentIndex())
+        self._shutdown_called = False
+        self.destroyed.connect(lambda *_: self.shutdown())
 
     def _on_mode_changed(self, index: int):
         mode = self.cmb_mode.itemData(index)
@@ -4369,30 +4425,50 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         cleaned = message.strip()
         if not cleaned:
             return
+        location = source_id or "unknown source"
+        if line:
+            location = f"{location}:{line}"
         error_level = int(QtWebEngineWidgets.QWebEnginePage.JavaScriptConsoleMessageLevel.ErrorMessageLevel)
         warning_level = int(QtWebEngineWidgets.QWebEnginePage.JavaScriptConsoleMessageLevel.WarningMessageLevel)
         info_level = int(QtWebEngineWidgets.QWebEnginePage.JavaScriptConsoleMessageLevel.InfoMessageLevel)
         if level == error_level:
-            log_action(f"JupyterLab JS error: {cleaned}")
+            log_action(f"JupyterLab JS error ({location}): {cleaned}")
             if not self._jupyter_js_warned:
                 self._set_status(
                     "Embedded JupyterLab reported browser compatibility warnings. Open in an external browser if features look incorrect."
                 )
                 self._jupyter_js_warned = True
         elif level == warning_level:
-            log_action(f"JupyterLab JS warning: {cleaned}")
+            log_action(f"JupyterLab JS warning ({location}): {cleaned}")
         elif level == info_level:
-            log_action(f"JupyterLab JS info: {cleaned}")
+            log_action(f"JupyterLab JS info ({location}): {cleaned}")
         else:
-            log_action(f"JupyterLab JS message: {cleaned}")
+            log_action(f"JupyterLab JS message ({location}): {cleaned}")
 
     def _on_vscode_status(self, message: str):
         if self._active_mode == "vscode" and message:
             self._set_status(message)
 
     def shutdown(self):
+        if self._shutdown_called:
+            return
+        self._shutdown_called = True
         if self._jupyter_manager:
             self._jupyter_manager.stop()
+        if self._web_engine_available and self._jupyter_view is not None:
+            page = self._jupyter_view.page()
+            self._jupyter_view.setPage(None)
+            if page is not None:
+                try:
+                    page.deleteLater()
+                except Exception:
+                    pass
+            try:
+                self._jupyter_view.deleteLater()
+            except Exception:
+                pass
+            self._jupyter_view = None
+            self._jupyter_page = None
         self.vscode_widget.shutdown()
 
     def _register_dataset(self):
