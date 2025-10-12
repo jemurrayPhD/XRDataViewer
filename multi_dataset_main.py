@@ -2576,6 +2576,7 @@ class VolumeAlphaCurveWidget(QtWidgets.QWidget):
         )
         self._view.setDragMode(QtWidgets.QGraphicsView.NoDrag)
         self._view.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._view.viewport().installEventFilter(self)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2603,11 +2604,6 @@ class VolumeAlphaCurveWidget(QtWidgets.QWidget):
         self._margin_bottom = 26.0
         self._colormap_name = "viridis"
         self._updating = False
-
-        for x_norm in self._default_positions:
-            handle = VolumeAlphaHandle(self, x_norm, x_norm)
-            self._scene.addItem(handle)
-            self._handles.append(handle)
 
         self.setMinimumHeight(120)
         self.setMaximumHeight(220)
@@ -2679,21 +2675,44 @@ class VolumeAlphaCurveWidget(QtWidgets.QWidget):
         if self._updating:
             return value
         eff = self._effective_rect()
-        x = eff.left() + handle.x_norm * eff.width()
+        width = eff.width()
+        height = eff.height()
+        x_norm = 0.0
+        if width > 0:
+            raw_x_norm = (float(value.x()) - eff.left()) / width
+            idx = self._handles.index(handle)
+            min_norm = 0.0 if idx == 0 else self._handles[idx - 1].x_norm + 1e-4
+            max_norm = 1.0 if idx == len(self._handles) - 1 else self._handles[idx + 1].x_norm - 1e-4
+            x_norm = max(min_norm, min(max_norm, raw_x_norm))
+            x_norm = max(0.0, min(1.0, x_norm))
+        x = eff.left() + x_norm * max(width, 1.0)
         y = float(value.y())
-        y = max(eff.top(), min(eff.bottom(), y))
+        if height > 0:
+            y = max(eff.top(), min(eff.bottom(), y))
         return QtCore.QPointF(x, y)
 
     def handle_moved(self, handle: VolumeAlphaHandle):
         if self._updating:
             return
         eff = self._effective_rect()
-        if eff.height() <= 0:
+        width = eff.width()
+        height = eff.height()
+        if width <= 0 or height <= 0:
             return
-        y = handle.pos().y()
-        y_norm = (eff.bottom() - y) / eff.height()
+        pos = handle.pos()
+        x_norm = (pos.x() - eff.left()) / width
+        y_norm = (eff.bottom() - pos.y()) / height
+        x_norm = max(0.0, min(1.0, float(x_norm)))
         y_norm = max(0.0, min(1.0, float(y_norm)))
+        idx = self._handles.index(handle)
+        if idx > 0:
+            x_norm = max(x_norm, self._handles[idx - 1].x_norm + 1e-4)
+        if idx < len(self._handles) - 1:
+            x_norm = min(x_norm, self._handles[idx + 1].x_norm - 1e-4)
         handle.y_norm = y_norm
+        handle.x_norm = x_norm
+        self._handles.sort(key=lambda item: item.x_norm)
+        self._position_handles()
         self._update_curve_path()
         self.curveChanged.emit(self.curve_points())
 
@@ -2714,43 +2733,77 @@ class VolumeAlphaCurveWidget(QtWidgets.QWidget):
         if not self._handles:
             self._curve_item.setPath(QtGui.QPainterPath())
             return
+        sorted_handles = sorted(self._handles, key=lambda item: item.x_norm)
         path = QtGui.QPainterPath()
-        first = self._handles[0]
+        first = sorted_handles[0]
         path.moveTo(first.pos())
-        for handle in self._handles[1:]:
+        for handle in sorted_handles[1:]:
             path.lineTo(handle.pos())
         self._curve_item.setPath(path)
 
     # ----- curve helpers -----
     def curve_points(self) -> List[Tuple[float, float]]:
-        return [(handle.x_norm, handle.y_norm) for handle in self._handles]
+        return [(handle.x_norm, handle.y_norm) for handle in sorted(self._handles, key=lambda h: h.x_norm)]
 
     def set_curve(self, points: List[Tuple[float, float]]):
         if not points:
             return
-        mapping = {round(float(x), 4): float(y) for x, y in points}
-        self._updating = True
-        try:
-            for handle in self._handles:
-                key = round(handle.x_norm, 4)
-                if key in mapping:
-                    handle.y_norm = max(0.0, min(1.0, mapping[key]))
-        finally:
-            self._updating = False
-        self._position_handles()
+        for handle in list(self._handles):
+            self._scene.removeItem(handle)
+        self._handles.clear()
+        for x, y in points:
+            self._add_handle(float(x), float(y), emit=False)
         self._update_curve_path()
         self.curveChanged.emit(self.curve_points())
 
     def reset_curve(self):
-        self._updating = True
-        try:
-            for handle in self._handles:
-                handle.y_norm = handle.x_norm
-        finally:
-            self._updating = False
-        self._position_handles()
+        for handle in list(self._handles):
+            self._scene.removeItem(handle)
+        self._handles.clear()
+        for x_norm in self._default_positions:
+            self._add_handle(float(x_norm), float(x_norm), emit=False)
         self._update_curve_path()
         self.curveChanged.emit(self.curve_points())
+
+    def _add_handle(self, x_norm: float, y_norm: float, *, emit: bool = True):
+        x_norm = max(0.0, min(1.0, x_norm))
+        y_norm = max(0.0, min(1.0, y_norm))
+        for existing in self._handles:
+            if abs(existing.x_norm - x_norm) < 1e-4:
+                existing.x_norm = x_norm
+                existing.y_norm = y_norm
+                self._handles.sort(key=lambda item: item.x_norm)
+                self._position_handles()
+                self._update_curve_path()
+                if emit:
+                    self.curveChanged.emit(self.curve_points())
+                return
+        handle = VolumeAlphaHandle(self, x_norm, y_norm)
+        self._scene.addItem(handle)
+        self._handles.append(handle)
+        self._handles.sort(key=lambda item: item.x_norm)
+        self._position_handles()
+        self._update_curve_path()
+        if emit:
+            self.curveChanged.emit(self.curve_points())
+
+    def eventFilter(self, obj, event):
+        if (
+            obj is self._view.viewport()
+            and event.type() == QtCore.QEvent.MouseButtonDblClick
+            and self.isEnabled()
+        ):
+            if isinstance(event, QtGui.QMouseEvent) and event.button() == QtCore.Qt.LeftButton:
+                scene_pos = self._view.mapToScene(event.pos())
+                eff = self._effective_rect()
+                if eff.contains(scene_pos):
+                    width = eff.width() if eff.width() > 0 else 1.0
+                    height = eff.height() if eff.height() > 0 else 1.0
+                    x_norm = (scene_pos.x() - eff.left()) / width
+                    y_norm = (eff.bottom() - scene_pos.y()) / height
+                    self._add_handle(x_norm, y_norm)
+                    return True
+        return super().eventFilter(obj, event)
 
 
 class SequentialVolumeWindow(QtWidgets.QWidget):
@@ -2768,6 +2821,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self._data_min: float = 0.0
         self._data_max: float = 1.0
         self._colormap_name: str = "viridis"
+        self._alpha_mode: str = "value"
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -2793,6 +2847,14 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self.btn_reset_curve.clicked.connect(self._on_reset_curve)
         controls.addWidget(self.btn_reset_curve)
 
+        controls.addWidget(QtWidgets.QLabel("Mode:"))
+
+        self.cmb_alpha_mode = QtWidgets.QComboBox()
+        self.cmb_alpha_mode.addItem("By value", "value")
+        self.cmb_alpha_mode.addItem("By slice", "slice")
+        self.cmb_alpha_mode.currentIndexChanged.connect(self._on_alpha_mode_changed)
+        controls.addWidget(self.cmb_alpha_mode)
+
         controls.addStretch(1)
         layout.addLayout(controls)
 
@@ -2801,6 +2863,9 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         )
         self.alpha_widget.curveChanged.connect(self._on_alpha_curve_changed)
+        self.alpha_widget.setToolTip(
+            "Drag control points to sculpt opacity, double-click to add a new point."
+        )
         layout.addWidget(self.alpha_widget)
 
         self._volume_item: Optional[gl.GLVolumeItem] = None
@@ -2808,6 +2873,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self._alpha_curve: List[Tuple[float, float]] = [(0.0, 0.0), (1.0, 1.0)]
         self._alpha_lut_x = np.array([0.0, 1.0], dtype=float)
         self._alpha_lut_y = np.array([0.0, 1.0], dtype=float)
+        self._alpha_scale_base: float = 101.0
 
         self._populate_colormap_choices()
         self._update_alpha_controls()
@@ -2916,10 +2982,18 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         norm = (scalar - data_min) / scale
         norm = np.clip(norm, 0.0, 1.0)
         rgba = cmap.map(norm.reshape(-1), mode="byte").reshape(scalar.shape + (4,))
-        if self._alpha_lut_x.size < 2:
-            alpha_norm = norm
+        if self._alpha_mode == "slice":
+            depth = scalar.shape[0] if scalar.ndim >= 1 else 1
+            if depth <= 1:
+                alpha_norm = np.ones_like(scalar, dtype=float)
+            else:
+                slice_positions = np.linspace(0.0, 1.0, depth, dtype=float)
+                slice_alpha = self._sample_alpha_curve(slice_positions)
+                slice_alpha = self._apply_alpha_scale(slice_alpha)
+                alpha_norm = np.broadcast_to(slice_alpha[:, np.newaxis, np.newaxis], scalar.shape)
         else:
-            alpha_norm = np.interp(norm, self._alpha_lut_x, self._alpha_lut_y)
+            alpha_sample = self._sample_alpha_curve(norm)
+            alpha_norm = self._apply_alpha_scale(alpha_sample)
         alpha = np.clip(alpha_norm * 255.0, 0.0, 255.0)
         rgba = rgba.copy()
         rgba[..., 3] = alpha.astype(np.uint8)
@@ -3001,6 +3075,8 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         has_data = self._data is not None
         self.alpha_widget.setEnabled(has_data)
         self.btn_reset_curve.setEnabled(has_data)
+        if hasattr(self, "cmb_alpha_mode"):
+            self.cmb_alpha_mode.setEnabled(has_data)
 
     def _on_alpha_curve_changed(self, points: List[Tuple[float, float]]):
         if not points:
@@ -3017,6 +3093,30 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
 
     def _on_reset_curve(self):
         self.alpha_widget.reset_curve()
+
+    def _on_alpha_mode_changed(self):
+        mode = self.cmb_alpha_mode.currentData()
+        if mode not in {"value", "slice"}:
+            mode = "value"
+        if mode == self._alpha_mode:
+            return
+        self._alpha_mode = mode
+        self._update_volume_visual()
+
+    def _sample_alpha_curve(self, values: np.ndarray) -> np.ndarray:
+        clipped = np.clip(values, 0.0, 1.0)
+        flat = clipped.reshape(-1)
+        if self._alpha_lut_x.size < 2:
+            mapped = flat
+        else:
+            mapped = np.interp(flat, self._alpha_lut_x, self._alpha_lut_y)
+        return mapped.reshape(clipped.shape)
+
+    def _apply_alpha_scale(self, alpha_norm: np.ndarray) -> np.ndarray:
+        base = max(2.0, float(self._alpha_scale_base))
+        clamped = np.clip(alpha_norm, 0.0, 1.0)
+        scaled = (np.power(base, clamped) - 1.0) / (base - 1.0)
+        return np.clip(scaled, 0.0, 1.0)
 
     def closeEvent(self, event: QtGui.QCloseEvent):
         try:
