@@ -2339,6 +2339,131 @@ class MultiViewGrid(QtWidgets.QWidget):
                 yield w
 
 # ---------------------------------------------------------------------------
+# Sequential view helpers
+# ---------------------------------------------------------------------------
+
+
+class SequentialRoiWindow(QtWidgets.QWidget):
+    axesChanged = QtCore.Signal(tuple)
+    reducerChanged = QtCore.Signal(str)
+    closed = QtCore.Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent, QtCore.Qt.Window)
+        self.setWindowTitle("Sequential ROI Inspector")
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
+        self.setMinimumSize(420, 320)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        controls = QtWidgets.QHBoxLayout()
+        controls.setSpacing(6)
+
+        controls.addWidget(QtWidgets.QLabel("Reduce over:"))
+        self.cmb_axes = QtWidgets.QComboBox()
+        self.cmb_axes.currentIndexChanged.connect(self._emit_axes_changed)
+        self.cmb_axes.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        controls.addWidget(self.cmb_axes, 1)
+
+        controls.addWidget(QtWidgets.QLabel("Statistic:"))
+        self.cmb_method = QtWidgets.QComboBox()
+        self.cmb_method.currentIndexChanged.connect(self._emit_method_changed)
+        self.cmb_method.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        controls.addWidget(self.cmb_method, 1)
+
+        layout.addLayout(controls)
+
+        self.lbl_hint = QtWidgets.QLabel()
+        self.lbl_hint.setStyleSheet("color: #666;")
+        layout.addWidget(self.lbl_hint)
+
+        self.profile_plot = pg.PlotWidget()
+        self.profile_plot.setMinimumHeight(140)
+        self.profile_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.profile_plot.setLabel("bottom", "Axis")
+        self.profile_plot.setLabel("left", "Value")
+        self.profile_curve = self.profile_plot.plot([], [], pen=pg.mkPen('#ffaa00', width=2))
+        layout.addWidget(self.profile_plot, 1)
+
+        self.slice_plot = pg.PlotWidget()
+        self.slice_plot.setMinimumHeight(160)
+        self.slice_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.slice_plot.setLabel("bottom", "Slice coordinate")
+        self.slice_plot.setLabel("left", "ROI statistic")
+        self.slice_curve = self.slice_plot.plot([], [], pen=pg.mkPen('#66bbff', width=2))
+        layout.addWidget(self.slice_plot, 1)
+
+        self._updating = False
+
+    def set_axis_options(self, options: List[Tuple[str, Tuple[int, ...], str, str]], current_index: int):
+        self._updating = True
+        self.cmb_axes.clear()
+        for label, axes, _, _ in options:
+            self.cmb_axes.addItem(label, axes)
+        self.cmb_axes.setEnabled(bool(options))
+        if options:
+            self.cmb_axes.setCurrentIndex(max(0, min(current_index, len(options) - 1)))
+        self._updating = False
+
+    def set_reducer_options(self, reducers: Dict[str, Tuple[str, object]], current_key: str):
+        self._updating = True
+        self.cmb_method.clear()
+        for key, (label, _fn) in reducers.items():
+            self.cmb_method.addItem(label, key)
+        idx = max(0, self.cmb_method.findData(current_key))
+        self.cmb_method.setCurrentIndex(idx)
+        self.cmb_method.setEnabled(self.cmb_method.count() > 0)
+        self._updating = False
+
+    def set_hint(self, text: str):
+        self.lbl_hint.setText(text)
+
+    def update_profile(self, xs: List[float], ys: List[float], xlabel: str, ylabel: str, visible: bool):
+        self.profile_plot.setVisible(visible)
+        if not visible:
+            self.profile_curve.setData([], [])
+            return
+        self.profile_plot.setLabel("bottom", xlabel)
+        self.profile_plot.setLabel("left", ylabel)
+        self.profile_curve.setData(xs, ys)
+        self.profile_plot.enableAutoRange()
+
+    def update_slice_curve(self, xs: List[float], ys: List[float], xlabel: str, ylabel: str):
+        self.slice_plot.setLabel("bottom", xlabel)
+        self.slice_plot.setLabel("left", ylabel)
+        self.slice_curve.setData(xs, ys)
+        self.slice_plot.enableAutoRange()
+
+    def _emit_axes_changed(self):
+        if self._updating:
+            return
+        data = self.cmb_axes.currentData()
+        if data is None:
+            return
+        try:
+            axes = tuple(int(a) for a in data)
+        except Exception:
+            axes = tuple()
+        self.axesChanged.emit(axes)
+
+    def _emit_method_changed(self):
+        if self._updating:
+            return
+        key = self.cmb_method.currentData()
+        if key:
+            self.reducerChanged.emit(str(key))
+
+    def closeEvent(self, event: QtGui.QCloseEvent):
+        try:
+            self.closed.emit()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+
+# ---------------------------------------------------------------------------
 # Sequential view: explore 2D slices along an arbitrary axis
 # ---------------------------------------------------------------------------
 
@@ -2369,12 +2494,15 @@ class SequentialView(QtWidgets.QWidget):
 
         self._roi_enabled: bool = False
         self._roi_reducers = {
-            "mean": ("Mean", lambda arr: np.nanmean(arr)),
-            "median": ("Median", lambda arr: np.nanmedian(arr)),
-            "min": ("Minimum", lambda arr: np.nanmin(arr)),
-            "max": ("Maximum", lambda arr: np.nanmax(arr)),
-            "std": ("Std. dev", lambda arr: np.nanstd(arr)),
-            "ptp": ("Peak-to-peak", lambda arr: np.nanmax(arr) - np.nanmin(arr)),
+            "mean": ("Mean", lambda arr, axis=None: np.nanmean(arr, axis=axis)),
+            "median": ("Median", lambda arr, axis=None: np.nanmedian(arr, axis=axis)),
+            "min": ("Minimum", lambda arr, axis=None: np.nanmin(arr, axis=axis)),
+            "max": ("Maximum", lambda arr, axis=None: np.nanmax(arr, axis=axis)),
+            "std": ("Std. dev", lambda arr, axis=None: np.nanstd(arr, axis=axis)),
+            "ptp": (
+                "Peak-to-peak",
+                lambda arr, axis=None: np.nanmax(arr, axis=axis) - np.nanmin(arr, axis=axis),
+            ),
         }
         self._roi_method_key: str = "mean"
         self._roi_last_slices: Optional[Tuple[slice, slice]] = None
@@ -2465,6 +2593,19 @@ class SequentialView(QtWidgets.QWidget):
         self.btn_autorange.clicked.connect(self._on_autorange_clicked)
         btn_row.addWidget(self.btn_autorange)
 
+        btn_row.addSpacing(12)
+
+        cmap_label = QtWidgets.QLabel("Color map:")
+        cmap_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        btn_row.addWidget(cmap_label, 0)
+
+        self.cmb_colormap = QtWidgets.QComboBox()
+        self.cmb_colormap.setEnabled(False)
+        self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        self.cmb_colormap.currentIndexChanged.connect(self._on_colormap_changed)
+        btn_row.addWidget(self.cmb_colormap, 0)
+        self._populate_colormap_choices()
+
         btn_row.addStretch(1)
         outer.addLayout(btn_row)
 
@@ -2477,12 +2618,18 @@ class SequentialView(QtWidgets.QWidget):
         self.viewer_split.addWidget(self.viewer)
         hist = self.viewer.histogram_widget()
         if hist is not None and self.viewer_split.indexOf(hist) == -1:
+            hist.setSizePolicy(
+                QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+            )
+            hist.setMinimumWidth(140)
+            hist.setMaximumWidth(180)
             self.viewer_split.addWidget(hist)
             try:
                 self.viewer_split.setStretchFactor(0, 1)
                 self.viewer_split.setStretchFactor(1, 0)
             except Exception:
                 pass
+            QtCore.QTimer.singleShot(0, lambda: self.viewer_split.setSizes([600, 150]))
 
         roi_row = QtWidgets.QHBoxLayout()
         self.btn_toggle_roi = QtWidgets.QPushButton("Enable ROI")
@@ -2496,24 +2643,69 @@ class SequentialView(QtWidgets.QWidget):
         roi_row.addWidget(self.lbl_roi_status, 1)
         outer.addLayout(roi_row)
 
-        self.roi_curve = pg.PlotWidget()
-        self.roi_curve.setMinimumHeight(140)
-        self.roi_curve.showGrid(x=True, y=True, alpha=0.3)
-        self.roi_curve.setLabel("bottom", "Slice coordinate")
-        self.roi_curve.setLabel("left", "ROI statistic")
-        self.roi_curve_curve = self.roi_curve.plot([], [], pen=pg.mkPen('#ffaa00', width=2))
-        self.roi_curve.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-        self.roi_curve.customContextMenuRequested.connect(self._show_roi_context_menu)
-        self.roi_curve.hide()
-        outer.addWidget(self.roi_curve, 0)
-
         self.roi = pg.RectROI([10, 10], [40, 40], pen=pg.mkPen('#ffaa00', width=2))
         self.roi.addScaleHandle((1, 1), (0, 0))
         self.roi.addScaleHandle((0, 0), (1, 1))
         self.roi.hide()
         self.roi.sigRegionChanged.connect(self._on_roi_region_changed)
 
+        self._roi_window: Optional[SequentialRoiWindow] = None
+        self._roi_axis_options: List[Tuple[str, Tuple[int, ...], str, str]] = []
+        self._roi_axes_selection: Tuple[int, ...] = (0, 1)
+        self._roi_axis_index: int = 0
+
     # ---------- dataset helpers ----------
+    def _populate_colormap_choices(self):
+        candidates = [
+            "gray",
+            "viridis",
+            "plasma",
+            "inferno",
+            "magma",
+            "cividis",
+            "turbo",
+            "thermal",
+        ]
+        self.cmb_colormap.blockSignals(True)
+        self.cmb_colormap.clear()
+        for name in candidates:
+            try:
+                pg.colormap.get(name)
+            except Exception:
+                continue
+            self.cmb_colormap.addItem(name.title(), name)
+        if self.cmb_colormap.count() == 0:
+            self.cmb_colormap.addItem("Default", "default")
+        self.cmb_colormap.blockSignals(False)
+        if self.cmb_colormap.count():
+            self.cmb_colormap.setCurrentIndex(0)
+
+    def _on_colormap_changed(self):
+        if not hasattr(self, "viewer"):
+            return
+        self._apply_selected_colormap()
+
+    def _apply_selected_colormap(self):
+        if not hasattr(self, "viewer"):
+            return
+        name = self.cmb_colormap.currentData()
+        if not name or name == "default":
+            target = "viridis"
+        else:
+            target = str(name)
+        try:
+            cmap = pg.colormap.get(target)
+        except Exception:
+            return
+        try:
+            self.viewer.lut.gradient.setColorMap(cmap)
+        except Exception:
+            return
+        try:
+            self.viewer.lut.rehide_stops()
+        except Exception:
+            pass
+
     def set_processing_manager(self, manager: Optional[ProcessingManager]):
         self.processing_manager = manager
 
@@ -2580,8 +2772,13 @@ class SequentialView(QtWidgets.QWidget):
         self.btn_toggle_roi.setChecked(False)
         self.btn_toggle_roi.blockSignals(False)
         self.btn_toggle_roi.setEnabled(False)
-        self.roi_curve.hide()
-        self.roi_curve_curve.setData([], [])
+        if self._roi_window is not None:
+            try:
+                self._roi_window.hide()
+                self._roi_window.update_slice_curve([], [], "Slice coordinate", "ROI statistic")
+                self._roi_window.update_profile([], [], "", "", False)
+            except Exception:
+                pass
         self.lbl_roi_status.setText("ROI disabled")
         self._roi_enabled = False
         self._roi_last_slices = None
@@ -2601,6 +2798,7 @@ class SequentialView(QtWidgets.QWidget):
         self.btn_reset_processing.setEnabled(False)
         self.btn_autoscale.setEnabled(False)
         self.btn_autorange.setEnabled(False)
+        self.cmb_colormap.setEnabled(False)
         self.lbl_slice.setText("Slice: –")
 
     def _set_dataset(self, ds: xr.Dataset, path: Optional[Path]):
@@ -2644,6 +2842,10 @@ class SequentialView(QtWidgets.QWidget):
         self._current_processed_slice = None
         self._roi_last_shape = None
         self._roi_last_slices = None
+        self._roi_axis_options = []
+        self._roi_axis_index = 0
+        self._roi_axes_selection = (0, 1)
+        self._update_roi_window_options()
 
     def _clear_fixed_dim_widgets(self):
         while self.fixed_dims_layout.rowCount():
@@ -2675,6 +2877,7 @@ class SequentialView(QtWidgets.QWidget):
         self._rebuild_axis_controls()
         self._update_slice_widgets()
         self._update_slice_display(autorange=True)
+        self._update_roi_axis_options()
 
     def _rebuild_axis_controls(self):
         dims = self._dims
@@ -2758,6 +2961,7 @@ class SequentialView(QtWidgets.QWidget):
         self._rebuild_fixed_indices()
         self._update_slice_widgets()
         self._update_slice_display(autorange=True)
+        self._update_roi_axis_options()
 
     def _on_fixed_index_changed(self, dim: str, value: int):
         self._fixed_indices[dim] = int(value)
@@ -2888,6 +3092,8 @@ class SequentialView(QtWidgets.QWidget):
             self.viewer.set_rectilinear(coords["x"], coords["y"], processed, autorange=autorange)
         else:
             self.viewer.set_image(processed, autorange=autorange)
+        self.cmb_colormap.setEnabled(True)
+        self._apply_selected_colormap()
         self._update_slice_label()
         if self._roi_enabled:
             self._update_roi_slice_reference()
@@ -2915,6 +3121,122 @@ class SequentialView(QtWidgets.QWidget):
         self._update_slice_display(autorange=True)
 
     # ---------- ROI controls ----------
+    def _ensure_roi_window(self) -> SequentialRoiWindow:
+        window = self._roi_window
+        if window is None:
+            window = SequentialRoiWindow(self)
+            window.axesChanged.connect(self._on_roi_axes_changed_from_window)
+            window.reducerChanged.connect(self._set_roi_method)
+            window.closed.connect(self._on_roi_window_closed)
+            self._roi_window = window
+        self._update_roi_window_options()
+        return window
+
+    def _on_roi_window_closed(self):
+        if self._roi_enabled:
+            self.btn_toggle_roi.blockSignals(True)
+            self.btn_toggle_roi.setChecked(False)
+            self.btn_toggle_roi.blockSignals(False)
+            self._on_roi_toggled(False)
+
+    def _update_roi_axis_options(self):
+        options: List[Tuple[str, Tuple[int, ...], str, str]] = []
+        if self._row_axis and self._col_axis:
+            row_label = self._row_axis
+            col_label = self._col_axis
+            slice_label = self._slice_axis or "slice axis"
+            options.append(
+                (
+                    f"Reduce {row_label} & {col_label}",
+                    (0, 1),
+                    f"{row_label} & {col_label}",
+                    slice_label,
+                )
+            )
+            options.append(
+                (
+                    f"Reduce {row_label} → profile across {col_label}",
+                    (0,),
+                    row_label,
+                    col_label,
+                )
+            )
+            options.append(
+                (
+                    f"Reduce {col_label} → profile across {row_label}",
+                    (1,),
+                    col_label,
+                    row_label,
+                )
+            )
+        self._roi_axis_options = options
+        if not options:
+            self._roi_axis_index = 0
+            self._roi_axes_selection = (0, 1)
+        else:
+            self._roi_axis_index = max(0, min(self._roi_axis_index, len(options) - 1))
+            self._roi_axes_selection = tuple(options[self._roi_axis_index][1])
+        self._update_roi_window_options()
+
+    def _on_roi_axes_changed_from_window(self, axes: Tuple[int, ...]):
+        axes = tuple(int(a) for a in axes) if axes else (0, 1)
+        matched = False
+        for idx, option in enumerate(self._roi_axis_options):
+            if tuple(option[1]) == axes:
+                self._roi_axis_index = idx
+                matched = True
+                break
+        if not matched and self._roi_axis_options:
+            self._roi_axis_index = 0
+            axes = tuple(self._roi_axis_options[0][1])
+        self._roi_axes_selection = axes if axes else (0, 1)
+        self._update_roi_window_hint()
+        if self._roi_enabled:
+            self._update_roi_curve()
+
+    def _current_roi_option(self) -> Optional[Tuple[str, Tuple[int, ...], str, str]]:
+        if not self._roi_axis_options:
+            return None
+        idx = max(0, min(self._roi_axis_index, len(self._roi_axis_options) - 1))
+        return self._roi_axis_options[idx]
+
+    def _update_roi_window_options(self):
+        if self._roi_window is None:
+            return
+        self._roi_window.set_axis_options(self._roi_axis_options, self._roi_axis_index)
+        self._roi_window.set_reducer_options(self._roi_reducers, self._roi_method_key)
+        self._update_roi_window_hint()
+
+    def _update_roi_window_hint(self):
+        if self._roi_window is None:
+            return
+        option = self._current_roi_option()
+        if option is None:
+            self._roi_window.set_hint("")
+            return
+        _, axes, collapsed, remaining = option
+        if set(axes) == {0, 1}:
+            slice_label = self._slice_axis or "slice axis"
+            hint = f"Collapsing {collapsed} to track statistics along {slice_label}."
+        elif axes == (0,):
+            hint = f"Collapsing {collapsed} to profile across {remaining} for the active slice."
+        elif axes == (1,):
+            hint = f"Collapsing {collapsed} to profile across {remaining} for the active slice."
+        else:
+            hint = ""
+        self._roi_window.set_hint(hint)
+
+    def _current_roi_array(self) -> Optional[np.ndarray]:
+        if self._current_processed_slice is None:
+            return None
+        if self._roi_last_slices is not None:
+            sy, sx = self._roi_last_slices
+            try:
+                return np.asarray(self._current_processed_slice[sy, sx], float)
+            except Exception:
+                pass
+        return np.asarray(self._current_processed_slice, float)
+
     def _on_roi_toggled(self, checked: bool):
         checked = bool(checked)
         view = getattr(self.viewer, "plot", None)
@@ -2923,10 +3245,13 @@ class SequentialView(QtWidgets.QWidget):
                 view.addItem(self.roi)
             self.roi.show()
             self._roi_enabled = True
-            self.roi_curve.show()
             self.lbl_roi_status.setText(self._describe_roi())
             self._reset_roi_to_image(self._current_processed_slice.shape)
             self._update_roi_slice_reference()
+            self._update_roi_axis_options()
+            window = self._ensure_roi_window()
+            window.show()
+            window.raise_()
             self._update_roi_curve()
         else:
             if view is not None and self.roi.scene() is not None:
@@ -2935,11 +3260,16 @@ class SequentialView(QtWidgets.QWidget):
                 except Exception:
                     pass
             self.roi.hide()
-            self.roi_curve.hide()
             self._roi_enabled = False
             self._roi_last_slices = None
             self._roi_last_shape = None
-            self.roi_curve_curve.setData([], [])
+            if self._roi_window is not None:
+                try:
+                    self._roi_window.hide()
+                    self._roi_window.update_slice_curve([], [], "Slice coordinate", "ROI statistic")
+                    self._roi_window.update_profile([], [], "", "", False)
+                except Exception:
+                    pass
             self.lbl_roi_status.setText("ROI disabled")
 
     def _reset_roi_to_image(self, shape: Optional[Tuple[int, int]] = None):
@@ -3006,20 +3336,41 @@ class SequentialView(QtWidgets.QWidget):
                 roi_data = None
         if roi_data is None:
             roi_data = np.asarray(data, float)
+        axes = tuple(int(a) for a in self._roi_axes_selection) or (0, 1)
+        axes = tuple(sorted(set(axes)))
         with np.errstate(all="ignore"):
-            value = reducer(roi_data)
+            if not axes:
+                result = reducer(roi_data, axis=None)
+            else:
+                axis_param = axes[0] if len(axes) == 1 else axes
+                result = reducer(roi_data, axis=axis_param)
+            while isinstance(result, np.ndarray) and result.ndim > 0:
+                if result.ndim == 1:
+                    result = reducer(result, axis=0)
+                else:
+                    result = reducer(result, axis=tuple(range(result.ndim)))
         try:
-            return float(value)
+            return float(np.asarray(result).item())
         except Exception:
-            return float("nan")
+            try:
+                return float(result)
+            except Exception:
+                return float("nan")
 
     def _update_roi_curve(self):
+        if self._roi_window is not None and not self._roi_window.isVisible():
+            self._roi_window.update_slice_curve([], [], "Slice coordinate", "ROI statistic")
+            self._roi_window.update_profile([], [], "", "", False)
         if not self._roi_enabled or self._current_da is None:
-            self.roi_curve_curve.setData([], [])
+            if self._roi_window is not None:
+                self._roi_window.update_slice_curve([], [], "Slice coordinate", "ROI statistic")
+                self._roi_window.update_profile([], [], "", "", False)
             return
         count = max(0, self._slice_count)
         if count == 0:
-            self.roi_curve_curve.setData([], [])
+            if self._roi_window is not None:
+                self._roi_window.update_slice_curve([], [], "Slice coordinate", "ROI statistic")
+                self._roi_window.update_profile([], [], "", "", False)
             return
         self._update_roi_slice_reference()
         values: List[float] = []
@@ -3039,40 +3390,58 @@ class SequentialView(QtWidgets.QWidget):
                 xs.append(float(coords[idx]))
             else:
                 xs.append(float(idx))
-        self.roi_curve_curve.setData(xs, values)
         name = self._roi_reducers.get(self._roi_method_key, ("ROI statistic",))[0]
         axis_label = self._slice_axis or "Slice"
-        self.roi_curve.setLabel("left", name)
-        self.roi_curve.setLabel("bottom", axis_label)
-        self.roi_curve.enableAutoRange()
+        if self._roi_window is not None:
+            self._roi_window.update_slice_curve(xs, values, axis_label, name)
+            self._update_roi_profile_plot()
         self.lbl_roi_status.setText(self._describe_roi())
+
+    def _update_roi_profile_plot(self):
+        if self._roi_window is None or not self._roi_enabled:
+            return
+        option = self._current_roi_option()
+        if option is None:
+            self._roi_window.update_profile([], [], "", "", False)
+            return
+        _, axes, _collapsed, remaining = option
+        if set(axes) == {0, 1}:
+            self._roi_window.update_profile([], [], "", "", False)
+            return
+        data = self._current_roi_array()
+        reducer_entry = self._roi_reducers.get(self._roi_method_key)
+        if data is None or reducer_entry is None:
+            self._roi_window.update_profile([], [], "", "", False)
+            return
+        _, reducer = reducer_entry
+        axis = axes[0] if axes else 0
+        with np.errstate(all="ignore"):
+            profile = reducer(data, axis=axis)
+        try:
+            prof_arr = np.asarray(profile, float)
+        except Exception:
+            self._roi_window.update_profile([], [], "", "", False)
+            return
+        if prof_arr.ndim > 1:
+            prof_arr = np.asarray(prof_arr).ravel()
+        xs = list(range(int(prof_arr.size)))
+        ys = [float(val) if np.isfinite(val) else np.nan for val in prof_arr]
+        xlabel = remaining or (self._col_axis if axis == 0 else self._row_axis) or "Index"
+        ylabel = self._roi_reducers.get(self._roi_method_key, ("Value",))[0]
+        self._roi_window.update_profile(xs, ys, xlabel, ylabel, True)
 
     def _describe_roi(self) -> str:
         name = self._roi_reducers.get(self._roi_method_key, ("statistic",))[0]
-        axis = self._slice_axis or "axis"
-        return f"ROI {name.lower()} across {axis}"
-
-    def _show_roi_context_menu(self, pos):
-        if not self._roi_enabled:
-            return
-        menu = QtWidgets.QMenu(self)
-        group = QtWidgets.QActionGroup(menu)
-        for key, (label, _) in self._roi_reducers.items():
-            act = menu.addAction(label)
-            act.setCheckable(True)
-            act.setChecked(key == self._roi_method_key)
-            act.setData(key)
-            group.addAction(act)
-        action = menu.exec_(self.roi_curve.mapToGlobal(pos))
-        if action is not None:
-            key = action.data()
-            if key:
-                self._set_roi_method(str(key))
+        option = self._current_roi_option()
+        collapsed = option[2] if option else "region"
+        axis = self._slice_axis or "slice axis"
+        return f"ROI {name.lower()} of {collapsed} across {axis}"
 
     def _set_roi_method(self, key: str):
         if key not in self._roi_reducers or key == self._roi_method_key:
             return
         self._roi_method_key = key
+        self._update_roi_window_options()
         if self._roi_enabled:
             self._update_roi_curve()
         self.lbl_roi_status.setText(self._describe_roi())
