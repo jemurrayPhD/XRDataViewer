@@ -2610,6 +2610,9 @@ class VolumeAlphaCurveWidget(QtWidgets.QWidget):
             self._handles.append(handle)
 
         self.setMinimumHeight(120)
+        self.setMaximumHeight(220)
+        size_policy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        self.setSizePolicy(size_policy)
         self._update_scene_geometry()
         self.reset_curve()
 
@@ -2782,6 +2785,9 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         layout.addLayout(controls)
 
         self.alpha_widget = VolumeAlphaCurveWidget()
+        self.alpha_widget.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        )
         self.alpha_widget.curveChanged.connect(self._on_alpha_curve_changed)
         layout.addWidget(self.alpha_widget)
 
@@ -2795,6 +2801,10 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self._on_alpha_curve_changed(self.alpha_widget.curve_points())
 
         self.view = gl.GLViewWidget()
+        self.view.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        )
+        self.view.setMinimumHeight(260)
         self.view.opts["distance"] = 400
         self.view.setBackgroundColor(QtGui.QColor(20, 20, 20))
         layout.addWidget(self.view, 1)
