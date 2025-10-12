@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import io
 import warnings
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -10,6 +11,7 @@ from dataclasses import replace
 from functools import partial
 import itertools
 import copy
+import traceback
 
 import numpy as np
 import xarray as xr
@@ -24,6 +26,8 @@ try:
     import pyqtgraph.opengl as gl
 except Exception:  # pragma: no cover - optional dependency
     gl = None
+
+from contextlib import redirect_stdout, redirect_stderr
 
 from xr_plot_widget import (
     CentralPlotWidget,
@@ -2410,7 +2414,7 @@ class DatasetsPane(QtWidgets.QWidget):
         else:
             log_action(f"Registered sliced dataset '{name}' with {stored.dims}")
 
-    def register_interactive_dataset(self, label: str, dataset: xr.Dataset):
+    def register_interactive_dataset(self, label: str, dataset: xr.Dataset) -> str:
         name = self._unique_label("interactive", label)
         working = dataset
         try:
@@ -2429,6 +2433,14 @@ class DatasetsPane(QtWidgets.QWidget):
         except Exception:
             pass
         log_action(f"Registered interactive dataset '{name}'")
+        return name
+
+    def register_interactive_dataarray(self, label: str, dataarray: xr.DataArray) -> str:
+        var_name = dataarray.name or "variable"
+        dataset = xr.Dataset({var_name: dataarray})
+        dataset[var_name].attrs.setdefault("_source_var", var_name)
+        dataset[var_name].attrs.setdefault("_slice_label", label)
+        return self.register_interactive_dataset(label, dataset)
 
     def _populate_memory_children(self, root: QtWidgets.QTreeWidgetItem, key: str, dataset: xr.Dataset):
         added = False
@@ -2995,6 +3007,268 @@ class SliceDataTab(QtWidgets.QWidget):
         self._set_dataset(dataset, Path(path).name, path=Path(path))
 
 
+class InteractivePreviewWidget(QtWidgets.QWidget):
+    """Lightweight preview panel for the interactive Python console."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        self._instructions = QtWidgets.QLabel(
+            "Use preview.show(array) to render 1D/2D data from the console, or "
+            "preview.plot(x, y) for explicit curves."
+        )
+        self._instructions.setWordWrap(True)
+        self._instructions.setStyleSheet("color: #666;")
+        layout.addWidget(self._instructions)
+
+        self._stack = QtWidgets.QStackedWidget()
+        self._placeholder = QtWidgets.QLabel("No preview data")
+        self._placeholder.setAlignment(QtCore.Qt.AlignCenter)
+        self._placeholder.setStyleSheet("color: #777; border: 1px dashed #bbb; padding: 12px;")
+        self._stack.addWidget(self._placeholder)
+
+        axis_items = {
+            "bottom": ScientificAxisItem(),
+            "left": ScientificAxisItem(),
+        }
+        self._plot_widget = pg.PlotWidget(axisItems=axis_items)
+        self._plot_widget.showGrid(x=True, y=True, alpha=0.15)
+        self._plot_widget.setBackground("#121212")
+        self._plot_widget.setMinimumHeight(160)
+        self._stack.addWidget(self._plot_widget)
+
+        self._image_canvas = pg.GraphicsLayoutWidget()
+        self._image_view = self._image_canvas.addViewBox()
+        self._image_view.setAspectLocked(True)
+        self._image_item = pg.ImageItem()
+        self._image_view.addItem(self._image_item)
+        self._stack.addWidget(self._image_canvas)
+
+        layout.addWidget(self._stack, 1)
+
+        self._status = QtWidgets.QLabel(" ")
+        self._status.setWordWrap(True)
+        self._status.setStyleSheet("color: #555;")
+        layout.addWidget(self._status)
+
+        self._stack.setCurrentWidget(self._placeholder)
+
+    def clear(self):
+        self._plot_widget.clear()
+        self._image_item.hide()
+        self._stack.setCurrentWidget(self._placeholder)
+        self._status.setText(" ")
+
+    def plot(
+        self,
+        x: Iterable[float],
+        y: Iterable[float],
+        *,
+        xlabel: str = "x",
+        ylabel: str = "y",
+        title: Optional[str] = None,
+    ):
+        self._plot_widget.clear()
+        x_vals = np.asarray(list(x), dtype=float)
+        y_vals = np.asarray(list(y), dtype=float)
+        self._plot_widget.plot(x_vals, y_vals, pen=pg.mkPen("#1d72b8", width=2))
+        self._plot_widget.setLabel("bottom", xlabel)
+        self._plot_widget.setLabel("left", ylabel)
+        self._plot_widget.setTitle(title or "")
+        self._stack.setCurrentWidget(self._plot_widget)
+        self._status.setText(f"Displayed curve with {len(x_vals)} samples.")
+
+    def show(self, data: object, *, title: Optional[str] = None):
+        if isinstance(data, xr.Dataset):
+            if data.data_vars:
+                first = next(iter(data.data_vars))
+                return self.show(data[first], title=title or first)
+            self.clear()
+            self._status.setText("Dataset contains no data variables.")
+            return
+
+        if isinstance(data, xr.DataArray):
+            array = data.values
+            dims = list(data.dims)
+            coords = [np.asarray(data.coords[d].values) if d in data.coords else None for d in dims]
+            name = data.name or title
+        else:
+            array = np.asarray(data)
+            dims = [f"dim_{i}" for i in range(array.ndim)]
+            coords = [None for _ in dims]
+            name = title
+
+        if array.ndim <= 1:
+            x_vals = coords[0] if coords else None
+            if x_vals is None:
+                size = int(array.size) if hasattr(array, "size") else len(np.asarray(array).ravel())
+                x_vals = np.arange(size or 1)
+            self.plot(x_vals, np.asarray(array).ravel(), xlabel=dims[0] if dims else "index", title=name)
+            return
+
+        data2d = np.asarray(array)
+        extra_note = ""
+        if data2d.ndim > 2:
+            extra_note = " Showing the first slice of higher-dimensional data."
+            while data2d.ndim > 2:
+                data2d = np.take(data2d, indices=0, axis=-1)
+
+        self._image_item.show()
+        self._image_item.setImage(data2d)
+        self._image_view.autoRange()
+        self._stack.setCurrentWidget(self._image_canvas)
+        label = name or "Preview"
+        self._status.setText(
+            f"Previewing array with shape {tuple(array.shape)}. {extra_note}".strip()
+        )
+        self._plot_widget.setTitle(label)
+
+
+class InteractiveConsoleWidget(QtWidgets.QWidget):
+    """Embeddable interactive Python console with preview support."""
+
+    datasetRegistered = QtCore.Signal(str)
+    dataarrayRegistered = QtCore.Signal(str)
+    messageEmitted = QtCore.Signal(str)
+
+    def __init__(self, library: DatasetsPane, parent=None):
+        super().__init__(parent)
+        self.library = library
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        layout.addWidget(splitter)
+
+        console_panel = QtWidgets.QWidget()
+        console_layout = QtWidgets.QVBoxLayout(console_panel)
+        console_layout.setContentsMargins(4, 4, 4, 4)
+        console_layout.setSpacing(4)
+
+        instructions = QtWidgets.QLabel(
+            "Execute Python code below. Use RegisterDataset(ds, label=...) or "
+            "RegisterDataArray(da, label=...) to send results to the data library."
+        )
+        instructions.setWordWrap(True)
+        instructions.setStyleSheet("color: #666;")
+        console_layout.addWidget(instructions)
+
+        self.output_view = QtWidgets.QTextEdit()
+        self.output_view.setReadOnly(True)
+        self.output_view.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+        console_layout.addWidget(self.output_view, 2)
+
+        self.input_edit = QtWidgets.QPlainTextEdit()
+        self.input_edit.setPlaceholderText("Type Python code here and click Run (Ctrl+Enter).")
+        console_layout.addWidget(self.input_edit, 1)
+
+        button_row = QtWidgets.QHBoxLayout()
+        self.btn_run = QtWidgets.QPushButton("Run")
+        self.btn_run.clicked.connect(self._execute_code)
+        self.input_edit.installEventFilter(self)
+        button_row.addWidget(self.btn_run)
+        self.btn_clear_in = QtWidgets.QPushButton("Clear input")
+        self.btn_clear_in.clicked.connect(self.input_edit.clear)
+        button_row.addWidget(self.btn_clear_in)
+        self.btn_clear_out = QtWidgets.QPushButton("Clear output")
+        self.btn_clear_out.clicked.connect(self.output_view.clear)
+        button_row.addWidget(self.btn_clear_out)
+        button_row.addStretch(1)
+        console_layout.addLayout(button_row)
+
+        splitter.addWidget(console_panel)
+
+        self.preview = InteractivePreviewWidget()
+        splitter.addWidget(self.preview)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+
+        self._globals = {"__builtins__": __builtins__}
+        self._locals = {
+            "np": np,
+            "xr": xr,
+            "RegisterDataset": self._cmd_register_dataset,
+            "RegisterDataArray": self._cmd_register_dataarray,
+            "preview": self.preview,
+        }
+
+    def eventFilter(self, obj, event):
+        if obj is self.input_edit and event.type() == QtCore.QEvent.KeyPress:
+            if event.key() in (QtCore.Qt.Key_Enter, QtCore.Qt.Key_Return) and event.modifiers() & QtCore.Qt.ControlModifier:
+                self._execute_code()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _append_output(self, text: str, role: str = "output"):
+        if not text:
+            return
+        cursor = self.output_view.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.End)
+        fmt = QtGui.QTextCharFormat()
+        if role == "input":
+            fmt.setForeground(QtGui.QColor("#bbbbbb"))
+        elif role == "error":
+            fmt.setForeground(QtGui.QColor("#d1495b"))
+        else:
+            fmt.setForeground(QtGui.QColor("#2a9d8f"))
+        cursor.insertText(text, fmt)
+        self.output_view.setTextCursor(cursor)
+        self.output_view.ensureCursorVisible()
+
+    def _execute_code(self):
+        code_text = self.input_edit.toPlainText()
+        if not code_text.strip():
+            return
+
+        lines = code_text.rstrip().splitlines()
+        for idx, line in enumerate(lines):
+            prefix = ">>> " if idx == 0 else "... "
+            self._append_output(prefix + line + "\n", role="input")
+
+        stdout_buffer = io.StringIO()
+        stderr_buffer = io.StringIO()
+        try:
+            with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
+                exec(code_text, self._globals, self._locals)
+        except Exception:
+            stderr_buffer.write(traceback.format_exc())
+
+        out_text = stdout_buffer.getvalue()
+        err_text = stderr_buffer.getvalue()
+        if out_text:
+            self._append_output(out_text, role="output")
+        if err_text:
+            self._append_output(err_text, role="error")
+            self.messageEmitted.emit("Execution finished with errors.")
+        elif not out_text.strip():
+            self.messageEmitted.emit("Execution finished.")
+
+    def _cmd_register_dataset(self, dataset: xr.Dataset, label: Optional[str] = None) -> str:
+        if not isinstance(dataset, xr.Dataset):
+            raise TypeError("RegisterDataset expects an xarray.Dataset")
+        base_label = label or str(dataset.attrs.get("title") or dataset.attrs.get("name") or "interactive_dataset")
+        name = self.library.register_interactive_dataset(base_label, dataset)
+        print(f"Registered dataset '{name}' in the Interactive Data tab.")
+        self.datasetRegistered.emit(name)
+        self.messageEmitted.emit(f"Registered dataset '{name}'.")
+        return name
+
+    def _cmd_register_dataarray(self, dataarray: xr.DataArray, label: Optional[str] = None) -> str:
+        if not isinstance(dataarray, xr.DataArray):
+            raise TypeError("RegisterDataArray expects an xarray.DataArray")
+        base_label = label or str(dataarray.name or "interactive_array")
+        name = self.library.register_interactive_dataarray(base_label, dataarray)
+        print(f"Registered data array '{name}' in the Interactive Data tab.")
+        self.dataarrayRegistered.emit(name)
+        self.messageEmitted.emit(f"Registered data array '{name}'.")
+        return name
+
+
 class InteractiveProcessingTab(QtWidgets.QWidget):
     def __init__(self, library: DatasetsPane, parent=None):
         super().__init__(parent)
@@ -3005,22 +3279,37 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         layout.setSpacing(6)
 
         hint = QtWidgets.QLabel(
-            "Launch or connect to a JupyterLab session here, then register datasets into the library."
+            "Choose an interactive environment. When using the Python console, call "
+            "RegisterDataset(...) or RegisterDataArray(...) to push results into the Interactive Data tab."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666;")
         layout.addWidget(hint)
 
-        self.browser_widget: Optional[QtWidgets.QWidget]
+        mode_row = QtWidgets.QHBoxLayout()
+        lbl_mode = QtWidgets.QLabel("Environment:")
+        mode_row.addWidget(lbl_mode)
+        self.cmb_mode = QtWidgets.QComboBox()
+        self._jupyter_available = QtWebEngineWidgets is not None
+        if self._jupyter_available:
+            self.cmb_mode.addItem("JupyterLab browser", "jupyter")
+        else:
+            self.cmb_mode.addItem("JupyterLab placeholder", "jupyter")
+        self.cmb_mode.addItem("Python console", "python")
+        mode_row.addWidget(self.cmb_mode)
+        mode_row.addStretch(1)
+        layout.addLayout(mode_row)
+
+        self.stack = QtWidgets.QStackedWidget()
         if QtWebEngineWidgets is not None:
-            self.browser_widget = QtWebEngineWidgets.QWebEngineView()
+            jupyter_widget: QtWidgets.QWidget = QtWebEngineWidgets.QWebEngineView()
             html = """
             <html><body style='font-family: sans-serif; color: #333;'>
             <h2>JupyterLab integration placeholder</h2>
             <p>Point this view to an existing JupyterLab server once the backend hook is implemented.</p>
             </body></html>
             """
-            self.browser_widget.setHtml(html)
+            jupyter_widget.setHtml(html)
         else:
             browser = QtWidgets.QTextBrowser()
             browser.setHtml(
@@ -3030,8 +3319,16 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             )
             browser.setReadOnly(True)
             browser.setOpenExternalLinks(True)
-            self.browser_widget = browser
-        layout.addWidget(self.browser_widget, 1)
+            jupyter_widget = browser
+        self.stack.addWidget(jupyter_widget)
+
+        self.console_widget = InteractiveConsoleWidget(self.library)
+        self.console_widget.datasetRegistered.connect(self._on_console_registered)
+        self.console_widget.dataarrayRegistered.connect(self._on_console_registered)
+        self.console_widget.messageEmitted.connect(self._set_status)
+        self.stack.addWidget(self.console_widget)
+
+        layout.addWidget(self.stack, 1)
 
         controls = QtWidgets.QHBoxLayout()
         self.btn_register_dataset = QtWidgets.QPushButton("Register dataset from session…")
@@ -3044,6 +3341,35 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self.lbl_status.setStyleSheet("color: #555;")
         self.lbl_status.setWordWrap(True)
         layout.addWidget(self.lbl_status)
+
+        if not self._jupyter_available:
+            self.cmb_mode.setCurrentIndex(1)
+            self.stack.setCurrentIndex(1)
+        else:
+            self.stack.setCurrentIndex(0)
+
+        self.cmb_mode.currentIndexChanged.connect(self._on_mode_changed)
+        self._on_mode_changed(self.cmb_mode.currentIndex())
+
+    def _on_mode_changed(self, index: int):
+        mode = self.cmb_mode.itemData(index)
+        if mode == "python":
+            self.stack.setCurrentIndex(1)
+            self._set_status(
+                "Python console ready. Use RegisterDataset(...) or RegisterDataArray(...) to export results."
+            )
+            self.console_widget.input_edit.setFocus()
+        else:
+            self.stack.setCurrentIndex(0)
+            self._set_status("Embedded JupyterLab placeholder shown.")
+
+    def _set_status(self, message: str):
+        if not message:
+            message = " "
+        self.lbl_status.setText(message)
+
+    def _on_console_registered(self, label: str):
+        self._set_status(f"Registered '{label}' in the Interactive Data tab.")
 
     def _register_dataset(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -3075,9 +3401,8 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
                 pass
             return
         label = name.strip()
-        # TODO: wire this registration to the active JupyterLab session output.
-        self.library.register_interactive_dataset(label, dataset)
-        self.lbl_status.setText(f"Registered '{label}' in the Interactive Data tab.")
+        final_label = self.library.register_interactive_dataset(label, dataset)
+        self._set_status(f"Registered '{final_label}' in the Interactive Data tab.")
 
 
 # ---------------------------------------------------------------------------
