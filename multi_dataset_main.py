@@ -920,7 +920,7 @@ class PipelineEditorDialog(QtWidgets.QDialog):
 
         self.image_view = pg.ImageView()
         try:
-            self.image_view.getView().invertY(True)
+            self.image_view.getView().invertY(False)
         except Exception:
             pass
         self.roi = pg.RectROI([10, 10], [40, 40], pen=pg.mkPen('#ffaa00', width=2))
@@ -8410,7 +8410,7 @@ class OverlayView(QtWidgets.QWidget):
         # Plot area
         self.glw = pg.GraphicsLayoutWidget()
         self.plot = self.glw.addPlot(row=0, col=0)
-        self.plot.invertY(True)
+        self.plot.invertY(False)
         self.plot.showGrid(x=False, y=False)
         self.plot.setLabel("left", "Y")
         self.plot.setLabel("bottom", "X")
