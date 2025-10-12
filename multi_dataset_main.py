@@ -19,6 +19,8 @@ import sys
 import os
 import re
 import shutil
+import tempfile
+import textwrap
 import socket
 import subprocess
 import threading
@@ -99,6 +101,7 @@ class EmbeddedJupyterManager(QtCore.QObject):
         self._stdout_thread: Optional[threading.Thread] = None
         self._stderr_thread: Optional[threading.Thread] = None
         self._watcher_thread: Optional[threading.Thread] = None
+        self._startup_script: Optional[str] = None
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
@@ -148,6 +151,25 @@ class EmbeddedJupyterManager(QtCore.QObject):
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
 
+        startup_code = textwrap.dedent(
+            """
+            try:
+                import xrdataviewer_bridge  # noqa: F401
+                xrdataviewer_bridge.enable_auto_sync()
+            except Exception:
+                pass
+            """
+        )
+        try:
+            fd, script_path = tempfile.mkstemp(prefix="xrdataviewer_startup_", suffix=".py")
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(startup_code)
+            env["IPYTHONSTARTUP"] = script_path
+            self._startup_script = script_path
+        except Exception as exc:
+            self._startup_script = None
+            warnings.warn(f"Unable to configure XRDataViewer auto-sync startup script: {exc}")
+
         try:
             self._process = subprocess.Popen(
                 args,
@@ -159,6 +181,12 @@ class EmbeddedJupyterManager(QtCore.QObject):
             )
         except Exception as exc:
             self._process = None
+            if self._startup_script:
+                try:
+                    os.remove(self._startup_script)
+                except Exception:
+                    pass
+                self._startup_script = None
             self.failed.emit(f"Failed to start JupyterLab: {exc}")
             return False
 
@@ -207,6 +235,12 @@ class EmbeddedJupyterManager(QtCore.QObject):
         self._token = None
         self._url = None
         self._ready_emitted = False
+        if self._startup_script:
+            try:
+                os.remove(self._startup_script)
+            except Exception:
+                pass
+            self._startup_script = None
 
     def url(self) -> Optional[str]:
         return self._url
@@ -4382,15 +4416,18 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         layout.setSpacing(6)
 
         hint_text = (
-            "Choose an interactive environment. When using the Python console, call "
-            "<code>RegisterDataset(...)</code> or <code>RegisterDataArray(...)</code> to push results into the "
-            "Interactive Data tab."
+            "Choose an interactive environment. The embedded JupyterLab session automatically mirrors any "
+            "<code>xarray.Dataset</code> or <code>xarray.DataArray</code> defined in your notebook into the Interactive "
+            "Data tab after each cell runs."
+        )
+        hint_text += (
+            "<br><br>The Python console exposes <code>RegisterDataset(...)</code> and <code>RegisterDataArray(...)</code> "
+            "helpers if you prefer to push results manually."
         )
         if self.bridge_server and self.bridge_server.register_url():
             hint_text += (
-                "<br><br>From notebooks in this session you can also run:<br>"
-                "<code>from xrdataviewer_bridge import register_dataset, register_dataarray" "<br>"
-                "register_dataset(ds, label=\"My result\")</code>"
+                "<br><br>External notebooks can <code>import xrdataviewer_bridge</code> and call "
+                "<code>enable_auto_sync()</code> to keep their namespace in sync, or use the provided register helpers."
             )
         hint = QtWidgets.QLabel(hint_text)
         hint.setTextFormat(QtCore.Qt.RichText)
