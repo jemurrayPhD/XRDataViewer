@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import warnings
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -2581,6 +2580,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         layout.addWidget(self.view, 1)
 
         self._volume_item: Optional[gl.GLVolumeItem] = None
+        self._volume_scalar: Optional[np.ndarray] = None
 
     # ----- public API -----
     def set_volume(self, data: Optional[np.ndarray]):
@@ -2604,19 +2604,21 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             self._data_min = min_val
             self._data_max = max_val
         self._data = arr.astype(np.float32, copy=False)
+        self._volume_scalar = self._prepare_volume_array(self._data)
         self._update_range_controls(reset=True)
         self._ensure_volume_item()
-        self._apply_volume_data()
+        self._update_volume_visual()
 
     def set_colormap(self, name: Optional[str]):
         if name:
             self._colormap_name = str(name)
         else:
             self._colormap_name = "viridis"
-        self._apply_transfer_function()
+        self._update_volume_visual()
 
     def clear_volume(self):
         self._data = None
+        self._volume_scalar = None
         self._remove_volume()
         self._update_range_controls()
 
@@ -2627,11 +2629,17 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         data = self._data
         if data is None:
             return
-        volume = self._prepare_volume_array(data)
-        self._volume_item = gl.GLVolumeItem(volume, smooth=False)
+        scalar = self._prepare_volume_array(data)
+        self._volume_scalar = scalar
+        rgba = self._compute_rgba_volume(scalar)
+        self._volume_item = gl.GLVolumeItem(rgba, smooth=False)
         self._volume_item.setGLOptions("additive")
         self.view.addItem(self._volume_item)
-        self._apply_transfer_function()
+        if hasattr(self._volume_item, "update"):
+            try:
+                self._volume_item.update()
+            except Exception:
+                pass
 
     def _prepare_volume_array(self, data: np.ndarray) -> np.ndarray:
         if data.ndim != 3:
@@ -2639,95 +2647,49 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         transposed = np.transpose(data, (2, 1, 0))
         return np.ascontiguousarray(transposed, dtype=np.float32)
 
-    def _apply_volume_data(self):
-        if self._data is None or self._volume_item is None:
-            return
-        volume = self._prepare_volume_array(self._data)
-        self._volume_item.setData(volume)
-        self._apply_volume_levels()
-        self._apply_transfer_function()
-
-    def _apply_transfer_function(self):
-        if self._volume_item is None or self._data is None:
-            return
+    def _compute_rgba_volume(self, scalar: np.ndarray) -> np.ndarray:
+        if scalar.size == 0:
+            return np.zeros(scalar.shape + (4,), dtype=np.ubyte)
         try:
             cmap = pg.colormap.get(self._colormap_name)
         except Exception:
             cmap = pg.colormap.get("viridis")
-        lut = cmap.getLookupTable(nPts=512, alpha=True)
-        if lut.shape[1] == 3:
-            alpha = np.full((lut.shape[0], 1), 255, dtype=np.uint8)
-            lut = np.hstack([lut, alpha])
-        values = np.linspace(self._data_min, self._data_max, lut.shape[0])
+        data_min = float(self._data_min)
+        data_max = float(self._data_max)
+        if not np.isfinite(data_min) or not np.isfinite(data_max) or data_min == data_max:
+            data_min = float(np.nanmin(scalar))
+            data_max = float(np.nanmax(scalar))
+            if not np.isfinite(data_min):
+                data_min = 0.0
+            if not np.isfinite(data_max) or data_max == data_min:
+                data_max = data_min + 1.0
+        scale = data_max - data_min
+        if scale == 0.0:
+            scale = 1.0
+        norm = (scalar - data_min) / scale
+        norm = np.clip(norm, 0.0, 1.0)
+        rgba = cmap.map(norm.reshape(-1), mode="byte").reshape(scalar.shape + (4,))
         lo = min(self.spin_min.value(), self.spin_max.value())
         hi = max(self.spin_min.value(), self.spin_max.value())
-        alpha_mask = ((values >= lo) & (values <= hi)).astype(float)
-        lut[:, 3] = (alpha_mask * 255).astype(np.uint8)
+        mask = (scalar >= lo) & (scalar <= hi)
+        alpha = rgba[..., 3]
+        alpha = np.where(mask, alpha, 0)
+        rgba = rgba.copy()
+        rgba[..., 3] = alpha.astype(np.uint8)
+        return np.ascontiguousarray(rgba, dtype=np.ubyte)
 
-        item = self._volume_item
-        applied = False
-        # Preferred: direct lookup-table setter when available.
-        setter = getattr(item, "setLookupTable", None)
-        if callable(setter):
-            try:
-                setter(lut)
-                applied = True
-            except Exception:
-                applied = False
-        if not applied:
-            # Some versions of pyqtgraph expose lut assignment via setData.
-            try:
-                item.setData(lut=lut)
-                applied = True
-            except TypeError:
-                applied = False
-        if not applied:
-            # Fall back to setting the attribute directly and requesting a
-            # redraw. Older releases check ``self.lut`` during paint without a
-            # helper API, so we mirror that behaviour to stay compatible.
-            try:
-                item.lut = lut  # type: ignore[attr-defined]
-                if hasattr(item, "update"):
-                    item.update()
-                applied = True
-            except Exception:
-                applied = False
-        if not applied:
-            logging.getLogger(__name__).warning(
-                "Failed to apply volume lookup table; volume view may not "
-                "respect the selected opacity window."
-            )
-        self._apply_volume_levels()
-
-    def _apply_volume_levels(self):
-        if self._volume_item is None or self._data is None:
+    def _update_volume_visual(self):
+        if self._volume_item is None or self._volume_scalar is None:
             return
-        levels = (self._data_min, self._data_max)
-        item = self._volume_item
-        setter = getattr(item, "setLevels", None)
-        if callable(setter):
+        rgba = self._compute_rgba_volume(self._volume_scalar)
+        try:
+            self._volume_item.setData(rgba)
+        except TypeError:
+            # Older pyqtgraph releases expect the array as the first argument.
+            self._volume_item.setData(data=rgba)
+        if hasattr(self._volume_item, "update"):
             try:
-                setter(levels)
-                return
-            except Exception:
-                pass
-        updated = False
-        opts = getattr(item, "opts", None)
-        if isinstance(opts, dict):
-            try:
-                opts["levels"] = levels
-                updated = True
-            except Exception:
-                updated = False
-        if not updated:
-            try:
-                setattr(item, "levels", levels)
-                updated = True
-            except Exception:
-                updated = False
-        if updated and hasattr(item, "update"):
-            try:
-                item.update()
+                self._volume_item.update()
             except Exception:
                 pass
 
@@ -2763,14 +2725,14 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             self.spin_min.blockSignals(block_min)
             self.spin_max.blockSignals(block_max)
         if reset:
-            self._apply_transfer_function()
+            self._update_volume_visual()
 
     def _on_range_changed(self):
         if self._data is None:
             return
         if self.spin_min.value() > self.spin_max.value():
             return
-        self._apply_transfer_function()
+        self._update_volume_visual()
 
     def _on_reset_range(self):
         if self._data is None:
@@ -2778,7 +2740,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         with QtCore.QSignalBlocker(self.spin_min), QtCore.QSignalBlocker(self.spin_max):
             self.spin_min.setValue(self._data_min)
             self.spin_max.setValue(self._data_max)
-        self._apply_transfer_function()
+        self._update_volume_visual()
 
     def closeEvent(self, event: QtGui.QCloseEvent):
         try:
