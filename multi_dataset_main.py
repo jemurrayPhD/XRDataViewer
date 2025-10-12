@@ -2784,12 +2784,6 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self.alpha_widget = VolumeAlphaCurveWidget()
         self.alpha_widget.curveChanged.connect(self._on_alpha_curve_changed)
         layout.addWidget(self.alpha_widget)
-        self._on_alpha_curve_changed(self.alpha_widget.curve_points())
-
-        self.view = gl.GLViewWidget()
-        self.view.opts["distance"] = 400
-        self.view.setBackgroundColor(QtGui.QColor(20, 20, 20))
-        layout.addWidget(self.view, 1)
 
         self._volume_item: Optional[gl.GLVolumeItem] = None
         self._volume_scalar: Optional[np.ndarray] = None
@@ -2798,6 +2792,12 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self._alpha_lut_y = np.array([0.0, 1.0], dtype=float)
 
         self._update_alpha_controls()
+        self._on_alpha_curve_changed(self.alpha_widget.curve_points())
+
+        self.view = gl.GLViewWidget()
+        self.view.opts["distance"] = 400
+        self.view.setBackgroundColor(QtGui.QColor(20, 20, 20))
+        layout.addWidget(self.view, 1)
 
     # ----- public API -----
     def set_volume(self, data: Optional[np.ndarray]):
