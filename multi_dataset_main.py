@@ -3031,8 +3031,8 @@ class InteractivePreviewWidget(QtWidgets.QWidget):
         self._stack.addWidget(self._placeholder)
 
         axis_items = {
-            "bottom": ScientificAxisItem(),
-            "left": ScientificAxisItem(),
+            "bottom": ScientificAxisItem("bottom"),
+            "left": ScientificAxisItem("left"),
         }
         self._plot_widget = pg.PlotWidget(axisItems=axis_items)
         self._plot_widget.showGrid(x=True, y=True, alpha=0.15)
