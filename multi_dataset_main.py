@@ -3038,18 +3038,23 @@ class SequentialView(QtWidgets.QWidget):
                 return None
             return arr
 
-        self._row_coord_1d = (
-            _extract("row_values", (1,))
-            or _extract("y", (1,))
-            or _extract(self._row_axis or "", (1,))
+        def _first_valid(keys: Iterable[str], allowed_ndim: Tuple[int, ...]) -> Optional[np.ndarray]:
+            for key in keys:
+                if not key:
+                    continue
+                arr = _extract(key, allowed_ndim)
+                if arr is not None:
+                    return arr
+            return None
+
+        self._row_coord_1d = _first_valid(
+            ("row_values", "y", self._row_axis or ""), (1,)
         )
-        self._col_coord_1d = (
-            _extract("col_values", (1,))
-            or _extract("x", (1,))
-            or _extract(self._col_axis or "", (1,))
+        self._col_coord_1d = _first_valid(
+            ("col_values", "x", self._col_axis or ""), (1,)
         )
-        self._row_coord_2d = _extract("row_grid", (2,)) or _extract("Y", (2,))
-        self._col_coord_2d = _extract("col_grid", (2,)) or _extract("X", (2,))
+        self._row_coord_2d = _first_valid(("row_grid", "Y"), (2,))
+        self._col_coord_2d = _first_valid(("col_grid", "X"), (2,))
 
     def _column_coordinates(self, start: int, stop: int) -> Optional[np.ndarray]:
         if self._col_coord_1d is not None and self._col_coord_1d.size >= stop:
