@@ -39,14 +39,36 @@ def open_dataset(path: Path) -> xr.Dataset:
 
 
 # ---------------------------------------------------------------------------
-# VarRef: drag/drop handle for a 2D variable inside a dataset on disk
+# Dataset / variable references used for drag & drop
 # ---------------------------------------------------------------------------
+class DataSetRef(QtCore.QObject):
+    def __init__(self, path: Path):
+        super().__init__()
+        self.path = Path(path)
+
+    def to_mime(self) -> str:
+        return "DatasetRef:" + json.dumps({"path": str(self.path)})
+
+    @staticmethod
+    def from_mime(txt: str) -> Optional["DataSetRef"]:
+        if not txt or not txt.startswith("DatasetRef:"):
+            return None
+        try:
+            data = json.loads(txt.split(":", 1)[1])
+            return DataSetRef(Path(data["path"]))
+        except Exception:
+            return None
+
+    def load(self) -> xr.Dataset:
+        return open_dataset(self.path)
+
+
 class VarRef(QtCore.QObject):
     def __init__(self, path: Path, var: str, hint: str = ""):
         super().__init__()
         self.path = Path(path)
-        self.var = var          # data variable name
-        self.hint = hint        # "(X,Y)" / "(x,y)" / "(pixel)"
+        self.var = var
+        self.hint = hint
 
     def to_mime(self) -> str:
         return "VarRef:" + json.dumps({"path": str(self.path), "var": self.var, "hint": self.hint})
@@ -56,8 +78,8 @@ class VarRef(QtCore.QObject):
         if not txt or not txt.startswith("VarRef:"):
             return None
         try:
-            d = json.loads(txt.split(":", 1)[1])
-            return VarRef(Path(d["path"]), d["var"], d.get("hint", ""))
+            data = json.loads(txt.split(":", 1)[1])
+            return VarRef(Path(data["path"]), data["var"], data.get("hint", ""))
         except Exception:
             return None
 
@@ -1214,6 +1236,7 @@ class DatasetsPane(QtWidgets.QWidget):
 
         root = QtWidgets.QTreeWidgetItem([str(p)])
         root.setExpanded(True)
+        root.setData(0, QtCore.Qt.UserRole, DataSetRef(p).to_mime())
         self.tree.addTopLevelItem(root)
 
         for var in ds.data_vars:
@@ -1230,6 +1253,11 @@ class DatasetsPane(QtWidgets.QWidget):
             child = QtWidgets.QTreeWidgetItem([f"{var}  {hint}"])
             child.setData(0, QtCore.Qt.UserRole, VarRef(p, var, hint).to_mime())
             root.addChild(child)
+
+        try:
+            ds.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1249,6 +1277,7 @@ class ViewerFrame(QtWidgets.QFrame):
             "background-color: rgba(29, 114, 184, 40); }"
         )
 
+        self._base_title = title
         self._raw_data: Optional[np.ndarray] = None
         self._processed_data: Optional[np.ndarray] = None
         self._coords: Dict[str, np.ndarray] = {}
@@ -1256,6 +1285,11 @@ class ViewerFrame(QtWidgets.QFrame):
         self._current_processing: str = "none"
         self._processing_params: Dict[str, object] = {}
         self._selected: bool = False
+        self._dataset_path: Optional[Path] = None
+        self._dataset: Optional[xr.Dataset] = None
+        self._available_variables: List[str] = []
+        self._variable_hints: Dict[str, str] = {}
+        self._current_variable: Optional[str] = None
 
         lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(2,2,2,2); lay.setSpacing(2)
         # Header
@@ -1265,6 +1299,23 @@ class ViewerFrame(QtWidgets.QFrame):
         btn_close.clicked.connect(lambda: self.request_close.emit(self))
         hl.addWidget(btn_close, 0)
         lay.addWidget(hdr, 0)
+
+        # Variable selector
+        selector = QtWidgets.QFrame()
+        selector_layout = QtWidgets.QHBoxLayout(selector)
+        selector_layout.setContentsMargins(6, 0, 6, 0)
+        selector_layout.setSpacing(6)
+        self._var_label = QtWidgets.QLabel("Variable:")
+        self._var_label.setEnabled(False)
+        selector_layout.addWidget(self._var_label, 0)
+        self.cmb_variable = QtWidgets.QComboBox()
+        self.cmb_variable.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        self.cmb_variable.addItem("Select variable…", None)
+        self.cmb_variable.setEnabled(False)
+        self.cmb_variable.currentIndexChanged.connect(self._on_variable_combo_changed)
+        selector_layout.addWidget(self.cmb_variable, 1)
+        lay.addWidget(selector, 0)
+        self._variable_bar = selector
 
         # Center: image on left, histogram on right (toggle visibility)
         self.center_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
@@ -1300,6 +1351,159 @@ class ViewerFrame(QtWidgets.QFrame):
             pass
         self._update_histogram_visibility()
 
+    def _dataset_display_name(self) -> str:
+        if self._dataset_path is not None:
+            return self._dataset_path.name
+        return self._base_title or "Dataset"
+
+    def _set_header_text(self, variable: Optional[str], *, missing: bool = False, custom: Optional[str] = None):
+        if custom is not None:
+            self.lbl.setText(custom)
+            return
+        base = self._dataset_display_name()
+        if variable:
+            suffix = f"{variable} (missing)" if missing else variable
+            self.lbl.setText(f"{base} — {suffix}")
+        else:
+            self.lbl.setText(base)
+
+    def _update_variable_combo(self):
+        block = self.cmb_variable.blockSignals(True)
+        current = self._current_variable if self._current_variable in self._available_variables else None
+        self.cmb_variable.clear()
+        self.cmb_variable.addItem("Select variable…", None)
+        for var in self._available_variables:
+            label = f"{var}{self._variable_hints.get(var, '')}"
+            self.cmb_variable.addItem(label, var)
+        self.cmb_variable.blockSignals(block)
+        has_vars = bool(self._available_variables)
+        self.cmb_variable.setEnabled(has_vars)
+        self._var_label.setEnabled(has_vars)
+        self._select_combo_value(current)
+
+    def _select_combo_value(self, value: Optional[str]):
+        block = self.cmb_variable.blockSignals(True)
+        if value:
+            idx = self.cmb_variable.findData(value)
+            if idx >= 0:
+                self.cmb_variable.setCurrentIndex(idx)
+            else:
+                self.cmb_variable.setCurrentIndex(0)
+        else:
+            self.cmb_variable.setCurrentIndex(0)
+        self.cmb_variable.blockSignals(block)
+
+    def _dispose_dataset(self):
+        if self._dataset is not None:
+            try:
+                close = getattr(self._dataset, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
+        self._dataset = None
+
+    def dispose(self):
+        self._dispose_dataset()
+
+    def set_dataset(self, dataset: xr.Dataset, path: Path, *, select: Optional[str] = None):
+        self._dispose_dataset()
+        self._dataset = dataset
+        self._dataset_path = Path(path) if path is not None else None
+        self._available_variables = []
+        self._variable_hints = {}
+        if self._dataset_path is not None:
+            self.lbl.setToolTip(str(self._dataset_path))
+        else:
+            self.lbl.setToolTip("")
+
+        try:
+            data_vars = getattr(dataset, "data_vars", {})
+        except Exception:
+            data_vars = {}
+        for var in data_vars:
+            try:
+                da = dataset[var]
+            except Exception:
+                continue
+            if getattr(da, "ndim", 0) != 2:
+                continue
+            self._available_variables.append(var)
+            dims = []
+            try:
+                dims = [f"{dim}[{getattr(da, 'sizes', {}).get(dim, '?')}]" for dim in da.dims[:2]]
+            except Exception:
+                dims = []
+            if dims:
+                self._variable_hints[var] = " (" + " × ".join(dims) + ")"
+
+        self._available_variables.sort()
+        self._current_variable = None
+        self._update_variable_combo()
+        self._clear_display()
+        if not self._available_variables:
+            self._set_header_text(None)
+            self._set_header_text(None, custom=f"{self._dataset_display_name()} — No 2D variables")
+            return
+
+        self._set_header_text(None)
+        if select and select in self._available_variables:
+            self.plot_variable(select)
+        else:
+            self._select_combo_value(None)
+
+    def available_variables(self) -> List[str]:
+        return list(self._available_variables)
+
+    def current_variable(self) -> Optional[str]:
+        return self._current_variable
+
+    def _on_variable_combo_changed(self, index: int):
+        data = self.cmb_variable.itemData(index)
+        if data is None:
+            if self._current_variable is not None:
+                self._current_variable = None
+                self._clear_display()
+            else:
+                self._clear_display()
+            return
+        self.plot_variable(str(data))
+
+    def plot_variable(self, var_name: str) -> bool:
+        name = str(var_name or "").strip()
+        if not name:
+            self._current_variable = None
+            self._clear_display()
+            self._select_combo_value(None)
+            return False
+        success = self._load_variable(name)
+        if success:
+            self._select_combo_value(name)
+            return True
+        self._show_missing_variable(name)
+        self._select_combo_value(None)
+        return False
+
+    def _show_missing_variable(self, var_name: str):
+        self._current_variable = None
+        self._clear_display(preserve_header=True)
+        self._set_header_text(var_name, missing=True)
+
+    def _load_variable(self, var_name: str) -> bool:
+        if self._dataset is None:
+            return False
+        try:
+            da = self._dataset[var_name]
+        except Exception:
+            return False
+        if getattr(da, "ndim", 0) != 2:
+            return False
+        coords = guess_phys_coords(da)
+        self.set_data(da, coords)
+        self._current_variable = var_name
+        self._set_header_text(var_name)
+        return True
+
     def set_data(self, da, coords):
         Z = np.asarray(getattr(da, "values", da), float)
         self._raw_data = np.asarray(Z, float)
@@ -1319,6 +1523,10 @@ class ViewerFrame(QtWidgets.QFrame):
         self._current_processing = "none"
         self._processing_params = {}
         self._display_data(self._processed_data, autorange=True)
+        try:
+            self.viewer.img_item.setVisible(True)
+        except Exception:
+            pass
 
     def set_selected(self, selected: bool):
         selected = bool(selected)
@@ -1377,6 +1585,10 @@ class ViewerFrame(QtWidgets.QFrame):
             self.viewer.set_rectilinear(self._coords["x"], self._coords["y"], data, autorange=autorange)
         else:
             self.viewer.set_image(data, autorange=autorange)
+        try:
+            self.viewer.img_item.setVisible(True)
+        except Exception:
+            pass
 
     def set_histogram_visible(self, on: bool):
         self._hist_master_enabled = bool(on)
@@ -1447,6 +1659,27 @@ class ViewerFrame(QtWidgets.QFrame):
             hist_widget.setMinimumWidth(0)
             hist_widget.setMaximumWidth(0)
 
+    def _clear_display(self, *, preserve_header: bool = False):
+        self._raw_data = None
+        self._processed_data = None
+        self._coords = {}
+        self._display_mode = "image"
+        try:
+            self.viewer.img_item.setImage(np.full((1, 1), np.nan), autoLevels=True)
+        except Exception:
+            pass
+        try:
+            self.viewer.img_item.setVisible(False)
+        except Exception:
+            pass
+        try:
+            self.viewer.hide_crosshair()
+            self.viewer.clear_mirrored_crosshair()
+        except Exception:
+            pass
+        if not preserve_header:
+            self._set_header_text(None)
+
 
 # ---------------------------------------------------------------------------
 # MultiView grid: drag vars to create tiles; master toggle for histograms
@@ -1454,7 +1687,7 @@ class ViewerFrame(QtWidgets.QFrame):
 class MultiViewGrid(QtWidgets.QWidget):
     """
     A splitter-based grid of ViewerFrame tiles.
-    - Drag a VarRef (from DatasetsPane) onto this widget to add a tile.
+    - Drag a dataset or variable reference from the DatasetsPane onto this widget to add a tile.
     - 'Columns' spinbox controls how many tiles per row.
     - 'Show histograms' toggles the classic HistogramLUTItem to the right of each tile.
     """
@@ -1543,20 +1776,46 @@ class MultiViewGrid(QtWidgets.QWidget):
         ev.acceptProposedAction() if ev.mimeData().hasText() else ev.ignore()
 
     def dropEvent(self, ev: QtGui.QDropEvent):
-        vr = VarRef.from_mime(ev.mimeData().text())
-        if not vr:
+        text = ev.mimeData().text()
+        ds_ref = DataSetRef.from_mime(text)
+        vr = None if ds_ref else VarRef.from_mime(text)
+
+        if not ds_ref and not vr:
             ev.ignore()
             return
+
+        dataset = None
+        frame_title = ""
         try:
-            da, coords = vr.load()
+            if ds_ref:
+                dataset = ds_ref.load()
+                frame_title = ds_ref.path.name
+            elif vr:
+                dataset = open_dataset(vr.path)
+                frame_title = vr.path.name
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Load failed", str(e))
             ev.ignore()
             return
 
-        fr = ViewerFrame(title=f"{vr.path.name}:{vr.var}", parent=self)
+        fr = ViewerFrame(title=frame_title, parent=self)
         fr.request_close.connect(self._remove_frame)
-        fr.set_data(da, coords)
+        try:
+            if ds_ref:
+                fr.set_dataset(dataset, ds_ref.path)
+            elif vr:
+                fr.set_dataset(dataset, vr.path, select=vr.var)
+        except Exception as exc:
+            try:
+                close = getattr(dataset, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
+            QtWidgets.QMessageBox.warning(self, "Load failed", str(exc))
+            ev.ignore()
+            return
+
         self.frames.append(fr)
         self._connect_frame_signals(fr)
         self._sync_new_frame_to_links(fr)
@@ -1576,6 +1835,10 @@ class MultiViewGrid(QtWidgets.QWidget):
             fr.set_selected(False)
         try:
             fr.setParent(None)
+        except Exception:
+            pass
+        try:
+            fr.dispose()
         except Exception:
             pass
         self._reflow()
@@ -1624,19 +1887,27 @@ class MultiViewGrid(QtWidgets.QWidget):
     def eventFilter(self, obj, event):
         if isinstance(event, QtGui.QMouseEvent):
             etype = event.type()
-            if etype == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
-                frame = self._frame_at_global_pos(event.globalPos())
-                if frame is not None:
-                    ctrl = bool(event.modifiers() & QtCore.Qt.ControlModifier)
-                    if ctrl:
-                        target_state = frame not in self._selected_frames
-                        self._set_frame_selected(frame, target_state, clear=False)
-                        self._drag_select_active = True
-                        self._drag_select_add = target_state
-                    else:
-                        self._set_frame_selected(frame, True, clear=True)
-                        self._drag_select_active = False
-                    self._mouse_down = True
+            if etype == QtCore.QEvent.MouseButtonPress:
+                if event.button() == QtCore.Qt.LeftButton:
+                    frame = self._frame_at_global_pos(event.globalPos())
+                    if frame is not None:
+                        ctrl = bool(event.modifiers() & QtCore.Qt.ControlModifier)
+                        if ctrl:
+                            target_state = frame not in self._selected_frames
+                            self._set_frame_selected(frame, target_state, clear=False)
+                            self._drag_select_active = True
+                            self._drag_select_add = target_state
+                        else:
+                            self._set_frame_selected(frame, True, clear=True)
+                            self._drag_select_active = False
+                        self._mouse_down = True
+                elif event.button() == QtCore.Qt.RightButton:
+                    frame = self._frame_at_global_pos(event.globalPos())
+                    if frame is not None:
+                        if frame not in self._selected_frames:
+                            self._set_frame_selected(frame, True, clear=True)
+                        self._show_plot_context_menu(event.globalPos())
+                        return True
             elif etype == QtCore.QEvent.MouseMove:
                 if self._mouse_down and self._drag_select_active and event.buttons() & QtCore.Qt.LeftButton:
                     frame = self._frame_at_global_pos(event.globalPos())
@@ -1646,7 +1917,62 @@ class MultiViewGrid(QtWidgets.QWidget):
                 if self._mouse_down:
                     self._mouse_down = False
                     self._drag_select_active = False
+        elif isinstance(event, QtGui.QContextMenuEvent):
+            frame = self._frame_at_global_pos(event.globalPos())
+            if frame is not None:
+                if frame not in self._selected_frames:
+                    self._set_frame_selected(frame, True, clear=True)
+                self._show_plot_context_menu(event.globalPos())
+                return True
         return super().eventFilter(obj, event)
+
+    def _show_plot_context_menu(self, global_pos: QtCore.QPoint):
+        menu = QtWidgets.QMenu(self)
+        act_plot = menu.addAction("Plot Data…")
+        if not self.selected_frames():
+            act_plot.setEnabled(False)
+        act_plot.triggered.connect(self._on_plot_data_requested)
+        menu.exec_(global_pos)
+
+    def _on_plot_data_requested(self):
+        frames = self.selected_frames()
+        if not frames:
+            return
+        available: Set[str] = set()
+        for fr in frames:
+            available.update(fr.available_variables())
+        available_list = sorted(available)
+        default = ""
+        for fr in frames:
+            cur = fr.current_variable()
+            if cur:
+                default = cur
+                break
+        items = list(available_list)
+        if default:
+            if default not in items:
+                items.insert(0, default)
+                default_index = 0
+            else:
+                default_index = items.index(default)
+        else:
+            default_index = 0
+        if not items:
+            items = [default] if default else [""]
+            default_index = 0
+        item, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "Plot Data",
+            "Data variable:",
+            items,
+            default_index,
+            editable=True,
+        )
+        if not ok:
+            return
+        name = str(item).strip()
+        for fr in frames:
+            fr.plot_variable(name)
 
     def _on_apply_processing_clicked(self):
         frames = self.selected_frames()
