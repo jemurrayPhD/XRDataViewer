@@ -236,6 +236,70 @@ class MemoryVarRef(QtCore.QObject):
         return da, coords
 
 
+class MemorySliceRef(QtCore.QObject):
+    def __init__(
+        self,
+        dataset_key: str,
+        var: str,
+        alias: str,
+        label: str = "",
+        hint: str = "",
+    ):
+        super().__init__()
+        self.dataset_key = dataset_key
+        self.var = var
+        self.alias = alias
+        self.label = label
+        self.hint = hint
+
+    def to_mime(self) -> str:
+        payload = {
+            "key": self.dataset_key,
+            "var": self.var,
+            "alias": self.alias,
+            "label": self.label,
+            "hint": self.hint,
+        }
+        return "MemorySliceRef:" + json.dumps(payload)
+
+    @staticmethod
+    def from_mime(txt: str) -> Optional["MemorySliceRef"]:
+        if not txt or not txt.startswith("MemorySliceRef:"):
+            return None
+        try:
+            payload = json.loads(txt.split(":", 1)[1])
+        except Exception:
+            return None
+        key = payload.get("key")
+        var = payload.get("var")
+        if not key or not var or not MemoryDatasetRegistry.has(key):
+            return None
+        alias = payload.get("alias") or var
+        label = payload.get("label", "")
+        hint = payload.get("hint", "")
+        return MemorySliceRef(str(key), str(var), str(alias), str(label), str(hint))
+
+    def load(self):
+        dataset = MemoryDatasetRegistry.get_dataset(self.dataset_key)
+        if dataset is None or self.var not in dataset.data_vars:
+            raise RuntimeError("Variable is no longer available in memory")
+        da = dataset[self.var]
+        arr = da.copy(deep=True)
+        alias = da.attrs.get("_source_var", self.alias or self.var)
+        if alias:
+            arr.name = alias
+        coords = guess_phys_coords(arr)
+        return arr, coords, alias
+
+    def dataset_label(self) -> str:
+        return MemoryDatasetRegistry.get_label(self.dataset_key)
+
+    def display_label(self) -> str:
+        base = self.dataset_label()
+        if self.label:
+            return f"{base} — {self.label}"
+        return base
+
 class HighDimVarRef(QtCore.QObject):
     def __init__(self, var: str, hint: str = "", *, path: Optional[Path] = None, memory_key: Optional[str] = None):
         super().__init__()
@@ -1528,6 +1592,7 @@ class DatasetsPane(QtWidgets.QWidget):
         tree.setDragEnabled(True)
         tree.setDefaultDropAction(QtCore.Qt.CopyAction)
         tree.setDropIndicatorShown(False)
+        tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
 
         def _mime_data(_items, *, _tree=tree):
             md = QtCore.QMimeData()
@@ -1590,10 +1655,12 @@ class DatasetsPane(QtWidgets.QWidget):
             item = roots[key]
             item.takeChildren()
             item.setText(0, label)
+            item.setData(0, QtCore.Qt.UserRole + 1, category)
             return item
         item = QtWidgets.QTreeWidgetItem([label])
         item.setExpanded(True)
         item.setData(0, QtCore.Qt.UserRole, mime)
+        item.setData(0, QtCore.Qt.UserRole + 1, category)
         self._trees[category].addTopLevelItem(item)
         roots[key] = item
         return item
@@ -1693,15 +1760,35 @@ class DatasetsPane(QtWidgets.QWidget):
 
     def _populate_memory_children(self, root: QtWidgets.QTreeWidgetItem, key: str, dataset: xr.Dataset):
         added = False
+        category = root.data(0, QtCore.Qt.UserRole + 1) or ""
         for var in dataset.data_vars:
             try:
                 da = dataset[var]
             except Exception:
                 continue
-            hint = self._format_hint(da)
-            text = f"{var}  {hint}"
-            child = QtWidgets.QTreeWidgetItem([text])
             ndim = getattr(da, "ndim", 0)
+            hint = self._format_hint(da)
+            if category == "sliced" and ndim == 2:
+                alias = str(da.attrs.get("_source_var", var) or var)
+                label = str(da.attrs.get("_slice_label", ""))
+                parts = [alias]
+                if label:
+                    parts.append(f"[{label}]")
+                display = " ".join(parts)
+                if hint:
+                    display = f"{display}  {hint}"
+                child = QtWidgets.QTreeWidgetItem([display])
+                child.setData(
+                    0,
+                    QtCore.Qt.UserRole,
+                    MemorySliceRef(key, var, alias, label, hint).to_mime(),
+                )
+                root.addChild(child)
+                added = True
+                continue
+
+            text = f"{var}  {hint}" if hint else var
+            child = QtWidgets.QTreeWidgetItem([text])
             if ndim == 2:
                 child.setData(0, QtCore.Qt.UserRole, MemoryVarRef(key, var, hint).to_mime())
                 added = True
@@ -2104,17 +2191,30 @@ class SliceDataTab(QtWidgets.QWidget):
             return arr
 
         if not slice_dims:
-            data_vars[self._current_var] = _prepare_slice(self._current_da)
+            arr = _prepare_slice(self._current_da)
+            arr = arr.copy(deep=True)
+            arr.name = self._current_var
+            arr.attrs["_source_var"] = self._current_var
+            arr.attrs["_slice_label"] = "Full selection"
+            data_vars[self._current_var] = arr
         else:
             combos = itertools.product(*[indices for _, indices in slice_dims])
             for combo in combos:
                 selectors = {dim: idx for (dim, _), idx in zip(slice_dims, combo)}
                 arr = self._current_da.isel(**selectors)
                 arr = _prepare_slice(arr)
-                label_parts = [f"{dim}{idx}" for dim, idx in selectors.items()]
-                suffix = "_" + "_".join(label_parts) if label_parts else ""
+                arr = arr.copy(deep=True)
+                arr.name = self._current_var
+                arr.attrs["_source_var"] = self._current_var
+                label_parts = [f"{dim}={idx}" for dim, idx in selectors.items()]
+                label_text = ", ".join(label_parts)
+                if label_text:
+                    arr.attrs["_slice_label"] = label_text
+                arr.attrs["_slice_selectors"] = selectors
+                suffix_parts = [f"{dim}{idx}" for dim, idx in selectors.items()]
+                suffix = "_" + "_".join(suffix_parts) if suffix_parts else ""
                 name = f"{self._current_var}{suffix}"
-                data_vars[name] = arr.copy(deep=True)
+                data_vars[name] = arr
         if not data_vars:
             QtWidgets.QMessageBox.information(self, "Generate slices", "No slices were produced.")
             return
@@ -2842,8 +2942,11 @@ class MultiViewGrid(QtWidgets.QWidget):
         mem_ds = MemoryDatasetRef.from_mime(text) if not ds_ref else None
         vr = None if ds_ref or mem_ds else VarRef.from_mime(text)
         mem_var = None if (ds_ref or mem_ds or vr) else MemoryVarRef.from_mime(text)
-
+        slice_ref = None
         if not ds_ref and not mem_ds and not vr and not mem_var:
+            slice_ref = MemorySliceRef.from_mime(text)
+
+        if not ds_ref and not mem_ds and not vr and not mem_var and not slice_ref:
             ev.ignore()
             return
 
@@ -2864,6 +2967,15 @@ class MultiViewGrid(QtWidgets.QWidget):
                 if dataset is None:
                     raise RuntimeError("Dataset is no longer available in memory")
                 frame_title = MemoryDatasetRegistry.get_label(mem_var.dataset_key)
+            elif slice_ref:
+                arr, coords, alias = slice_ref.load()
+                dataset = xr.Dataset({alias: arr})
+                for key, value in coords.items():
+                    try:
+                        dataset[alias] = dataset[alias].assign_coords({key: value})
+                    except Exception:
+                        pass
+                frame_title = slice_ref.display_label()
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Load failed", str(e))
             ev.ignore()
@@ -2882,6 +2994,8 @@ class MultiViewGrid(QtWidgets.QWidget):
                 if mem_var.var not in dataset.data_vars:
                     raise RuntimeError("Selected variable is no longer available")
                 fr.set_dataset(dataset, None, select=mem_var.var)
+            elif slice_ref:
+                fr.set_dataset(dataset, None, select=alias)
         except Exception as exc:
             try:
                 close = getattr(dataset, "close", None)
@@ -6148,16 +6262,22 @@ class OverlayView(QtWidgets.QWidget):
         payload = ev.mimeData().text()
         vr = VarRef.from_mime(payload)
         mem_var = None if vr else MemoryVarRef.from_mime(payload)
+        slice_ref = None
         if not vr and not mem_var:
+            slice_ref = MemorySliceRef.from_mime(payload)
+        if not vr and not mem_var and not slice_ref:
             ev.ignore()
             return
         try:
             if vr:
                 da, coords = vr.load()
                 label = f"{vr.path.name}:{vr.var}"
-            else:
+            elif mem_var:
                 da, coords = mem_var.load()
                 label = f"{MemoryDatasetRegistry.get_label(mem_var.dataset_key)}:{mem_var.var}"
+            else:
+                da, coords, alias = slice_ref.load()
+                label = f"{slice_ref.display_label()}:{alias}"
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Load failed", str(e))
             return
