@@ -2644,7 +2644,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             return
         volume = self._prepare_volume_array(self._data)
         self._volume_item.setData(volume)
-        self._volume_item.setLevels((self._data_min, self._data_max))
+        self._apply_volume_levels()
         self._apply_transfer_function()
 
     def _apply_transfer_function(self):
@@ -2697,7 +2697,39 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
                 "Failed to apply volume lookup table; volume view may not "
                 "respect the selected opacity window."
             )
-        item.setLevels((self._data_min, self._data_max))
+        self._apply_volume_levels()
+
+    def _apply_volume_levels(self):
+        if self._volume_item is None or self._data is None:
+            return
+        levels = (self._data_min, self._data_max)
+        item = self._volume_item
+        setter = getattr(item, "setLevels", None)
+        if callable(setter):
+            try:
+                setter(levels)
+                return
+            except Exception:
+                pass
+        updated = False
+        opts = getattr(item, "opts", None)
+        if isinstance(opts, dict):
+            try:
+                opts["levels"] = levels
+                updated = True
+            except Exception:
+                updated = False
+        if not updated:
+            try:
+                setattr(item, "levels", levels)
+                updated = True
+            except Exception:
+                updated = False
+        if updated and hasattr(item, "update"):
+            try:
+                item.update()
+            except Exception:
+                pass
 
     def _remove_volume(self):
         if self._volume_item is None:
