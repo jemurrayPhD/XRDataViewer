@@ -246,6 +246,9 @@ class EmbeddedJupyterManager(QtCore.QObject):
         return self._url
 
     def _resolve_command(self) -> Optional[List[str]]:
+        python_exe = sys.executable
+        if python_exe and Path(python_exe).exists():
+            return [python_exe, "-m", "jupyterlab"]
         for name in ("jupyter-lab", "jupyter-lab.exe", "jupyter-lab.cmd"):
             path = shutil.which(name)
             if path:

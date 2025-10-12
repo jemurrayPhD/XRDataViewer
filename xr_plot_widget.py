@@ -339,10 +339,35 @@ def apply_plotitem_annotation(
         colorbar_label.setFont(_make_font(base_font, config.font_family, config.colorbar_size))
 
     background = _ensure_qcolor(config.background)
-    plot.setBackground(background)
+
+    try:
+        view_box = plot.getViewBox()
+    except Exception:
+        view_box = None
+
+    if view_box is not None:
+        try:
+            view_box.setBackgroundColor(background)
+        except Exception:
+            try:
+                view_box.setBackground(background)
+            except Exception:
+                pass
+
+    if hasattr(plot, "setBackground"):
+        try:
+            plot.setBackground(background)
+        except Exception:
+            pass
+
     if background_widget is not None:
         try:
-            background_widget.setBackground(background)
+            if hasattr(background_widget, "setBackground"):
+                background_widget.setBackground(background)
+            elif hasattr(background_widget, "setBackgroundBrush"):
+                background_widget.setBackgroundBrush(background)
+            else:
+                raise AttributeError
         except Exception:
             try:
                 palette = background_widget.palette()
