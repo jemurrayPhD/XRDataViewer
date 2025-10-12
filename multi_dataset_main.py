@@ -34,6 +34,7 @@ from data_processing import (
     list_processing_functions,
     summarize_parameters,
 )
+from app_logging import ACTION_LOGGER, ActionLogger, log_action
 
 # ---------------------------------------------------------------------------
 # Helper: open_dataset
@@ -1001,6 +1002,7 @@ class ProcessingDockContainer(QtWidgets.QWidget):
         self._update_content_visibility()
         self._update_float_button()
 
+
     def _on_toggle_toggled(self, checked: bool):
         del checked
         self._update_toggle_visuals()
@@ -1089,6 +1091,47 @@ class ProcessingDockContainer(QtWidgets.QWidget):
             self._placeholder.hide()
             self.btn_toggle.setEnabled(True)
             self._content_frame.setVisible(self.btn_toggle.isChecked())
+
+
+class LoggingDockWidget(QtWidgets.QDockWidget):
+    """Dockable pane that displays log entries in real time."""
+
+    def __init__(self, logger: ActionLogger, parent=None):
+        super().__init__("Action Log", parent)
+        self.setObjectName("actionLogDock")
+        self._logger = logger
+        self.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetMovable
+            | QtWidgets.QDockWidget.DockWidgetClosable
+        )
+        self._view = QtWidgets.QPlainTextEdit()
+        self._view.setReadOnly(True)
+        self._view.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        self._view.setMaximumBlockCount(2000)
+        self._view.setPlaceholderText("User actions will be logged here.")
+        self.setWidget(self._view)
+
+        clear_action = QtWidgets.QAction("Clear log", self)
+        clear_action.triggered.connect(self._clear_log)
+        self.addAction(clear_action)
+        self.setContextMenuPolicy(QtCore.Qt.ActionsContextMenu)
+
+        for entry in logger.entries():
+            self._append(entry)
+
+        logger.log_added.connect(self._append)
+        logger.reset.connect(self._reset)
+
+    def _append(self, entry: str):
+        self._view.appendPlainText(entry)
+        bar = self._view.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _reset(self):
+        self._view.clear()
+
+    def _clear_log(self):
+        self._logger.clear()
 
 
 class ProcessingDockWidget(QtWidgets.QWidget):
@@ -1356,6 +1399,7 @@ class ProcessingDockWidget(QtWidgets.QWidget):
         if items:
             self.list_saved.setCurrentItem(items[0])
         QtWidgets.QMessageBox.information(self, "Pipeline saved", f"Pipeline '{name}' saved.")
+        log_action(f"Saved processing pipeline '{name}' with {len(self.steps)} step(s)")
 
     def _interactive_edit(self):
         if not self.steps:
@@ -1403,6 +1447,7 @@ class ProcessingDockWidget(QtWidgets.QWidget):
             return
         self.manager.delete_pipeline(name)
         self._refresh_saved()
+        log_action(f"Deleted processing pipeline '{name}'")
 
     def _export_saved(self):
         name = self._selected_saved_name()
@@ -1685,6 +1730,8 @@ class DatasetsPane(QtWidgets.QWidget):
         try:
             self._populate_disk_category("2d", path, ds, lambda arr: getattr(arr, "ndim", 0) == 2)
             self._populate_disk_category("nd", path, ds, lambda arr: getattr(arr, "ndim", 0) > 2)
+            if not quiet:
+                log_action(f"Loaded dataset '{path.name}'")
         finally:
             try:
                 ds.close()
@@ -1738,6 +1785,8 @@ class DatasetsPane(QtWidgets.QWidget):
         self._populate_memory_children(item, key, stored)
         if item.childCount() == 0:
             self._remove_root("sliced", key)
+        else:
+            log_action(f"Registered sliced dataset '{name}' with {stored.dims}")
 
     def register_interactive_dataset(self, label: str, dataset: xr.Dataset):
         name = self._unique_label("interactive", label)
@@ -1757,6 +1806,7 @@ class DatasetsPane(QtWidgets.QWidget):
             dataset.close()
         except Exception:
             pass
+        log_action(f"Registered interactive dataset '{name}'")
 
     def _populate_memory_children(self, root: QtWidgets.QTreeWidgetItem, key: str, dataset: xr.Dataset):
         added = False
@@ -1821,6 +1871,8 @@ class DatasetsPane(QtWidgets.QWidget):
         )
         if not paths:
             return
+        for selected in paths:
+            log_action(f"Queued JSON dataset '{Path(selected).name}' for conversion")
         # TODO: convert selected JSON files to xarray.Dataset instances.
         pass
         QtWidgets.QMessageBox.information(
@@ -1834,6 +1886,8 @@ class DatasetsPane(QtWidgets.QWidget):
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         query = dialog.query()
+        if query:
+            log_action("Queued database query for dataset import")
         # TODO: execute the database query and convert results to xarray.Dataset.
         pass
         QtWidgets.QMessageBox.information(
@@ -2239,6 +2293,9 @@ class SliceDataTab(QtWidgets.QWidget):
         self.library.register_sliced_dataset(label, slice_dataset)
         self.lbl_status.setText(
             f"Registered {len(data_vars)} slice(s) as '{label}' in the Sliced Data tab."
+        )
+        log_action(
+            f"Generated {len(data_vars)} slice(s) from '{self._current_var}' into dataset '{label}'"
         )
 
     # ---------- drag & drop ----------
@@ -6460,6 +6517,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_overlay.set_processing_manager(self.processing_manager)
         self.tab_interactive = InteractiveProcessingTab(self.datasets)
         self.tabs.addTab(self.tab_interactive, "Interactive Processing")
+
+        self.log_dock = LoggingDockWidget(ACTION_LOGGER, self)
+        self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.log_dock)
+        self.log_dock.setFloating(False)
+        self.log_dock.resize(800, 200)
 
         self.resize(1500, 900)
 
