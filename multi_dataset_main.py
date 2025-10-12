@@ -12,6 +12,10 @@ from functools import partial
 import itertools
 import copy
 import traceback
+import importlib
+import pkgutil
+import sys
+from types import ModuleType
 
 import numpy as np
 import xarray as xr
@@ -3151,8 +3155,9 @@ class InteractiveConsoleWidget(QtWidgets.QWidget):
         console_layout.setSpacing(4)
 
         instructions = QtWidgets.QLabel(
-            "Execute Python code below. Use RegisterDataset(ds, label=...) or "
-            "RegisterDataArray(da, label=...) to send results to the data library."
+            "Execute Python code below. Use RegisterDataset(ds, label=...), "
+            "RegisterDataArray(da, label=...), or ImportModule('module', alias='m') "
+            "to work with data and libraries from this Python environment."
         )
         instructions.setWordWrap(True)
         instructions.setStyleSheet("color: #666;")
@@ -3172,6 +3177,10 @@ class InteractiveConsoleWidget(QtWidgets.QWidget):
         self.btn_run.clicked.connect(self._execute_code)
         self.input_edit.installEventFilter(self)
         button_row.addWidget(self.btn_run)
+        self.btn_import = QtWidgets.QPushButton("Import module…")
+        self.btn_import.clicked.connect(self._open_import_dialog)
+        button_row.addWidget(self.btn_import)
+
         self.btn_clear_in = QtWidgets.QPushButton("Clear input")
         self.btn_clear_in.clicked.connect(self.input_edit.clear)
         button_row.addWidget(self.btn_clear_in)
@@ -3188,14 +3197,16 @@ class InteractiveConsoleWidget(QtWidgets.QWidget):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
 
-        self._globals = {"__builtins__": __builtins__}
+        self._globals = {"__builtins__": __builtins__, "__name__": "__console__", "__package__": None}
         self._locals = {
             "np": np,
             "xr": xr,
             "RegisterDataset": self._cmd_register_dataset,
             "RegisterDataArray": self._cmd_register_dataarray,
             "preview": self.preview,
+            "ImportModule": self._cmd_import_module,
         }
+        self._module_name_cache: Optional[List[str]] = None
 
     def eventFilter(self, obj, event):
         if obj is self.input_edit and event.type() == QtCore.QEvent.KeyPress:
@@ -3219,6 +3230,70 @@ class InteractiveConsoleWidget(QtWidgets.QWidget):
         cursor.insertText(text, fmt)
         self.output_view.setTextCursor(cursor)
         self.output_view.ensureCursorVisible()
+
+    def _available_modules(self) -> List[str]:
+        if self._module_name_cache is not None:
+            return list(self._module_name_cache)
+        names: Set[str] = set(sys.builtin_module_names)
+        names.update(sys.modules.keys())
+        try:
+            for _, mod_name, _ in pkgutil.iter_modules():
+                names.add(mod_name)
+        except Exception:
+            pass
+        self._module_name_cache = sorted(n for n in names if n)
+        return list(self._module_name_cache)
+
+    def _open_import_dialog(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Import module")
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        label = QtWidgets.QLabel(
+            "Enter the module to import. Use syntax 'module.submodule as alias' "
+            "to bind the module to a custom name."
+        )
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        edit = QtWidgets.QLineEdit()
+        edit.setPlaceholderText("e.g. pandas as pd")
+        completer = QtWidgets.QCompleter(self._available_modules())
+        completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
+        completer.setFilterMode(QtCore.Qt.MatchContains)
+        edit.setCompleter(completer)
+        layout.addWidget(edit)
+
+        button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        layout.addWidget(button_box)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+
+        text = edit.text().strip()
+        if not text:
+            return
+
+        module_name = text
+        alias: Optional[str] = None
+        if " as " in text:
+            parts = text.split(" as ", 1)
+            module_name = parts[0].strip()
+            alias = parts[1].strip()
+
+        try:
+            self._cmd_import_module(module_name, alias)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Import failed", str(exc))
+            return
+
+        bind_name = alias or module_name.split(".")[-1]
+        self._append_output(f"Imported module '{module_name}' as '{bind_name}'.\n", role="output")
+        self.messageEmitted.emit(f"Imported module '{module_name}'.")
 
     def _execute_code(self):
         code_text = self.input_edit.toPlainText()
@@ -3267,6 +3342,26 @@ class InteractiveConsoleWidget(QtWidgets.QWidget):
         self.dataarrayRegistered.emit(name)
         self.messageEmitted.emit(f"Registered data array '{name}'.")
         return name
+
+    def _cmd_import_module(self, module_name: str, alias: Optional[str] = None) -> ModuleType:
+        module_name = (module_name or "").strip()
+        if not module_name:
+            raise ValueError("Module name cannot be empty.")
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:
+            raise ImportError(f"Unable to import '{module_name}': {exc}")
+
+        bind_name = (alias or module_name.split(".")[-1]).strip()
+        if not bind_name:
+            raise ValueError("Alias cannot be empty.")
+        if not bind_name.isidentifier():
+            raise ValueError("Alias must be a valid Python identifier.")
+
+        self._globals[bind_name] = module
+        self._locals[bind_name] = module
+        self._module_name_cache = None
+        return module
 
 
 class InteractiveProcessingTab(QtWidgets.QWidget):
