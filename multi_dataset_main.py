@@ -3373,17 +3373,32 @@ class SequentialView(QtWidgets.QWidget):
             self._roi_last_slices = None
             self._roi_last_bounds = None
             return
+        slices = None
         try:
-            _, slc = self.roi.getArraySlice(self._current_processed_slice, img_item)
-            if isinstance(slc, tuple) and len(slc) >= 2:
-                self._roi_last_slices = (slc[0], slc[1])
-                self._roi_last_bounds = self._normalize_roi_bounds(slc[0], slc[1])
-            else:
-                self._roi_last_slices = None
-                self._roi_last_bounds = None
+            try:
+                _, slc = self.roi.getArraySlice(
+                    self._current_processed_slice,
+                    img_item,
+                    returnSlice=True,
+                )
+            except TypeError:
+                _, slc = self.roi.getArraySlice(self._current_processed_slice, img_item)
+            if isinstance(slc, tuple):
+                slices = slc
         except Exception:
+            slices = None
+
+        if (
+            isinstance(slices, tuple)
+            and len(slices) >= 2
+            and all(isinstance(s, slice) for s in slices[:2])
+        ):
+            sy, sx = slices[0], slices[1]
+            self._roi_last_slices = (sy, sx)
+            self._roi_last_bounds = self._normalize_roi_bounds(sy, sx)
+        else:
             self._roi_last_slices = None
-            self._roi_last_bounds = None
+            self._roi_last_bounds = self._roi_bounds_from_geometry()
 
     def _normalize_roi_bounds(self, sy: slice, sx: slice) -> Optional[Tuple[int, int, int, int]]:
         if self._current_processed_slice is None:
@@ -3408,11 +3423,44 @@ class SequentialView(QtWidgets.QWidget):
             return None
         return (y0, y1, x0, x1)
 
+    def _roi_bounds_from_geometry(self) -> Optional[Tuple[int, int, int, int]]:
+        if self._current_processed_slice is None:
+            return None
+        img_item = getattr(self.viewer, "img_item", None)
+        if img_item is None:
+            return None
+        try:
+            rect = self.roi.boundingRect()
+            top_left_scene = self.roi.mapToScene(rect.topLeft())
+            bottom_right_scene = self.roi.mapToScene(rect.bottomRight())
+            top_left_item = img_item.mapFromScene(top_left_scene)
+            bottom_right_item = img_item.mapFromScene(bottom_right_scene)
+        except Exception:
+            return None
+
+        xs = [float(top_left_item.x()), float(bottom_right_item.x())]
+        ys = [float(top_left_item.y()), float(bottom_right_item.y())]
+        x0 = int(np.floor(min(xs)))
+        x1 = int(np.ceil(max(xs)))
+        y0 = int(np.floor(min(ys)))
+        y1 = int(np.ceil(max(ys)))
+        height, width = self._current_processed_slice.shape[:2]
+        x0 = max(0, min(width, x0))
+        x1 = max(x0, min(width, x1))
+        y0 = max(0, min(height, y0))
+        y1 = max(y0, min(height, y1))
+        if y1 <= y0 or x1 <= x0:
+            return None
+        return (y0, y1, x0, x1)
+
     def _roi_extract_region(self, data: np.ndarray) -> Optional[np.ndarray]:
         arr = np.asarray(data, float)
         bounds = self._roi_last_bounds
         if bounds is None:
-            return arr
+            bounds = self._roi_bounds_from_geometry()
+            if bounds is None:
+                return None
+            self._roi_last_bounds = bounds
         if arr.ndim < 2:
             return arr
         height, width = arr.shape[:2]
