@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import math
+import html
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional
 
 import numpy as np
 from PySide2 import QtCore, QtWidgets, QtGui
@@ -9,6 +13,345 @@ import pyqtgraph as pg
 FORCE_SOFT_RENDER = False
 if FORCE_SOFT_RENDER:
     pg.setConfigOptions(useOpenGL=False, antialias=False)
+
+@dataclass
+class PlotAnnotationConfig:
+    """Configuration describing plot annotations and aesthetics."""
+
+    title: str = ""
+    xlabel: str = ""
+    ylabel: str = ""
+    colorbar_label: str = ""
+    font_family: str = ""
+    title_size: int = 14
+    axis_size: int = 12
+    tick_size: int = 10
+    colorbar_size: int = 12
+    background: QtGui.QColor = field(default_factory=lambda: QtGui.QColor("#1b1b1b"))
+    apply_to_all: bool = False
+
+
+_LATEX_SYMBOLS = {
+    "\\alpha": "α",
+    "\\beta": "β",
+    "\\gamma": "γ",
+    "\\delta": "δ",
+    "\\epsilon": "ϵ",
+    "\\theta": "θ",
+    "\\lambda": "λ",
+    "\\mu": "μ",
+    "\\nu": "ν",
+    "\\pi": "π",
+    "\\phi": "φ",
+    "\\psi": "ψ",
+    "\\omega": "ω",
+    "\\times": "×",
+    "\\cdot": "·",
+    "\\pm": "±",
+    "\\geq": "≥",
+    "\\leq": "≤",
+    "\\infty": "∞",
+    "\\sqrt": "√",
+    "\\degree": "°",
+}
+
+
+class _SafeFormatDict(dict):
+    def __missing__(self, key):  # pragma: no cover - defensive
+        return "{" + key + "}"
+
+
+def _format_with_context(text: str, context: Optional[Dict[str, Any]]) -> str:
+    if not text:
+        return ""
+    if not context:
+        return text
+    try:
+        return str(text).format_map(_SafeFormatDict(context))
+    except Exception:
+        return str(text)
+
+
+def _parse_basic_latex(text: str) -> str:
+    """Convert a lightweight subset of LaTeX-like syntax to HTML."""
+
+    if text is None:
+        return ""
+
+    def parse_segment(segment: str) -> str:
+        i = 0
+        out_parts: list[str] = []
+        length = len(segment)
+        while i < length:
+            ch = segment[i]
+            if ch == "\\":
+                if i + 1 < length and segment[i + 1] == "\\":
+                    out_parts.append("<br/>")
+                    i += 2
+                    continue
+                if i + 1 < length and segment[i + 1] in ("n", "r"):
+                    out_parts.append("<br/>")
+                    i += 2
+                    continue
+                j = i + 1
+                while j < length and segment[j].isalpha():
+                    j += 1
+                command = segment[i:j]
+                replacement = _LATEX_SYMBOLS.get(command)
+                if replacement is not None:
+                    out_parts.append(replacement)
+                    i = j
+                    continue
+                if j < length and segment[j] in "{}":
+                    out_parts.append(html.escape(segment[j]))
+                    i = j + 1
+                    continue
+                out_parts.append(html.escape(command.lstrip("\\")))
+                i = j
+                continue
+            if ch in "^_":
+                sup = ch == "^"
+                i += 1
+                if i < length and segment[i] == "{":
+                    depth = 1
+                    j = i + 1
+                    while j < length and depth > 0:
+                        if segment[j] == "{":
+                            depth += 1
+                        elif segment[j] == "}":
+                            depth -= 1
+                            if depth == 0:
+                                break
+                        j += 1
+                    content = segment[i + 1:j] if j < length else segment[i + 1 :]
+                    i = j + 1 if j < length else length
+                elif i < length:
+                    content = segment[i]
+                    i += 1
+                else:
+                    content = ""
+                parsed = parse_segment(content)
+                tag = "sup" if sup else "sub"
+                out_parts.append(f"<{tag}>{parsed}</{tag}>")
+                continue
+            if ch == "\n":
+                out_parts.append("<br/>")
+                i += 1
+                continue
+            out_parts.append(html.escape(ch))
+            i += 1
+        return "".join(out_parts)
+
+    return parse_segment(str(text))
+
+
+def latex_to_html(text: str, context: Optional[Dict[str, Any]] = None) -> str:
+    """Public helper to convert a label with optional formatting context."""
+
+    formatted = _format_with_context(text, context)
+    return _parse_basic_latex(formatted)
+
+
+def _ensure_qcolor(value: Any) -> QtGui.QColor:
+    if isinstance(value, QtGui.QColor):
+        return QtGui.QColor(value)
+    if isinstance(value, QtGui.QBrush):
+        return QtGui.QColor(value.color())
+    if isinstance(value, str):
+        return QtGui.QColor(value)
+    color = QtGui.QColor()
+    if isinstance(value, (tuple, list)) and len(value) >= 3:
+        color.setRgb(int(value[0]), int(value[1]), int(value[2]))
+    return color if color.isValid() else QtGui.QColor("#1b1b1b")
+
+
+def _make_font(base: Optional[QtGui.QFont], family: str, size: int) -> QtGui.QFont:
+    font = QtGui.QFont(base) if base is not None else QtGui.QFont()
+    if family:
+        font.setFamily(family)
+    if size > 0:
+        font.setPointSize(int(size))
+    elif base is not None and base.pointSize() > 0:
+        font.setPointSize(base.pointSize())
+    return font
+
+
+def plotitem_annotation_state(
+    plot: pg.PlotItem,
+    colorbar_label: Optional[QtWidgets.QLabel] = None,
+) -> PlotAnnotationConfig:
+    title = ""
+    try:
+        title = plot.titleLabel.text
+    except Exception:
+        title = ""
+    stored = getattr(plot, "_annotation_sources", {})
+    xlabel = ""
+    ylabel = ""
+    axis_font_family = ""
+    axis_font_size = 12
+    tick_font_size = 10
+    bottom = plot.getAxis("bottom")
+    if bottom is not None:
+        try:
+            xlabel = bottom.labelText
+        except Exception:
+            xlabel = ""
+        label_item = getattr(bottom, "label", None)
+        if label_item is not None:
+            try:
+                font = label_item.font()
+            except Exception:
+                font = None
+            if font is not None:
+                axis_font_family = font.family()
+                if font.pointSize() > 0:
+                    axis_font_size = font.pointSize()
+        try:
+            tick_font = bottom.tickFont
+        except Exception:
+            tick_font = None
+        if tick_font is not None and tick_font.pointSize() > 0:
+            tick_font_size = tick_font.pointSize()
+    left = plot.getAxis("left")
+    if left is not None:
+        try:
+            ylabel = left.labelText
+        except Exception:
+            ylabel = ""
+        if not axis_font_family:
+            label_item = getattr(left, "label", None)
+            if label_item is not None:
+                try:
+                    font = label_item.font()
+                except Exception:
+                    font = None
+                if font is not None:
+                    axis_font_family = font.family()
+                    if font.pointSize() > 0:
+                        axis_font_size = font.pointSize()
+        try:
+            tick_font = left.tickFont
+        except Exception:
+            tick_font = None
+        if tick_font is not None and tick_font.pointSize() > 0:
+            tick_font_size = tick_font.pointSize()
+    colorbar_text = ""
+    colorbar_size = axis_font_size
+    if colorbar_label is not None:
+        try:
+            colorbar_text = colorbar_label.text()
+        except Exception:
+            colorbar_text = ""
+        try:
+            cb_font = colorbar_label.font()
+        except Exception:
+            cb_font = None
+        if cb_font is not None and cb_font.pointSize() > 0:
+            colorbar_size = cb_font.pointSize()
+    try:
+        background_brush = plot.getBackgroundBrush()
+    except Exception:
+        background_brush = None
+    config = PlotAnnotationConfig(
+        title=str(stored.get("title", title) or ""),
+        xlabel=str(stored.get("xlabel", xlabel) or ""),
+        ylabel=str(stored.get("ylabel", ylabel) or ""),
+        colorbar_label=str(stored.get("colorbar", colorbar_text) or ""),
+        font_family=str(axis_font_family or ""),
+        axis_size=int(axis_font_size),
+        tick_size=int(tick_font_size),
+        colorbar_size=int(colorbar_size),
+    )
+    config.background = _ensure_qcolor(background_brush)
+    try:
+        title_font = plot.titleLabel.item.font()
+        if title_font.pointSize() > 0:
+            config.title_size = int(title_font.pointSize())
+        if title_font.family() and not config.font_family:
+            config.font_family = title_font.family()
+    except Exception:
+        pass
+    return config
+
+
+def apply_plotitem_annotation(
+    plot: pg.PlotItem,
+    config: PlotAnnotationConfig,
+    *,
+    context: Optional[Dict[str, Any]] = None,
+    colorbar_label: Optional[QtWidgets.QLabel] = None,
+    background_widget: Optional[QtWidgets.QWidget] = None,
+):
+    sources = getattr(plot, "_annotation_sources", {})
+    if not isinstance(sources, dict):
+        sources = {}
+    sources.update(
+        {
+            "title": config.title,
+            "xlabel": config.xlabel,
+            "ylabel": config.ylabel,
+            "colorbar": config.colorbar_label,
+        }
+    )
+    setattr(plot, "_annotation_sources", sources)
+
+    title_html = latex_to_html(config.title, context)
+    xlabel_html = latex_to_html(config.xlabel, context)
+    ylabel_html = latex_to_html(config.ylabel, context)
+    colorbar_html = latex_to_html(config.colorbar_label, context)
+
+    plot.setTitle(f"<span>{title_html}</span>" if title_html else "")
+    try:
+        title_item = plot.titleLabel.item
+    except Exception:
+        title_item = None
+    if title_item is not None:
+        title_item.setFont(_make_font(title_item.font(), config.font_family, config.title_size))
+
+    for axis_name, html_text in (("bottom", xlabel_html), ("left", ylabel_html)):
+        axis = plot.getAxis(axis_name)
+        if axis is None:
+            continue
+        axis.setLabel(text=f"<span>{html_text}</span>" if html_text else "")
+        label_item = getattr(axis, "label", None)
+        if label_item is not None:
+            try:
+                current_font = label_item.font()
+            except Exception:
+                current_font = None
+            label_item.setFont(_make_font(current_font, config.font_family, config.axis_size))
+        tick_font = _make_font(None, config.font_family, config.tick_size)
+        try:
+            axis.setTickFont(tick_font)
+        except Exception:
+            pass
+
+    if colorbar_label is not None:
+        colorbar_label.setText(colorbar_html)
+        colorbar_label.setVisible(bool(colorbar_html))
+        colorbar_label.setAlignment(QtCore.Qt.AlignCenter)
+        colorbar_label.setWordWrap(True)
+        try:
+            base_font = colorbar_label.font()
+        except Exception:
+            base_font = None
+        colorbar_label.setFont(_make_font(base_font, config.font_family, config.colorbar_size))
+
+    background = _ensure_qcolor(config.background)
+    plot.setBackground(background)
+    if background_widget is not None:
+        try:
+            background_widget.setBackground(background)
+        except Exception:
+            try:
+                palette = background_widget.palette()
+                palette.setColor(background_widget.backgroundRole(), background)
+                background_widget.setPalette(palette)
+            except Exception:
+                background_widget.setStyleSheet(f"background-color: {background.name()};")
+
+
 
 class ScientificAxisItem(pg.AxisItem):
     """Axis item that formats ticks with scientific notation and limited precision."""
@@ -160,6 +503,16 @@ class CentralPlotWidget(QtWidgets.QWidget):
         except Exception:
             pass
 
+        # annotation helpers
+        self._colorbar_label_widget: Optional[QtWidgets.QLabel] = None
+        self._background_color = QtGui.QColor()
+        try:
+            brush = self.plot.getBackgroundBrush()
+            if isinstance(brush, QtGui.QBrush):
+                self._background_color = brush.color()
+        except Exception:
+            self._background_color = QtGui.QColor("#1b1b1b")
+
         # sample grid items (on main plot)
         self._grid_items = []
 
@@ -189,6 +542,35 @@ class CentralPlotWidget(QtWidgets.QWidget):
             self.plot.scene().sigMouseClicked.connect(self._on_scene_mouse_clicked)
         except Exception:
             pass
+
+    # ---------- annotation helpers ----------
+    def annotation_defaults(self) -> PlotAnnotationConfig:
+        config = plotitem_annotation_state(self.plot, self._colorbar_label_widget)
+        if self._background_color.isValid():
+            config.background = QtGui.QColor(self._background_color)
+        return config
+
+    def apply_annotation(
+        self,
+        config: PlotAnnotationConfig,
+        *,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        apply_plotitem_annotation(
+            self.plot,
+            config,
+            context=context,
+            colorbar_label=self._colorbar_label_widget,
+            background_widget=self.glw,
+        )
+        self._background_color = _ensure_qcolor(config.background)
+
+    def set_colorbar_label(self, text: str, context: Optional[Dict[str, Any]] = None):
+        if self._colorbar_label_widget is None:
+            return
+        html_text = latex_to_html(text, context)
+        self._colorbar_label_widget.setText(html_text)
+        self._colorbar_label_widget.setVisible(bool(html_text))
 
     # ---------- public API ----------
     def set_labels(self, xlabel: str = "X", ylabel: str = "Y"):
@@ -255,11 +637,25 @@ class CentralPlotWidget(QtWidgets.QWidget):
             return None
         if getattr(self, "_hist_container", None) is None:
             try:
+                container = QtWidgets.QWidget()
+                container.setObjectName("HistogramContainer")
+                layout = QtWidgets.QVBoxLayout(container)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setSpacing(4)
+                label = QtWidgets.QLabel("")
+                label.setAlignment(QtCore.Qt.AlignCenter)
+                label.setWordWrap(True)
+                label.setVisible(False)
+                layout.addWidget(label, 0)
                 glw = pg.GraphicsLayoutWidget()
                 glw.addItem(self.lut, row=0, col=0)
                 glw.setObjectName("HistogramLUTContainer")
-                glw.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
-                self._hist_container = glw
+                glw.setSizePolicy(
+                    QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+                )
+                layout.addWidget(glw, 1)
+                self._colorbar_label_widget = label
+                self._hist_container = container
             except Exception:
                 self._hist_container = None
         return self._hist_container
@@ -523,13 +919,6 @@ class CentralPlotWidget(QtWidgets.QWidget):
                 except Exception:
                     pass
             act_hist.toggled.connect(self._histogram_menu_setter)
-        menu.addSeparator()
-        act_title = menu.addAction("Set plot title…")
-        act_title.triggered.connect(self._prompt_plot_title)
-        act_xlabel = menu.addAction("Set X axis label…")
-        act_xlabel.triggered.connect(lambda: self._prompt_axis_label("bottom"))
-        act_ylabel = menu.addAction("Set Y axis label…")
-        act_ylabel.triggered.connect(lambda: self._prompt_axis_label("left"))
         try:
             screen_pos = event.screenPos()
         except Exception:
@@ -547,42 +936,6 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._histogram_menu_getter = getter
         self._histogram_menu_setter = setter
         self._histogram_menu_enabled_getter = enabled_getter
-
-    def _prompt_plot_title(self):
-        current = ""
-        try:
-            current = self.plot.titleLabel.text
-        except Exception:
-            current = ""
-        text, ok = QtWidgets.QInputDialog.getText(
-            self,
-            "Plot title",
-            "Enter plot title:",
-            text=str(current or ""),
-        )
-        if ok:
-            self.plot.setTitle(str(text))
-
-    def _prompt_axis_label(self, which: str):
-        axis = self.plot.getAxis(which)
-        current = ""
-        if axis is not None:
-            try:
-                current = axis.labelText
-            except Exception:
-                current = ""
-        label_text = "X axis" if which == "bottom" else "Y axis"
-        text, ok = QtWidgets.QInputDialog.getText(
-            self,
-            f"{label_text} label",
-            f"Enter {label_text.lower()} label:",
-            text=str(current or ""),
-        )
-        if ok:
-            if which == "bottom":
-                self.plot.setLabel("bottom", str(text))
-            elif which == "left":
-                self.plot.setLabel("left", str(text))
 
     # ---------- resampling helpers ----------
     def _rect_to_qrectf(self, x0, x1, y0, y1):

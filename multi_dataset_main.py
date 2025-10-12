@@ -6,6 +6,7 @@ import json
 import warnings
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
+from dataclasses import replace
 from functools import partial
 import itertools
 import copy
@@ -24,7 +25,13 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     gl = None
 
-from xr_plot_widget import CentralPlotWidget, ScientificAxisItem
+from xr_plot_widget import (
+    CentralPlotWidget,
+    PlotAnnotationConfig,
+    ScientificAxisItem,
+    apply_plotitem_annotation,
+    plotitem_annotation_state,
+)
 from xr_coords import guess_phys_coords
 from data_processing import (
     ParameterDefinition,
@@ -124,6 +131,169 @@ def _image_with_label(image: QtGui.QImage, label: str) -> QtGui.QImage:
     painter.end()
     return result
 
+
+class ColorButton(QtWidgets.QPushButton):
+    colorChanged = QtCore.Signal(QtGui.QColor)
+
+    def __init__(self, color: object = None, parent=None):
+        super().__init__(parent)
+        self._color = self._coerce_color(color)
+        if not self._color.isValid():
+            self._color = QtGui.QColor("#1b1b1b")
+        self.setFixedWidth(60)
+        self.clicked.connect(self._choose_color)
+        self._update_style()
+
+    def color(self) -> QtGui.QColor:
+        return QtGui.QColor(self._color)
+
+    def setColor(self, color: object):
+        qcolor = self._coerce_color(color)
+        if not qcolor.isValid() or qcolor == self._color:
+            return
+        self._color = qcolor
+        self._update_style()
+        self.colorChanged.emit(QtGui.QColor(self._color))
+
+    def _coerce_color(self, value: object) -> QtGui.QColor:
+        if isinstance(value, QtGui.QColor):
+            return QtGui.QColor(value)
+        if isinstance(value, QtGui.QBrush):
+            return QtGui.QColor(value.color())
+        if isinstance(value, str):
+            return QtGui.QColor(value)
+        if isinstance(value, tuple) or isinstance(value, list):
+            if len(value) == 3:
+                r, g, b = value
+                return QtGui.QColor(int(r), int(g), int(b))
+            if len(value) >= 4:
+                r, g, b, a = value[:4]
+                return QtGui.QColor(int(r), int(g), int(b), int(a))
+        if isinstance(value, (int, float)):
+            c = int(value)
+            return QtGui.QColor(c)
+        return QtGui.QColor(value) if value is not None else QtGui.QColor()
+
+    def _choose_color(self):
+        chosen = QtWidgets.QColorDialog.getColor(self._color, self, "Select background color")
+        if chosen.isValid():
+            self.setColor(chosen)
+
+    def _update_style(self):
+        self.setStyleSheet(
+            "QPushButton { border: 1px solid #888; border-radius: 3px; background-color: %s; }"
+            % self._color.name()
+        )
+
+
+class PlotAnnotationDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        initial: Optional[PlotAnnotationConfig] = None,
+        allow_apply_all: bool = True,
+        template_hint: Optional[str] = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Set plot annotations")
+        self._result: Optional[PlotAnnotationConfig] = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        form = QtWidgets.QFormLayout()
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
+        self.edit_title = QtWidgets.QLineEdit(initial.title if initial else "")
+        form.addRow("Plot title", self.edit_title)
+        self.edit_xlabel = QtWidgets.QLineEdit(initial.xlabel if initial else "")
+        form.addRow("X-axis label", self.edit_xlabel)
+        self.edit_ylabel = QtWidgets.QLineEdit(initial.ylabel if initial else "")
+        form.addRow("Y-axis label", self.edit_ylabel)
+        self.edit_colorbar = QtWidgets.QLineEdit(initial.colorbar_label if initial else "")
+        form.addRow("Colorbar label", self.edit_colorbar)
+        layout.addLayout(form)
+
+        aesthetics = QtWidgets.QGroupBox("Aesthetics")
+        grid = QtWidgets.QGridLayout(aesthetics)
+        grid.setContentsMargins(8, 8, 8, 8)
+        grid.setSpacing(6)
+        grid.addWidget(QtWidgets.QLabel("Font family"), 0, 0)
+        self.font_combo = QtWidgets.QFontComboBox()
+        if initial and initial.font_family:
+            self.font_combo.setCurrentFont(QtGui.QFont(initial.font_family))
+        grid.addWidget(self.font_combo, 0, 1, 1, 2)
+
+        grid.addWidget(QtWidgets.QLabel("Title size"), 1, 0)
+        self.spin_title = QtWidgets.QSpinBox()
+        self.spin_title.setRange(6, 72)
+        self.spin_title.setValue(initial.title_size if initial else 14)
+        grid.addWidget(self.spin_title, 1, 1)
+
+        grid.addWidget(QtWidgets.QLabel("Axis label size"), 2, 0)
+        self.spin_axis = QtWidgets.QSpinBox()
+        self.spin_axis.setRange(6, 60)
+        self.spin_axis.setValue(initial.axis_size if initial else 12)
+        grid.addWidget(self.spin_axis, 2, 1)
+
+        grid.addWidget(QtWidgets.QLabel("Tick size"), 3, 0)
+        self.spin_tick = QtWidgets.QSpinBox()
+        self.spin_tick.setRange(6, 48)
+        self.spin_tick.setValue(initial.tick_size if initial else 10)
+        grid.addWidget(self.spin_tick, 3, 1)
+
+        grid.addWidget(QtWidgets.QLabel("Colorbar size"), 4, 0)
+        self.spin_colorbar = QtWidgets.QSpinBox()
+        self.spin_colorbar.setRange(6, 60)
+        self.spin_colorbar.setValue(initial.colorbar_size if initial else 12)
+        grid.addWidget(self.spin_colorbar, 4, 1)
+
+        grid.addWidget(QtWidgets.QLabel("Background"), 5, 0)
+        self.btn_color = ColorButton(initial.background if initial else QtGui.QColor("#1b1b1b"))
+        grid.addWidget(self.btn_color, 5, 1)
+        grid.setColumnStretch(2, 1)
+        layout.addWidget(aesthetics)
+
+        if allow_apply_all:
+            self.chk_apply_all = QtWidgets.QCheckBox("Apply to all plots in this tab")
+            self.chk_apply_all.setChecked(bool(initial.apply_to_all) if initial else False)
+            layout.addWidget(self.chk_apply_all)
+        else:
+            self.chk_apply_all = QtWidgets.QCheckBox()
+            self.chk_apply_all.hide()
+
+        if template_hint:
+            hint = QtWidgets.QLabel(template_hint)
+            hint.setWordWrap(True)
+            hint.setStyleSheet("color: #555;")
+            layout.addWidget(hint)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def annotation_config(self) -> Optional[PlotAnnotationConfig]:
+        return self._result
+
+    def accept(self):
+        font = self.font_combo.currentFont()
+        config = PlotAnnotationConfig(
+            title=self.edit_title.text(),
+            xlabel=self.edit_xlabel.text(),
+            ylabel=self.edit_ylabel.text(),
+            colorbar_label=self.edit_colorbar.text(),
+            font_family=font.family(),
+            title_size=self.spin_title.value(),
+            axis_size=self.spin_axis.value(),
+            tick_size=self.spin_tick.value(),
+            colorbar_size=self.spin_colorbar.value(),
+            background=self.btn_color.color(),
+            apply_to_all=self.chk_apply_all.isChecked(),
+        )
+        self._result = config
+        super().accept()
 
 def _save_snapshot(widget: QtWidgets.QWidget, path: Path, label: str = "") -> bool:
     image = _compose_snapshot(widget, label)
@@ -3374,6 +3544,12 @@ class ViewerFrame(QtWidgets.QFrame):
         if not preserve_header:
             self._set_header_text(None)
 
+    def annotation_defaults(self) -> PlotAnnotationConfig:
+        return self.viewer.annotation_defaults()
+
+    def apply_annotation(self, config: PlotAnnotationConfig):
+        self.viewer.apply_annotation(config)
+
 
 # ---------------------------------------------------------------------------
 # MultiView grid: drag vars to create tiles; master toggle for histograms
@@ -3475,6 +3651,10 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.act_export_layout.triggered.connect(self._export_layout_image)
         self.btn_export.setMenu(export_menu)
         bar.addWidget(self.btn_export)
+
+        self.btn_annotations = QtWidgets.QPushButton("Set annotations…")
+        self.btn_annotations.clicked.connect(self._open_annotation_dialog)
+        bar.addWidget(self.btn_annotations)
 
         bar.addStretch(1)
         v.addLayout(bar)
@@ -3763,9 +3943,33 @@ class MultiViewGrid(QtWidgets.QWidget):
         )
         if not ok:
             return
-        name = str(item).strip()
+            name = str(item).strip()
         for fr in frames:
             fr.plot_variable(name)
+
+    def _open_annotation_dialog(self):
+        frames = self.selected_frames()
+        if not frames:
+            frames = list(self.frames)
+        if not frames:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No plots",
+                "Add a plot before setting annotations.",
+            )
+            return
+        initial = frames[0].annotation_defaults()
+        initial.apply_to_all = False
+        dialog = PlotAnnotationDialog(self, initial=initial, allow_apply_all=True)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        config = dialog.annotation_config()
+        if config is None:
+            return
+        targets = self.frames if config.apply_to_all else frames
+        base = replace(config, apply_to_all=False)
+        for frame in targets:
+            frame.apply_annotation(base)
 
     # ---------- export helpers ----------
     def _on_preferences_changed(self, _data):
@@ -5202,6 +5406,7 @@ class SequentialView(QtWidgets.QWidget):
         self._col_coord_1d: Optional[np.ndarray] = None
         self._col_coord_2d: Optional[np.ndarray] = None
         self._volume_cache: Optional[np.ndarray] = None
+        self._annotation_config: Optional[PlotAnnotationConfig] = None
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
@@ -5360,6 +5565,11 @@ class SequentialView(QtWidgets.QWidget):
                 "3D volume rendering requires the optional pyqtgraph.opengl module"
             )
         roi_row.addWidget(self.btn_volume_view)
+
+        self.btn_annotations = QtWidgets.QPushButton("Set annotations…")
+        self.btn_annotations.setEnabled(False)
+        self.btn_annotations.clicked.connect(self._open_annotation_dialog)
+        roi_row.addWidget(self.btn_annotations)
 
         self.lbl_roi_status = QtWidgets.QLabel("ROI disabled")
         self.lbl_roi_status.setStyleSheet("color: #666;")
@@ -5536,6 +5746,7 @@ class SequentialView(QtWidgets.QWidget):
         self.btn_toggle_roi.blockSignals(False)
         self.btn_toggle_roi.setEnabled(False)
         self.btn_volume_view.setEnabled(False)
+        self.btn_annotations.setEnabled(False)
         if self._roi_window is not None:
             try:
                 self._roi_window.hide()
@@ -5661,6 +5872,8 @@ class SequentialView(QtWidgets.QWidget):
         self._update_slice_widgets()
         self._update_slice_display(autorange=True)
         self._update_roi_axis_options()
+        self.btn_annotations.setEnabled(True)
+        self._apply_viewer_annotations()
 
     def _rebuild_axis_controls(self):
         dims = self._dims
@@ -6011,12 +6224,66 @@ class SequentialView(QtWidgets.QWidget):
             self._update_roi_slice_reference()
             self._update_roi_curve()
         self._refresh_volume_window()
+        self._apply_viewer_annotations()
 
     def _on_autoscale_clicked(self):
         self.viewer.autoscale_levels()
 
     def _on_autorange_clicked(self):
         self.viewer.auto_view_range()
+
+    def _annotation_context(self) -> Dict[str, object]:
+        idx = int(self._slice_index)
+        coords = self._axis_coords
+        value = None
+        if coords is not None and 0 <= idx < coords.size:
+            raw = coords[idx]
+            if isinstance(raw, np.ndarray) and raw.size == 1:
+                raw = raw.item()
+            try:
+                value = float(raw)
+            except Exception:
+                value = raw
+        context: Dict[str, object] = {
+            "slice_idx": idx,
+            "slice_number": idx + 1,
+            "n": idx,
+            "slice_axis": self._slice_axis or "slice",
+        }
+        context["slice_val"] = value if value is not None else idx
+        return context
+
+    def _apply_viewer_annotations(self):
+        if self._annotation_config is None:
+            return
+        try:
+            context = self._annotation_context()
+            self.viewer.apply_annotation(self._annotation_config, context=context)
+        except Exception:
+            pass
+
+    def _open_annotation_dialog(self):
+        initial = self.viewer.annotation_defaults()
+        if self._annotation_config is not None:
+            initial = replace(self._annotation_config, apply_to_all=False)
+        hint = (
+            "Tip: use Python f-string fields like {slice_idx}, {slice_number}, {slice_val:.3f}, and {slice_axis} "
+            "to customise labels per slice."
+        )
+        dialog = PlotAnnotationDialog(
+            self,
+            initial=initial,
+            allow_apply_all=False,
+            template_hint=hint,
+        )
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        config = dialog.annotation_config()
+        if config is None:
+            return
+        config = replace(config, apply_to_all=False)
+        self._annotation_config = config
+        self._apply_viewer_annotations()
 
     # ---------- processing ----------
     def _choose_processing(self):
@@ -7426,6 +7693,7 @@ class OverlayView(QtWidgets.QWidget):
         self.layers: List[OverlayLayer] = []
         self.processing_manager: Optional[ProcessingManager] = processing_manager
         self.preferences: Optional[PreferencesManager] = None
+        self._annotation_config: Optional[PlotAnnotationConfig] = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -7451,6 +7719,9 @@ class OverlayView(QtWidgets.QWidget):
         act_layout.triggered.connect(self._export_full_layout)
         self.btn_export.setMenu(export_menu)
         toolbar.addWidget(self.btn_export)
+        self.btn_annotations = QtWidgets.QPushButton("Set annotations…")
+        self.btn_annotations.clicked.connect(self._open_annotation_dialog)
+        toolbar.addWidget(self.btn_annotations)
         toolbar.addStretch(1)
         layout.addLayout(toolbar)
 
@@ -7491,10 +7762,6 @@ class OverlayView(QtWidgets.QWidget):
         self.plot.showGrid(x=False, y=False)
         self.plot.setLabel("left", "Y")
         self.plot.setLabel("bottom", "X")
-        try:
-            self.plot.scene().sigMouseClicked.connect(self._on_plot_context_click)
-        except Exception:
-            pass
         splitter.addWidget(self.glw)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -7569,64 +7836,23 @@ class OverlayView(QtWidgets.QWidget):
         for layer in list(self.layers):
             self.remove_layer(layer)
 
-    def _on_plot_context_click(self, event):
-        try:
-            button = event.button()
-        except Exception:
+    def _open_annotation_dialog(self):
+        initial = plotitem_annotation_state(self.plot)
+        if self._annotation_config is not None:
+            initial = replace(self._annotation_config, apply_to_all=False)
+        dialog = PlotAnnotationDialog(self, initial=initial, allow_apply_all=False)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
-        if button != QtCore.Qt.RightButton:
+        config = dialog.annotation_config()
+        if config is None:
             return
-        try:
-            pos = event.scenePos()
-            rect = self.plot.sceneBoundingRect()
-        except Exception:
-            return
-        if rect is None or not rect.contains(pos):
-            return
-        menu = QtWidgets.QMenu(self)
-        act_title = menu.addAction("Set plot title…")
-        act_title.triggered.connect(self._prompt_plot_title)
-        act_xlabel = menu.addAction("Set X axis label…")
-        act_xlabel.triggered.connect(lambda: self._prompt_axis_label("bottom"))
-        act_ylabel = menu.addAction("Set Y axis label…")
-        act_ylabel.triggered.connect(lambda: self._prompt_axis_label("left"))
-        menu.exec_(QtGui.QCursor.pos())
-
-    def _prompt_plot_title(self):
-        current = ""
-        try:
-            current = self.plot.titleLabel.text
-        except Exception:
-            current = ""
-        text, ok = QtWidgets.QInputDialog.getText(
-            self,
-            "Plot title",
-            "Enter plot title:",
-            text=str(current or ""),
+        config = replace(config, apply_to_all=False)
+        self._annotation_config = config
+        apply_plotitem_annotation(
+            self.plot,
+            config,
+            background_widget=self.glw,
         )
-        if ok:
-            self.plot.setTitle(str(text))
-
-    def _prompt_axis_label(self, which: str):
-        axis = self.plot.getAxis(which)
-        current = ""
-        if axis is not None:
-            try:
-                current = axis.labelText
-            except Exception:
-                current = ""
-        label_text = "X axis" if which == "bottom" else "Y axis"
-        text, ok = QtWidgets.QInputDialog.getText(
-            self,
-            f"{label_text} label",
-            f"Enter {label_text.lower()} label:",
-            text=str(current or ""),
-        )
-        if ok:
-            if which == "bottom":
-                self.plot.setLabel("bottom", str(text))
-            elif which == "left":
-                self.plot.setLabel("left", str(text))
 
     def set_preferences(self, preferences: Optional[PreferencesManager]):
         if self.preferences is preferences:
