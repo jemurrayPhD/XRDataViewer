@@ -2319,6 +2319,745 @@ class MultiViewGrid(QtWidgets.QWidget):
                 yield w
 
 # ---------------------------------------------------------------------------
+# Sequential view: explore 2D slices along an arbitrary axis
+# ---------------------------------------------------------------------------
+
+
+class SequentialView(QtWidgets.QWidget):
+    def __init__(self, processing_manager: Optional[ProcessingManager] = None, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.processing_manager = processing_manager
+
+        self._dataset: Optional[xr.Dataset] = None
+        self._dataset_path: Optional[Path] = None
+        self._current_variable: Optional[str] = None
+        self._current_da: Optional[xr.DataArray] = None
+        self._dims: List[str] = []
+        self._slice_axis: Optional[str] = None
+        self._row_axis: Optional[str] = None
+        self._col_axis: Optional[str] = None
+        self._fixed_indices: Dict[str, int] = {}
+        self._fixed_dim_widgets: Dict[str, QtWidgets.QSpinBox] = {}
+        self._processing_mode: str = "none"
+        self._processing_params: Dict[str, object] = {}
+        self._slice_index: int = 0
+        self._slice_count: int = 0
+        self._axis_coords: Optional[np.ndarray] = None
+        self._current_processed_slice: Optional[np.ndarray] = None
+        self._roi_last_shape: Optional[Tuple[int, int]] = None
+
+        self._roi_enabled: bool = False
+        self._roi_reducers = {
+            "mean": ("Mean", lambda arr: np.nanmean(arr)),
+            "median": ("Median", lambda arr: np.nanmedian(arr)),
+            "min": ("Minimum", lambda arr: np.nanmin(arr)),
+            "max": ("Maximum", lambda arr: np.nanmax(arr)),
+            "std": ("Std. dev", lambda arr: np.nanstd(arr)),
+            "ptp": ("Peak-to-peak", lambda arr: np.nanmax(arr) - np.nanmin(arr)),
+        }
+        self._roi_method_key: str = "mean"
+        self._roi_last_slices: Optional[Tuple[slice, slice]] = None
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setSpacing(6)
+
+        hint = QtWidgets.QLabel(
+            "Drop a dataset here or use the Load button to explore sequential slices."
+        )
+        hint.setStyleSheet("color: #666;")
+        outer.addWidget(hint)
+
+        top = QtWidgets.QHBoxLayout()
+        self.lbl_dataset = QtWidgets.QLabel("No dataset loaded")
+        self.lbl_dataset.setStyleSheet("color: #555;")
+        top.addWidget(self.lbl_dataset, 1)
+        self.btn_load = QtWidgets.QPushButton("Load dataset…")
+        self.btn_load.clicked.connect(self._load_dataset_dialog)
+        top.addWidget(self.btn_load, 0)
+        outer.addLayout(top)
+
+        var_row = QtWidgets.QHBoxLayout()
+        var_row.addWidget(QtWidgets.QLabel("Variable:"))
+        self.cmb_variable = QtWidgets.QComboBox()
+        self.cmb_variable.setEnabled(False)
+        self.cmb_variable.currentIndexChanged.connect(self._on_variable_changed)
+        var_row.addWidget(self.cmb_variable, 1)
+        outer.addLayout(var_row)
+
+        axis_group = QtWidgets.QGroupBox("Slice configuration")
+        axis_form = QtWidgets.QFormLayout(axis_group)
+        axis_form.setContentsMargins(6, 6, 6, 6)
+        axis_form.setSpacing(6)
+
+        self.cmb_slice_axis = QtWidgets.QComboBox()
+        self.cmb_slice_axis.currentIndexChanged.connect(self._on_axes_changed)
+        axis_form.addRow("Slice axis", self.cmb_slice_axis)
+
+        self.cmb_row_axis = QtWidgets.QComboBox()
+        self.cmb_row_axis.currentIndexChanged.connect(self._on_axes_changed)
+        axis_form.addRow("Rows", self.cmb_row_axis)
+
+        self.cmb_col_axis = QtWidgets.QComboBox()
+        self.cmb_col_axis.currentIndexChanged.connect(self._on_axes_changed)
+        axis_form.addRow("Columns", self.cmb_col_axis)
+
+        self.fixed_dims_container = QtWidgets.QWidget()
+        self.fixed_dims_layout = QtWidgets.QFormLayout(self.fixed_dims_container)
+        self.fixed_dims_layout.setContentsMargins(0, 0, 0, 0)
+        self.fixed_dims_layout.setSpacing(4)
+        axis_form.addRow("Fixed indices", self.fixed_dims_container)
+
+        outer.addWidget(axis_group)
+
+        slider_row = QtWidgets.QHBoxLayout()
+        self.lbl_slice = QtWidgets.QLabel("Slice: –")
+        slider_row.addWidget(self.lbl_slice, 0)
+        self.sld_slice = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.sld_slice.setEnabled(False)
+        self.sld_slice.valueChanged.connect(self._on_slice_changed)
+        slider_row.addWidget(self.sld_slice, 1)
+        self.spin_slice = QtWidgets.QSpinBox()
+        self.spin_slice.setEnabled(False)
+        self.spin_slice.valueChanged.connect(self._on_slice_spin_changed)
+        slider_row.addWidget(self.spin_slice, 0)
+        outer.addLayout(slider_row)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_apply_processing = QtWidgets.QPushButton("Apply processing…")
+        self.btn_apply_processing.setEnabled(False)
+        self.btn_apply_processing.clicked.connect(self._choose_processing)
+        btn_row.addWidget(self.btn_apply_processing)
+
+        self.btn_reset_processing = QtWidgets.QPushButton("Reset processing")
+        self.btn_reset_processing.setEnabled(False)
+        self.btn_reset_processing.clicked.connect(self._reset_processing)
+        btn_row.addWidget(self.btn_reset_processing)
+
+        self.btn_autoscale = QtWidgets.QPushButton("Autoscale colors")
+        self.btn_autoscale.setEnabled(False)
+        self.btn_autoscale.clicked.connect(self._on_autoscale_clicked)
+        btn_row.addWidget(self.btn_autoscale)
+
+        self.btn_autorange = QtWidgets.QPushButton("Auto view")
+        self.btn_autorange.setEnabled(False)
+        self.btn_autorange.clicked.connect(self._on_autorange_clicked)
+        btn_row.addWidget(self.btn_autorange)
+
+        btn_row.addStretch(1)
+        outer.addLayout(btn_row)
+
+        self.viewer_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.viewer_split.setChildrenCollapsible(False)
+        self.viewer_split.setHandleWidth(6)
+        outer.addWidget(self.viewer_split, 1)
+
+        self.viewer = CentralPlotWidget(self)
+        self.viewer_split.addWidget(self.viewer)
+        hist = self.viewer.histogram_widget()
+        if hist is not None and self.viewer_split.indexOf(hist) == -1:
+            self.viewer_split.addWidget(hist)
+            try:
+                self.viewer_split.setStretchFactor(0, 1)
+                self.viewer_split.setStretchFactor(1, 0)
+            except Exception:
+                pass
+
+        roi_row = QtWidgets.QHBoxLayout()
+        self.btn_toggle_roi = QtWidgets.QPushButton("Enable ROI")
+        self.btn_toggle_roi.setCheckable(True)
+        self.btn_toggle_roi.setEnabled(False)
+        self.btn_toggle_roi.toggled.connect(self._on_roi_toggled)
+        roi_row.addWidget(self.btn_toggle_roi)
+
+        self.lbl_roi_status = QtWidgets.QLabel("ROI disabled")
+        self.lbl_roi_status.setStyleSheet("color: #666;")
+        roi_row.addWidget(self.lbl_roi_status, 1)
+        outer.addLayout(roi_row)
+
+        self.roi_curve = pg.PlotWidget()
+        self.roi_curve.setMinimumHeight(140)
+        self.roi_curve.showGrid(x=True, y=True, alpha=0.3)
+        self.roi_curve.setLabel("bottom", "Slice coordinate")
+        self.roi_curve.setLabel("left", "ROI statistic")
+        self.roi_curve_curve = self.roi_curve.plot([], [], pen=pg.mkPen('#ffaa00', width=2))
+        self.roi_curve.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.roi_curve.customContextMenuRequested.connect(self._show_roi_context_menu)
+        self.roi_curve.hide()
+        outer.addWidget(self.roi_curve, 0)
+
+        self.roi = pg.RectROI([10, 10], [40, 40], pen=pg.mkPen('#ffaa00', width=2))
+        self.roi.addScaleHandle((1, 1), (0, 0))
+        self.roi.addScaleHandle((0, 0), (1, 1))
+        self.roi.hide()
+        self.roi.sigRegionChanged.connect(self._on_roi_region_changed)
+
+    # ---------- dataset helpers ----------
+    def set_processing_manager(self, manager: Optional[ProcessingManager]):
+        self.processing_manager = manager
+
+    def dragEnterEvent(self, ev: QtGui.QDragEnterEvent):
+        if ev.mimeData().hasText():
+            ev.acceptProposedAction()
+        else:
+            ev.ignore()
+
+    def dropEvent(self, ev: QtGui.QDropEvent):
+        text = ev.mimeData().text()
+        ref = DataSetRef.from_mime(text)
+        if not ref:
+            ev.ignore()
+            return
+        try:
+            ds = ref.load()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Load failed", str(exc))
+            ev.ignore()
+            return
+        self._set_dataset(ds, ref.path)
+        ev.acceptProposedAction()
+
+    def _load_dataset_dialog(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Open dataset",
+            "",
+            "NetCDF / Zarr (*.nc *.zarr);;All files (*)",
+        )
+        if not path:
+            return
+        p = Path(path)
+        try:
+            ds = open_dataset(p)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Load failed", str(exc))
+            return
+        self._set_dataset(ds, p)
+
+    def _clear_view(self):
+        self._reset_current_state()
+        self._clear_fixed_dim_widgets()
+        self.cmb_variable.blockSignals(True)
+        self.cmb_variable.clear()
+        self.cmb_variable.blockSignals(False)
+        for combo in (self.cmb_slice_axis, self.cmb_row_axis, self.cmb_col_axis):
+            combo.blockSignals(True)
+            combo.clear()
+            combo.blockSignals(False)
+            combo.setEnabled(False)
+        self.cmb_variable.setEnabled(False)
+        self._clear_display()
+
+    def _clear_display(self):
+        if self.roi.scene() is not None:
+            try:
+                self.viewer.plot.removeItem(self.roi)
+            except Exception:
+                pass
+        self.roi.hide()
+        self.btn_toggle_roi.blockSignals(True)
+        self.btn_toggle_roi.setChecked(False)
+        self.btn_toggle_roi.blockSignals(False)
+        self.btn_toggle_roi.setEnabled(False)
+        self.roi_curve.hide()
+        self.roi_curve_curve.setData([], [])
+        self.lbl_roi_status.setText("ROI disabled")
+        self._roi_enabled = False
+        self._roi_last_slices = None
+        self._roi_last_shape = None
+        self.viewer.set_image(np.zeros((1, 1)), autorange=True)
+        self.sld_slice.blockSignals(True)
+        self.spin_slice.blockSignals(True)
+        self.sld_slice.setRange(0, 0)
+        self.spin_slice.setRange(0, 0)
+        self.sld_slice.setValue(0)
+        self.spin_slice.setValue(0)
+        self.sld_slice.blockSignals(False)
+        self.spin_slice.blockSignals(False)
+        self.sld_slice.setEnabled(False)
+        self.spin_slice.setEnabled(False)
+        self.btn_apply_processing.setEnabled(False)
+        self.btn_reset_processing.setEnabled(False)
+        self.btn_autoscale.setEnabled(False)
+        self.btn_autorange.setEnabled(False)
+        self.lbl_slice.setText("Slice: –")
+
+    def _set_dataset(self, ds: xr.Dataset, path: Optional[Path]):
+        if self._dataset is not None and self._dataset is not ds:
+            try:
+                self._dataset.close()
+            except Exception:
+                pass
+        self._dataset = ds
+        self._dataset_path = Path(path) if path else None
+        self.lbl_dataset.setText(self._dataset_path.name if self._dataset_path else "(in-memory dataset)")
+        self.lbl_dataset.setStyleSheet("")
+        self._clear_view()
+        vars_with_dims = [var for var in ds.data_vars if ds[var].ndim >= 3]
+        if not vars_with_dims:
+            self.cmb_variable.addItem("No 3D variables available", None)
+            return
+        self.cmb_variable.blockSignals(True)
+        for var in vars_with_dims:
+            dims = " × ".join(str(d) for d in ds[var].dims)
+            self.cmb_variable.addItem(f"{var}  ({dims})", var)
+        self.cmb_variable.setEnabled(True)
+        self.cmb_variable.setCurrentIndex(0)
+        self.cmb_variable.blockSignals(False)
+        self._on_variable_changed()
+
+    def _reset_current_state(self):
+        self._current_variable = None
+        self._current_da = None
+        self._dims = []
+        self._slice_axis = None
+        self._row_axis = None
+        self._col_axis = None
+        self._fixed_indices = {}
+        self._fixed_dim_widgets = {}
+        self._processing_mode = "none"
+        self._processing_params = {}
+        self._slice_index = 0
+        self._slice_count = 0
+        self._axis_coords = None
+        self._current_processed_slice = None
+        self._roi_last_shape = None
+        self._roi_last_slices = None
+
+    def _clear_fixed_dim_widgets(self):
+        while self.fixed_dims_layout.rowCount():
+            self.fixed_dims_layout.removeRow(0)
+        self._fixed_dim_widgets.clear()
+        self._fixed_indices.clear()
+
+    # ---------- configuration ----------
+    def _on_variable_changed(self):
+        if self._dataset is None:
+            return
+        self._reset_current_state()
+        self._clear_fixed_dim_widgets()
+        index = self.cmb_variable.currentIndex()
+        var = self.cmb_variable.itemData(index)
+        if not var:
+            self._clear_display()
+            return
+        da = self._dataset[var]
+        self._current_variable = var
+        self._current_da = da
+        self._dims = list(da.dims)
+        self._processing_mode = "none"
+        self._processing_params = {}
+        self._slice_index = 0
+        self._slice_count = 0
+        self._axis_coords = None
+        self._current_processed_slice = None
+        self._rebuild_axis_controls()
+        self._update_slice_widgets()
+        self._update_slice_display(autorange=True)
+
+    def _rebuild_axis_controls(self):
+        dims = self._dims
+        combos = (self.cmb_slice_axis, self.cmb_row_axis, self.cmb_col_axis)
+        for combo in combos:
+            combo.blockSignals(True)
+            combo.clear()
+            for dim in dims:
+                combo.addItem(dim, dim)
+            combo.blockSignals(False)
+            combo.setEnabled(bool(dims))
+        if len(dims) >= 3:
+            self.cmb_slice_axis.setCurrentIndex(0)
+            self.cmb_row_axis.setCurrentIndex(1)
+            self.cmb_col_axis.setCurrentIndex(2)
+        elif len(dims) >= 2:
+            self.cmb_slice_axis.setCurrentIndex(0)
+            self.cmb_row_axis.setCurrentIndex(1)
+            self.cmb_col_axis.setCurrentIndex(0)
+        self._ensure_unique_axes()
+        self._rebuild_fixed_indices()
+
+    def _ensure_unique_axes(self):
+        dims = self._dims
+        combos = (self.cmb_slice_axis, self.cmb_row_axis, self.cmb_col_axis)
+        seen: List[str] = []
+        for combo in combos:
+            idx = combo.currentIndex()
+            dim = combo.itemData(idx)
+            if dim is None:
+                continue
+            if dim in seen:
+                for alt in dims:
+                    if alt not in seen:
+                        block = combo.blockSignals(True)
+                        combo.setCurrentIndex(combo.findData(alt))
+                        combo.blockSignals(block)
+                        dim = alt
+                        break
+            seen.append(dim)
+        self._slice_axis = self.cmb_slice_axis.currentData()
+        self._row_axis = self.cmb_row_axis.currentData()
+        self._col_axis = self.cmb_col_axis.currentData()
+        self._update_axis_coords()
+
+    def _update_axis_coords(self):
+        axis = self._slice_axis
+        if self._current_da is None or axis is None:
+            self._axis_coords = None
+            return
+        coord = self._current_da.coords.get(axis)
+        if coord is None:
+            self._axis_coords = None
+            return
+        try:
+            self._axis_coords = np.asarray(coord.values)
+        except Exception:
+            self._axis_coords = None
+
+    def _rebuild_fixed_indices(self):
+        self._clear_fixed_dim_widgets()
+        if not self._current_da:
+            return
+        for dim in self._current_da.dims:
+            if dim in (self._slice_axis, self._row_axis, self._col_axis):
+                continue
+            size = int(self._current_da.sizes.get(dim, 1))
+            spin = QtWidgets.QSpinBox()
+            spin.setRange(0, max(0, size - 1))
+            spin.setValue(0)
+            spin.valueChanged.connect(partial(self._on_fixed_index_changed, dim))
+            self.fixed_dims_layout.addRow(dim, spin)
+            self._fixed_dim_widgets[dim] = spin
+            self._fixed_indices[dim] = 0
+
+    def _on_axes_changed(self):
+        if not self._dims:
+            return
+        self._ensure_unique_axes()
+        self._slice_index = 0
+        self._rebuild_fixed_indices()
+        self._update_slice_widgets()
+        self._update_slice_display(autorange=True)
+
+    def _on_fixed_index_changed(self, dim: str, value: int):
+        self._fixed_indices[dim] = int(value)
+        self._update_slice_display()
+
+    def _update_slice_widgets(self):
+        axis = self._slice_axis
+        if not axis or self._current_da is None:
+            self._clear_display()
+            return
+        size = int(self._current_da.sizes.get(axis, 0))
+        self._slice_count = size
+        self._slice_index = min(self._slice_index, max(0, size - 1))
+        self.sld_slice.blockSignals(True)
+        self.spin_slice.blockSignals(True)
+        self.sld_slice.setRange(0, max(0, size - 1))
+        self.spin_slice.setRange(0, max(0, size - 1))
+        self.sld_slice.setValue(self._slice_index)
+        self.spin_slice.setValue(self._slice_index)
+        self.sld_slice.blockSignals(False)
+        self.spin_slice.blockSignals(False)
+        enabled = size > 0
+        self.sld_slice.setEnabled(enabled)
+        self.spin_slice.setEnabled(enabled)
+        self.btn_apply_processing.setEnabled(enabled)
+        self.btn_reset_processing.setEnabled(enabled)
+        self.btn_autoscale.setEnabled(enabled)
+        self.btn_autorange.setEnabled(enabled)
+        self.btn_toggle_roi.setEnabled(enabled)
+        self._update_slice_label()
+
+    def _update_slice_label(self):
+        if not self._slice_axis:
+            self.lbl_slice.setText("Slice: –")
+            return
+        coord_text = ""
+        coords = self._axis_coords
+        if coords is not None and 0 <= self._slice_index < coords.size:
+            coord = coords[self._slice_index]
+            coord_text = f" ({coord})"
+        self.lbl_slice.setText(f"Slice: {self._slice_axis} = {self._slice_index}{coord_text}")
+
+    # ---------- slice navigation ----------
+    def _on_slice_changed(self, value: int):
+        self._slice_index = int(value)
+        block = self.spin_slice.blockSignals(True)
+        self.spin_slice.setValue(self._slice_index)
+        self.spin_slice.blockSignals(block)
+        self._update_slice_label()
+        self._update_slice_display()
+
+    def _on_slice_spin_changed(self, value: int):
+        self._slice_index = int(value)
+        block = self.sld_slice.blockSignals(True)
+        self.sld_slice.setValue(self._slice_index)
+        self.sld_slice.blockSignals(block)
+        self._update_slice_label()
+        self._update_slice_display()
+
+    def _gather_selection(self, slice_index: Optional[int] = None) -> Dict[str, int]:
+        idx = dict(self._fixed_indices)
+        axis = self._slice_axis
+        if axis:
+            idx[axis] = int(self._slice_index if slice_index is None else slice_index)
+        return idx
+
+    def _extract_slice(self, slice_index: Optional[int] = None) -> Tuple[Optional[np.ndarray], Dict[str, np.ndarray]]:
+        if self._current_da is None or self._row_axis is None or self._col_axis is None:
+            return None, {}
+        if self._slice_axis is None:
+            return None, {}
+        select = self._gather_selection(slice_index)
+        try:
+            slice_da = self._current_da.isel(select)
+        except Exception:
+            return None, {}
+        for dim in (self._row_axis, self._col_axis):
+            if dim not in slice_da.dims:
+                return None, {}
+        try:
+            slice_da = slice_da.transpose(self._row_axis, self._col_axis)
+        except Exception:
+            return None, {}
+        data = np.asarray(slice_da.values, float)
+        coords = guess_phys_coords(slice_da)
+        return data, coords
+
+    def _apply_processing(self, data: np.ndarray) -> np.ndarray:
+        mode = self._processing_mode or "none"
+        params = dict(self._processing_params or {})
+        processed = np.asarray(data, float)
+        if mode.startswith("pipeline:"):
+            if not self.processing_manager:
+                raise RuntimeError("No processing manager is available for pipelines.")
+            name = mode.split(":", 1)[1]
+            pipeline = self.processing_manager.get_pipeline(name)
+            if pipeline is None:
+                raise RuntimeError(f"Pipeline '{name}' is not available.")
+            processed = pipeline.apply(processed)
+        elif mode != "none":
+            processed = apply_processing_step(mode, processed, params)
+        return np.asarray(processed, float)
+
+    def _update_slice_display(self, *, autorange: bool = False):
+        data, coords = self._extract_slice()
+        if data is None:
+            self._current_processed_slice = None
+            self.viewer.set_image(np.zeros((1, 1)), autorange=True)
+            self._roi_last_shape = None
+            if self._roi_enabled:
+                self._update_roi_curve()
+            return
+        try:
+            processed = self._apply_processing(data)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Processing failed", str(exc))
+            self._processing_mode = "none"
+            self._processing_params = {}
+            processed = np.asarray(data, float)
+        self._current_processed_slice = np.asarray(processed, float)
+        shape = self._current_processed_slice.shape
+        if self._roi_enabled and shape != self._roi_last_shape:
+            self._reset_roi_to_image(shape)
+        self._roi_last_shape = shape
+        if "X" in coords and "Y" in coords:
+            self.viewer.set_warped(coords["X"], coords["Y"], processed, autorange=autorange)
+        elif "x" in coords and "y" in coords:
+            self.viewer.set_rectilinear(coords["x"], coords["y"], processed, autorange=autorange)
+        else:
+            self.viewer.set_image(processed, autorange=autorange)
+        self._update_slice_label()
+        if self._roi_enabled:
+            self._update_roi_slice_reference()
+            self._update_roi_curve()
+
+    def _on_autoscale_clicked(self):
+        self.viewer.autoscale_levels()
+
+    def _on_autorange_clicked(self):
+        self.viewer.auto_view_range()
+
+    # ---------- processing ----------
+    def _choose_processing(self):
+        dialog = ProcessingSelectionDialog(self.processing_manager, self)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        mode, params = dialog.selected_processing()
+        self._processing_mode = mode
+        self._processing_params = dict(params)
+        self._update_slice_display()
+
+    def _reset_processing(self):
+        self._processing_mode = "none"
+        self._processing_params = {}
+        self._update_slice_display(autorange=True)
+
+    # ---------- ROI controls ----------
+    def _on_roi_toggled(self, checked: bool):
+        checked = bool(checked)
+        view = getattr(self.viewer, "plot", None)
+        if checked and self._current_processed_slice is not None:
+            if view is not None and self.roi.scene() is None:
+                view.addItem(self.roi)
+            self.roi.show()
+            self._roi_enabled = True
+            self.roi_curve.show()
+            self.lbl_roi_status.setText(self._describe_roi())
+            self._reset_roi_to_image(self._current_processed_slice.shape)
+            self._update_roi_slice_reference()
+            self._update_roi_curve()
+        else:
+            if view is not None and self.roi.scene() is not None:
+                try:
+                    view.removeItem(self.roi)
+                except Exception:
+                    pass
+            self.roi.hide()
+            self.roi_curve.hide()
+            self._roi_enabled = False
+            self._roi_last_slices = None
+            self._roi_last_shape = None
+            self.roi_curve_curve.setData([], [])
+            self.lbl_roi_status.setText("ROI disabled")
+
+    def _reset_roi_to_image(self, shape: Optional[Tuple[int, int]] = None):
+        if not self._roi_enabled:
+            return
+        if shape is None:
+            if self._current_processed_slice is None:
+                return
+            shape = self._current_processed_slice.shape
+        if not shape or len(shape) < 2:
+            return
+        height, width = int(shape[0]), int(shape[1])
+        if height <= 0 or width <= 0:
+            return
+        rect_w = max(2, width // 2)
+        rect_h = max(2, height // 2)
+        pos_x = max(0, (width - rect_w) // 2)
+        pos_y = max(0, (height - rect_h) // 2)
+        try:
+            self.roi.blockSignals(True)
+            self.roi.setPos((pos_x, pos_y))
+            self.roi.setSize((rect_w, rect_h))
+        finally:
+            try:
+                self.roi.blockSignals(False)
+            except Exception:
+                pass
+        self._update_roi_slice_reference()
+
+    def _on_roi_region_changed(self):
+        if not self._roi_enabled:
+            return
+        self._update_roi_slice_reference()
+        self._update_roi_curve()
+
+    def _update_roi_slice_reference(self):
+        if not self._roi_enabled or self._current_processed_slice is None:
+            self._roi_last_slices = None
+            return
+        img_item = getattr(self.viewer, "img_item", None)
+        if img_item is None:
+            self._roi_last_slices = None
+            return
+        try:
+            _, slc = self.roi.getArraySlice(self._current_processed_slice, img_item)
+            if isinstance(slc, tuple) and len(slc) >= 2:
+                self._roi_last_slices = (slc[0], slc[1])
+            else:
+                self._roi_last_slices = None
+        except Exception:
+            self._roi_last_slices = None
+
+    def _compute_roi_value(self, data: np.ndarray) -> float:
+        reducer_entry = self._roi_reducers.get(self._roi_method_key)
+        if reducer_entry is None:
+            return float("nan")
+        _, reducer = reducer_entry
+        roi_data = None
+        if self._roi_last_slices is not None:
+            sy, sx = self._roi_last_slices
+            try:
+                roi_data = np.asarray(data[sy, sx], float)
+            except Exception:
+                roi_data = None
+        if roi_data is None:
+            roi_data = np.asarray(data, float)
+        with np.errstate(all="ignore"):
+            value = reducer(roi_data)
+        try:
+            return float(value)
+        except Exception:
+            return float("nan")
+
+    def _update_roi_curve(self):
+        if not self._roi_enabled or self._current_da is None:
+            self.roi_curve_curve.setData([], [])
+            return
+        count = max(0, self._slice_count)
+        if count == 0:
+            self.roi_curve_curve.setData([], [])
+            return
+        self._update_roi_slice_reference()
+        values: List[float] = []
+        xs: List[float] = []
+        coords = self._axis_coords
+        for idx in range(count):
+            data, _ = self._extract_slice(slice_index=idx)
+            if data is None:
+                values.append(np.nan)
+            else:
+                try:
+                    processed = self._apply_processing(data)
+                except Exception:
+                    processed = np.asarray(data, float)
+                values.append(self._compute_roi_value(processed))
+            if coords is not None and idx < coords.size:
+                xs.append(float(coords[idx]))
+            else:
+                xs.append(float(idx))
+        self.roi_curve_curve.setData(xs, values)
+        name = self._roi_reducers.get(self._roi_method_key, ("ROI statistic",))[0]
+        axis_label = self._slice_axis or "Slice"
+        self.roi_curve.setLabel("left", name)
+        self.roi_curve.setLabel("bottom", axis_label)
+        self.roi_curve.enableAutoRange()
+        self.lbl_roi_status.setText(self._describe_roi())
+
+    def _describe_roi(self) -> str:
+        name = self._roi_reducers.get(self._roi_method_key, ("statistic",))[0]
+        axis = self._slice_axis or "axis"
+        return f"ROI {name.lower()} across {axis}"
+
+    def _show_roi_context_menu(self, pos):
+        if not self._roi_enabled:
+            return
+        menu = QtWidgets.QMenu(self)
+        group = QtWidgets.QActionGroup(menu)
+        for key, (label, _) in self._roi_reducers.items():
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(key == self._roi_method_key)
+            act.setData(key)
+            group.addAction(act)
+        action = menu.exec_(self.roi_curve.mapToGlobal(pos))
+        if action is not None:
+            key = action.data()
+            if key:
+                self._set_roi_method(str(key))
+
+    def _set_roi_method(self, key: str):
+        if key not in self._roi_reducers or key == self._roi_method_key:
+            return
+        self._roi_method_key = key
+        if self._roi_enabled:
+            self._update_roi_curve()
+        self.lbl_roi_status.setText(self._describe_roi())
+
+# ---------------------------------------------------------------------------
 # Overlay view: stack multiple layers with per-layer controls
 # ---------------------------------------------------------------------------
 class OverlayLayer(QtCore.QObject):
@@ -3034,6 +3773,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.tab_multiview = MultiViewGrid(self.processing_manager)
         self.tabs.addTab(self.tab_multiview, "MultiView")
+        self.tab_sequential = SequentialView(self.processing_manager)
+        self.tabs.addTab(self.tab_sequential, "Sequential View")
         self.tab_overlay = OverlayView(self.processing_manager)
         self.tabs.addTab(self.tab_overlay, "Overlay")
         self.tab_overlay.set_processing_manager(self.processing_manager)
