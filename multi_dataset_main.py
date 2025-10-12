@@ -2576,6 +2576,9 @@ class VolumeAlphaCurveWidget(QtWidgets.QWidget):
         )
         self._view.setDragMode(QtWidgets.QGraphicsView.NoDrag)
         self._view.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._view.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        )
         self._view.viewport().installEventFilter(self)
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -2614,6 +2617,10 @@ class VolumeAlphaCurveWidget(QtWidgets.QWidget):
         self.reset_curve()
 
     # ----- geometry helpers -----
+    def showEvent(self, event: QtGui.QShowEvent):
+        super().showEvent(event)
+        QtCore.QTimer.singleShot(0, self._update_scene_geometry)
+
     def resizeEvent(self, event: QtGui.QResizeEvent):
         super().resizeEvent(event)
         self._update_scene_geometry()
@@ -2847,6 +2854,11 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self.btn_reset_curve.clicked.connect(self._on_reset_curve)
         controls.addWidget(self.btn_reset_curve)
 
+        self.btn_reset_view = QtWidgets.QPushButton("Reset view")
+        self.btn_reset_view.setEnabled(False)
+        self.btn_reset_view.clicked.connect(self._on_reset_view)
+        controls.addWidget(self.btn_reset_view)
+
         controls.addStretch(1)
         layout.addLayout(controls)
 
@@ -2869,9 +2881,11 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             column_layout.setSpacing(4)
             label = QtWidgets.QLabel(self._axis_labels[key])
             label.setAlignment(QtCore.Qt.AlignHCenter)
+            label.setWordWrap(True)
             column_layout.addWidget(label)
 
             widget = VolumeAlphaCurveWidget(default_value=0.25)
+            widget.setMinimumWidth(150)
             widget.setSizePolicy(
                 QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             )
@@ -2887,6 +2901,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
 
         self._volume_item: Optional[gl.GLVolumeItem] = None
         self._volume_scalar: Optional[np.ndarray] = None
+        self._volume_shape: Tuple[int, int, int] = (1, 1, 1)
         self._curve_points: Dict[str, List[Tuple[float, float]]] = {}
         self._curve_lut_x: Dict[str, np.ndarray] = {}
         self._curve_lut_y: Dict[str, np.ndarray] = {}
@@ -2934,9 +2949,12 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             self._data_max = max_val
         self._data = arr.astype(np.float32, copy=False)
         self._volume_scalar = self._prepare_volume_array(self._data)
+        self._volume_shape = self._volume_scalar.shape if self._volume_scalar is not None else (1, 1, 1)
         self._update_alpha_controls()
         self._ensure_volume_item()
+        self._center_volume_item()
         self._update_volume_visual()
+        self._reset_camera()
 
     def set_colormap(self, name: Optional[str]):
         if name:
@@ -2954,8 +2972,10 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
     def clear_volume(self):
         self._data = None
         self._volume_scalar = None
+        self._volume_shape = (1, 1, 1)
         self._remove_volume()
         self._update_alpha_controls()
+        self.btn_reset_view.setEnabled(False)
 
     # ----- helpers -----
     def _ensure_volume_item(self):
@@ -2971,12 +2991,15 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         # Use translucent blending so colors remain readable instead of
         # saturating to white as layers accumulate with additive blending.
         self._volume_item.setGLOptions("translucent")
+        self._volume_item.resetTransform()
+        self._center_volume_item()
         self.view.addItem(self._volume_item)
         if hasattr(self._volume_item, "update"):
             try:
                 self._volume_item.update()
             except Exception:
                 pass
+        self.btn_reset_view.setEnabled(True)
 
     def _prepare_volume_array(self, data: np.ndarray) -> np.ndarray:
         if data.ndim != 3:
@@ -3043,6 +3066,43 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         except TypeError:
             # Older pyqtgraph releases expect the array as the first argument.
             self._volume_item.setData(data=rgba)
+        self._center_volume_item()
+        self.view.update()
+
+    def _center_volume_item(self):
+        if self._volume_item is None or self._volume_scalar is None:
+            return
+        try:
+            self._volume_item.resetTransform()
+        except Exception:
+            pass
+        shape = self._volume_scalar.shape
+        if len(shape) != 3:
+            return
+        offset = [-dim / 2.0 for dim in shape]
+        try:
+            self._volume_item.translate(*offset)
+        except Exception:
+            pass
+
+    def _reset_camera(self):
+        if self._volume_scalar is None or self._volume_scalar.size == 0:
+            return
+        shape = self._volume_scalar.shape
+        max_dim = float(max(shape)) if shape else 1.0
+        distance = max(200.0, max_dim * 2.2)
+        try:
+            self.view.opts["center"] = pg.Vector(0.0, 0.0, 0.0)
+        except Exception:
+            try:
+                self.view.opts["center"] = QtGui.QVector3D(0.0, 0.0, 0.0)
+            except Exception:
+                pass
+        try:
+            self.view.setCameraPosition(distance=distance, elevation=26, azimuth=32)
+        except Exception:
+            self.view.opts["distance"] = distance
+        self.view.update()
 
     def _populate_colormap_choices(self):
         candidates = [
@@ -3111,6 +3171,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         for widget in self._curve_widgets.values():
             widget.setEnabled(has_data)
         self.btn_reset_curve.setEnabled(has_data)
+        self.btn_reset_view.setEnabled(has_data and self._volume_item is not None)
 
     def set_axis_labels(self, slice_label: str, row_label: str, column_label: str):
         self._axis_labels.update(
@@ -3172,6 +3233,10 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             widget.reset_curve()
         for key, widget in self._curve_widgets.items():
             self._store_curve(key, widget.curve_points())
+
+    def _on_reset_view(self):
+        self._center_volume_item()
+        self._reset_camera()
 
     def _sample_alpha_curve(self, key: str, values: np.ndarray) -> np.ndarray:
         clipped = np.clip(values, 0.0, 1.0)
