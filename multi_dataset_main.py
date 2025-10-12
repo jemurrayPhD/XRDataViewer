@@ -13,6 +13,10 @@ import xarray as xr
 
 from PySide2 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
+try:
+    import pyqtgraph.opengl as gl
+except Exception:  # pragma: no cover - optional dependency
+    gl = None
 
 from xr_plot_widget import CentralPlotWidget, ScientificAxisItem
 from xr_coords import guess_phys_coords
@@ -2397,7 +2401,8 @@ class SequentialRoiWindow(QtWidgets.QWidget):
         super().__init__(parent, QtCore.Qt.Window)
         self.setWindowTitle("Sequential ROI Inspector")
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
-        self.setMinimumSize(420, 320)
+        self.setMinimumSize(360, 520)
+        self.resize(420, 600)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -2523,6 +2528,196 @@ class SequentialRoiWindow(QtWidgets.QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Sequential view: 3D volume visualization helper
+# ---------------------------------------------------------------------------
+
+
+class SequentialVolumeWindow(QtWidgets.QWidget):
+    closed = QtCore.Signal()
+
+    def __init__(self, parent=None):
+        if gl is None:
+            raise RuntimeError("pyqtgraph.opengl is not available")
+        super().__init__(parent, QtCore.Qt.Window)
+        self.setWindowTitle("Sequential Volume Viewer")
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
+        self.resize(680, 520)
+
+        self._data: Optional[np.ndarray] = None
+        self._data_min: float = 0.0
+        self._data_max: float = 1.0
+        self._colormap_name: str = "viridis"
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        controls = QtWidgets.QHBoxLayout()
+        controls.setSpacing(6)
+
+        controls.addWidget(QtWidgets.QLabel("Visible range:"))
+
+        self.spin_min = QtWidgets.QDoubleSpinBox()
+        self.spin_min.setDecimals(6)
+        self.spin_min.valueChanged.connect(self._on_range_changed)
+        controls.addWidget(self.spin_min)
+
+        self.spin_max = QtWidgets.QDoubleSpinBox()
+        self.spin_max.setDecimals(6)
+        self.spin_max.valueChanged.connect(self._on_range_changed)
+        controls.addWidget(self.spin_max)
+
+        self.btn_reset_range = QtWidgets.QPushButton("Reset")
+        self.btn_reset_range.clicked.connect(self._on_reset_range)
+        controls.addWidget(self.btn_reset_range)
+
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self.view = gl.GLViewWidget()
+        self.view.opts["distance"] = 400
+        self.view.setBackgroundColor(QtGui.QColor(20, 20, 20))
+        layout.addWidget(self.view, 1)
+
+        self._volume_item: Optional[gl.GLVolumeItem] = None
+
+    # ----- public API -----
+    def set_volume(self, data: Optional[np.ndarray]):
+        if data is None or data.size == 0:
+            self._data = None
+            self._remove_volume()
+            self._update_range_controls()
+            return
+        arr = np.asarray(data, float)
+        finite = np.isfinite(arr)
+        if not finite.any():
+            arr = np.zeros_like(arr, dtype=float)
+            self._data_min = 0.0
+            self._data_max = 1.0
+        else:
+            min_val = float(np.nanmin(arr))
+            max_val = float(np.nanmax(arr))
+            if min_val == max_val:
+                max_val = min_val + 1.0
+            arr = np.nan_to_num(arr, nan=min_val)
+            self._data_min = min_val
+            self._data_max = max_val
+        self._data = arr.astype(np.float32, copy=False)
+        self._update_range_controls(reset=True)
+        self._ensure_volume_item()
+        self._apply_volume_data()
+
+    def set_colormap(self, name: Optional[str]):
+        if name:
+            self._colormap_name = str(name)
+        else:
+            self._colormap_name = "viridis"
+        self._apply_transfer_function()
+
+    def clear_volume(self):
+        self._data = None
+        self._remove_volume()
+        self._update_range_controls()
+
+    # ----- helpers -----
+    def _ensure_volume_item(self):
+        if self._volume_item is not None:
+            return
+        data = self._data
+        if data is None:
+            return
+        volume = self._prepare_volume_array(data)
+        self._volume_item = gl.GLVolumeItem(volume, smooth=False)
+        self._volume_item.setGLOptions("additive")
+        self.view.addItem(self._volume_item)
+        self._apply_transfer_function()
+
+    def _prepare_volume_array(self, data: np.ndarray) -> np.ndarray:
+        if data.ndim != 3:
+            return np.zeros((1, 1, 1), dtype=np.float32)
+        transposed = np.transpose(data, (2, 1, 0))
+        return np.ascontiguousarray(transposed, dtype=np.float32)
+
+    def _apply_volume_data(self):
+        if self._data is None or self._volume_item is None:
+            return
+        volume = self._prepare_volume_array(self._data)
+        self._volume_item.setData(volume)
+        self._volume_item.setLevels((self._data_min, self._data_max))
+        self._apply_transfer_function()
+
+    def _apply_transfer_function(self):
+        if self._volume_item is None or self._data is None:
+            return
+        try:
+            cmap = pg.colormap.get(self._colormap_name)
+        except Exception:
+            cmap = pg.colormap.get("viridis")
+        lut = cmap.getLookupTable(nPts=512, alpha=True)
+        if lut.shape[1] == 3:
+            alpha = np.full((lut.shape[0], 1), 255, dtype=np.uint8)
+            lut = np.hstack([lut, alpha])
+        values = np.linspace(self._data_min, self._data_max, lut.shape[0])
+        lo = min(self.spin_min.value(), self.spin_max.value())
+        hi = max(self.spin_min.value(), self.spin_max.value())
+        alpha_mask = ((values >= lo) & (values <= hi)).astype(float)
+        lut[:, 3] = (alpha_mask * 255).astype(np.uint8)
+        self._volume_item.setLookupTable(lut)
+        self._volume_item.setLevels((self._data_min, self._data_max))
+
+    def _remove_volume(self):
+        if self._volume_item is None:
+            return
+        try:
+            self.view.removeItem(self._volume_item)
+        except Exception:
+            pass
+        self._volume_item = None
+
+    def _update_range_controls(self, *, reset: bool = False):
+        with QtCore.QSignalBlocker(self.spin_min), QtCore.QSignalBlocker(self.spin_max):
+            if self._data is None:
+                self.spin_min.setEnabled(False)
+                self.spin_max.setEnabled(False)
+                self.btn_reset_range.setEnabled(False)
+                self.spin_min.setValue(0.0)
+                self.spin_max.setValue(0.0)
+            else:
+                self.spin_min.setEnabled(True)
+                self.spin_max.setEnabled(True)
+                self.btn_reset_range.setEnabled(True)
+                self.spin_min.setRange(self._data_min, self._data_max)
+                self.spin_max.setRange(self._data_min, self._data_max)
+                if reset:
+                    self.spin_min.setValue(self._data_min)
+                    self.spin_max.setValue(self._data_max)
+        if reset:
+            self._apply_transfer_function()
+
+    def _on_range_changed(self):
+        if self._data is None:
+            return
+        if self.spin_min.value() > self.spin_max.value():
+            return
+        self._apply_transfer_function()
+
+    def _on_reset_range(self):
+        if self._data is None:
+            return
+        with QtCore.QSignalBlocker(self.spin_min), QtCore.QSignalBlocker(self.spin_max):
+            self.spin_min.setValue(self._data_min)
+            self.spin_max.setValue(self._data_max)
+        self._apply_transfer_function()
+
+    def closeEvent(self, event: QtGui.QCloseEvent):
+        try:
+            self.closed.emit()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+
+# ---------------------------------------------------------------------------
 # Sequential view: explore 2D slices along an arbitrary axis
 # ---------------------------------------------------------------------------
 
@@ -2576,6 +2771,7 @@ class SequentialView(QtWidgets.QWidget):
         self._row_coord_2d: Optional[np.ndarray] = None
         self._col_coord_1d: Optional[np.ndarray] = None
         self._col_coord_2d: Optional[np.ndarray] = None
+        self._volume_cache: Optional[np.ndarray] = None
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
@@ -2708,6 +2904,15 @@ class SequentialView(QtWidgets.QWidget):
         self.btn_toggle_roi.toggled.connect(self._on_roi_toggled)
         roi_row.addWidget(self.btn_toggle_roi)
 
+        self.btn_volume_view = QtWidgets.QPushButton("Open volume view…")
+        self.btn_volume_view.setEnabled(False)
+        self.btn_volume_view.clicked.connect(self._open_volume_view)
+        if gl is None:
+            self.btn_volume_view.setToolTip(
+                "3D volume rendering requires the optional pyqtgraph.opengl module"
+            )
+        roi_row.addWidget(self.btn_volume_view)
+
         self.lbl_roi_status = QtWidgets.QLabel("ROI disabled")
         self.lbl_roi_status.setStyleSheet("color: #666;")
         roi_row.addWidget(self.lbl_roi_status, 1)
@@ -2724,6 +2929,7 @@ class SequentialView(QtWidgets.QWidget):
             pass
 
         self._roi_window: Optional[SequentialRoiWindow] = None
+        self._volume_window: Optional[SequentialVolumeWindow] = None
 
     # ---------- dataset helpers ----------
     def _populate_colormap_choices(self):
@@ -2755,6 +2961,7 @@ class SequentialView(QtWidgets.QWidget):
         if not hasattr(self, "viewer"):
             return
         self._apply_selected_colormap()
+        self._update_volume_window_colormap()
 
     def _apply_selected_colormap(self):
         if not hasattr(self, "viewer"):
@@ -2776,6 +2983,7 @@ class SequentialView(QtWidgets.QWidget):
             self.viewer.lut.rehide_stops()
         except Exception:
             pass
+        self._update_volume_window_colormap()
 
     def set_processing_manager(self, manager: Optional[ProcessingManager]):
         self.processing_manager = manager
@@ -2843,11 +3051,18 @@ class SequentialView(QtWidgets.QWidget):
         self.btn_toggle_roi.setChecked(False)
         self.btn_toggle_roi.blockSignals(False)
         self.btn_toggle_roi.setEnabled(False)
+        self.btn_volume_view.setEnabled(False)
         if self._roi_window is not None:
             try:
                 self._roi_window.hide()
                 self._roi_window.update_slice_curve([], [], "Slice coordinate", "ROI statistic")
                 self._roi_window.update_profile([], [], "", "", False)
+            except Exception:
+                pass
+        if self._volume_window is not None:
+            try:
+                self._volume_window.clear_volume()
+                self._volume_window.hide()
             except Exception:
                 pass
         self.lbl_roi_status.setText("ROI disabled")
@@ -2859,6 +3074,7 @@ class SequentialView(QtWidgets.QWidget):
         self._roi_axis_options = []
         self._roi_axes_selection = (0, 1)
         self._roi_axis_index = 0
+        self._volume_cache = None
         self.viewer.set_image(np.zeros((1, 1)), autorange=True)
         self.sld_slice.blockSignals(True)
         self.spin_slice.blockSignals(True)
@@ -2922,6 +3138,7 @@ class SequentialView(QtWidgets.QWidget):
         self._roi_axis_options = []
         self._roi_axis_index = 0
         self._roi_axes_selection = (0, 1)
+        self._volume_cache = None
         self._update_roi_window_options()
 
     def _clear_fixed_dim_widgets(self):
@@ -3115,6 +3332,7 @@ class SequentialView(QtWidgets.QWidget):
         if not self._dims:
             return
         self._ensure_unique_axes()
+        self._invalidate_volume_cache()
         self._slice_index = 0
         self._rebuild_fixed_indices()
         self._update_slice_widgets()
@@ -3123,6 +3341,7 @@ class SequentialView(QtWidgets.QWidget):
 
     def _on_fixed_index_changed(self, dim: str, value: int):
         self._fixed_indices[dim] = int(value)
+        self._invalidate_volume_cache()
         self._update_slice_display()
 
     def _update_slice_widgets(self):
@@ -3149,6 +3368,7 @@ class SequentialView(QtWidgets.QWidget):
         self.btn_autoscale.setEnabled(enabled)
         self.btn_autorange.setEnabled(enabled)
         self.btn_toggle_roi.setEnabled(enabled)
+        self._update_volume_button_state()
         self._update_slice_label()
 
     def _update_slice_label(self):
@@ -3161,6 +3381,17 @@ class SequentialView(QtWidgets.QWidget):
             coord = coords[self._slice_index]
             coord_text = f" ({coord})"
         self.lbl_slice.setText(f"Slice: {self._slice_axis} = {self._slice_index}{coord_text}")
+
+    def _update_volume_button_state(self):
+        enabled = (
+            gl is not None
+            and self._current_da is not None
+            and self._slice_axis is not None
+            and self._row_axis is not None
+            and self._col_axis is not None
+            and self._slice_count > 0
+        )
+        self.btn_volume_view.setEnabled(enabled)
 
     # ---------- slice navigation ----------
     def _on_slice_changed(self, value: int):
@@ -3252,6 +3483,7 @@ class SequentialView(QtWidgets.QWidget):
             self._roi_last_shape = None
             if self._roi_enabled:
                 self._update_roi_curve()
+            self._refresh_volume_window()
             return
         try:
             processed = self._apply_processing(data)
@@ -3287,6 +3519,7 @@ class SequentialView(QtWidgets.QWidget):
         if self._roi_enabled:
             self._update_roi_slice_reference()
             self._update_roi_curve()
+        self._refresh_volume_window()
 
     def _on_autoscale_clicked(self):
         self.viewer.autoscale_levels()
@@ -3302,12 +3535,120 @@ class SequentialView(QtWidgets.QWidget):
         mode, params = dialog.selected_processing()
         self._processing_mode = mode
         self._processing_params = dict(params)
+        self._invalidate_volume_cache()
         self._update_slice_display()
 
     def _reset_processing(self):
         self._processing_mode = "none"
         self._processing_params = {}
+        self._invalidate_volume_cache()
         self._update_slice_display(autorange=True)
+
+    # ---------- volume viewer ----------
+    def _invalidate_volume_cache(self):
+        self._volume_cache = None
+
+    def _ensure_volume_window(self) -> SequentialVolumeWindow:
+        if gl is None:
+            raise RuntimeError("pyqtgraph.opengl is not available")
+        window = self._volume_window
+        if window is None:
+            window = SequentialVolumeWindow(self)
+            window.closed.connect(self._on_volume_window_closed)
+            self._volume_window = window
+        return window
+
+    def _on_volume_window_closed(self):
+        self._volume_window = None
+
+    def _open_volume_view(self):
+        if gl is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Volume rendering unavailable",
+                "3D volume rendering requires the optional pyqtgraph.opengl package.",
+            )
+            return
+        volume = self._collect_volume_data()
+        if volume is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Volume unavailable",
+                "Unable to assemble a 3D volume with the current axis and index selection.",
+            )
+            return
+        try:
+            window = self._ensure_volume_window()
+        except RuntimeError as exc:
+            QtWidgets.QMessageBox.warning(self, "Volume rendering error", str(exc))
+            return
+        window.set_volume(volume)
+        cmap_name = self.cmb_colormap.currentData() or "viridis"
+        window.set_colormap(cmap_name)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _collect_volume_data(self) -> Optional[np.ndarray]:
+        if self._volume_cache is not None:
+            return self._volume_cache
+        if (
+            self._current_da is None
+            or self._slice_axis is None
+            or self._row_axis is None
+            or self._col_axis is None
+        ):
+            return None
+        for axis in (self._slice_axis, self._row_axis, self._col_axis):
+            if axis not in self._current_da.dims:
+                return None
+        select: Dict[str, int] = {}
+        for dim in self._current_da.dims:
+            if dim in (self._slice_axis, self._row_axis, self._col_axis):
+                continue
+            select[dim] = int(self._fixed_indices.get(dim, 0))
+        try:
+            subset = self._current_da.isel(select)
+        except Exception:
+            return None
+        try:
+            subset = subset.transpose(self._slice_axis, self._row_axis, self._col_axis)
+        except Exception:
+            return None
+        data = np.asarray(subset.values, float)
+        if data.ndim != 3:
+            return None
+        frames: List[np.ndarray] = []
+        for idx in range(data.shape[0]):
+            frame = np.asarray(data[idx], float)
+            try:
+                processed = self._apply_processing(frame)
+            except Exception:
+                processed = frame
+            frames.append(np.asarray(processed, float))
+        try:
+            volume = np.stack(frames, axis=0)
+        except Exception:
+            return None
+        self._volume_cache = volume
+        return volume
+
+    def _refresh_volume_window(self):
+        if self._volume_window is None or not self._volume_window.isVisible():
+            return
+        volume = self._collect_volume_data()
+        if volume is None:
+            self._volume_window.clear_volume()
+            return
+        self._volume_window.set_volume(volume)
+        cmap_name = self.cmb_colormap.currentData() or "viridis"
+        self._volume_window.set_colormap(cmap_name)
+
+    def _update_volume_window_colormap(self):
+        if self._volume_window is None or not self._volume_window.isVisible():
+            return
+        cmap_name = self.cmb_colormap.currentData() or "viridis"
+        self._volume_window.set_colormap(cmap_name)
 
     # ---------- ROI controls ----------
     def _ensure_roi_window(self) -> SequentialRoiWindow:
