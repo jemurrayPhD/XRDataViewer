@@ -297,34 +297,36 @@ class PipelineEditorDialog(QtWidgets.QDialog):
         self.roi.addScaleHandle((1, 1), (0, 0))
         self.roi.addScaleHandle((0, 0), (1, 1))
         try:
-            self.image_view.getView().addItem(self.roi)
+            self.roi.setVisible(False)
         except Exception:
             pass
 
-        self.preview_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        self.preview_splitter.setChildrenCollapsible(False)
-        self.preview_splitter.addWidget(self.image_view)
+        roi_button = getattr(self.image_view.ui, "roiBtn", None)
+        if roi_button is not None:
+            try:
+                roi_button.clicked.disconnect()
+            except Exception:
+                pass
+            roi_button.setCheckable(True)
+            roi_button.setChecked(False)
+            roi_button.toggled.connect(self._on_roi_button_toggled)
+            roi_button.setToolTip("Toggle ROI preview (right-click the ROI plot for reduction options)")
+        roi_plot_widget = getattr(self.image_view.ui, "roiPlot", None)
+        if roi_plot_widget is not None:
+            roi_plot_widget.hide()
+            roi_plot_widget.setMaximumHeight(0)
+        layout.addWidget(self.image_view, 2)
 
         self.roi_box = QtWidgets.QGroupBox("ROI preview")
         roi_layout = QtWidgets.QVBoxLayout(self.roi_box)
         roi_layout.setContentsMargins(8, 8, 8, 8)
         roi_layout.setSpacing(6)
 
-        controls_row = QtWidgets.QHBoxLayout()
-        controls_row.setSpacing(6)
-        controls_row.addWidget(QtWidgets.QLabel("Reduce over:"))
-        self.cmb_roi_axis = QtWidgets.QComboBox()
         self._roi_axis_options: List[tuple[str, int, str, str]] = [
             ("Collapse rows (Y) → profile across X", 0, "rows (Y)", "X"),
             ("Collapse columns (X) → profile across Y", 1, "columns (X)", "Y"),
         ]
-        for label, axis, collapsed, remaining in self._roi_axis_options:
-            self.cmb_roi_axis.addItem(label, (axis, collapsed, remaining))
-        self.cmb_roi_axis.currentIndexChanged.connect(self._on_roi_axis_changed)
-        controls_row.addWidget(self.cmb_roi_axis, 1)
-
-        controls_row.addWidget(QtWidgets.QLabel("Statistic:"))
-        self.cmb_roi_method = QtWidgets.QComboBox()
+        self._roi_axis_index: int = 0
         self._roi_reducers = {
             "mean": ("Mean", lambda arr, axis: np.nanmean(arr, axis=axis)),
             "median": ("Median", lambda arr, axis: np.nanmedian(arr, axis=axis)),
@@ -333,25 +335,25 @@ class PipelineEditorDialog(QtWidgets.QDialog):
             "std": ("Std. dev", lambda arr, axis: np.nanstd(arr, axis=axis)),
             "ptp": ("Peak-to-peak", lambda arr, axis: np.nanmax(arr, axis=axis) - np.nanmin(arr, axis=axis)),
         }
-        for key, (label, _) in self._roi_reducers.items():
-            self.cmb_roi_method.addItem(label, key)
-        self.cmb_roi_method.currentIndexChanged.connect(self._update_roi_preview)
-        controls_row.addWidget(self.cmb_roi_method, 1)
-        roi_layout.addLayout(controls_row)
+        self._roi_method_key: str = "mean"
 
         self.lbl_roi_axis = QtWidgets.QLabel()
         self.lbl_roi_axis.setStyleSheet("color: #555;")
         roi_layout.addWidget(self.lbl_roi_axis)
 
+        hint = QtWidgets.QLabel("Right-click the ROI plot to change the reduction axis or statistic.")
+        hint.setStyleSheet("color: #777;")
+        roi_layout.addWidget(hint)
+
         self.roi_plot = pg.PlotWidget()
         self.roi_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.roi_plot.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.roi_plot.customContextMenuRequested.connect(self._show_roi_context_menu)
         self.roi_curve = self.roi_plot.plot([], [], pen=pg.mkPen('#ffaa00', width=2))
         roi_layout.addWidget(self.roi_plot, 1)
 
-        self.preview_splitter.addWidget(self.roi_box)
-        self.preview_splitter.setStretchFactor(0, 3)
-        self.preview_splitter.setStretchFactor(1, 2)
-        layout.addWidget(self.preview_splitter, 2)
+        self.roi_box.hide()
+        layout.addWidget(self.roi_box, 1)
 
         self.steps_scroll = QtWidgets.QScrollArea()
         self.steps_scroll.setWidgetResizable(True)
@@ -367,6 +369,7 @@ class PipelineEditorDialog(QtWidgets.QDialog):
         layout.addWidget(buttons)
 
         self._forms: List[tuple[ProcessingStep, ParameterForm]] = []
+        self._roi_enabled = False
         self._rebuild_forms()
         self._update_roi_axis_label()
         try:
@@ -453,29 +456,88 @@ class PipelineEditorDialog(QtWidgets.QDialog):
             pass
 
     def _update_roi_axis_label(self):
-        data = self.cmb_roi_axis.currentData() if hasattr(self, "cmb_roi_axis") else None
-        if not data:
+        if not self._roi_axis_options:
             self.roi_box.setTitle("ROI preview")
             self.lbl_roi_axis.setText("")
             return
-        axis, collapsed, remaining = data
+        index = max(0, min(self._roi_axis_index, len(self._roi_axis_options) - 1))
+        axis, collapsed, remaining = self._roi_axis_options[index][1:]
         self.roi_box.setTitle(f"ROI preview – reducing {collapsed}")
         self.lbl_roi_axis.setText(f"Reducing over {collapsed} to plot along {remaining}.")
         self.roi_plot.setLabel("bottom", f"{remaining} index")
+        self.roi_plot.setTitle(f"ROI profile along {remaining}")
 
     def _current_roi_axis(self) -> int:
-        data = self.cmb_roi_axis.currentData()
-        if not data:
+        if not self._roi_axis_options:
             return 0
-        axis, *_ = data
+        index = max(0, min(self._roi_axis_index, len(self._roi_axis_options) - 1))
+        axis = self._roi_axis_options[index][1]
         return int(axis)
 
     def _on_colormap_changed(self):
         self._apply_selected_colormap()
 
-    def _on_roi_axis_changed(self):
+    def _show_roi_context_menu(self, pos: QtCore.QPoint):
+        if not self._roi_axis_options:
+            return
+        menu = QtWidgets.QMenu(self.roi_plot)
+
+        axis_menu = menu.addMenu("Reduce over")
+        for idx, (label, *_rest) in enumerate(self._roi_axis_options):
+            action = axis_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(idx == self._roi_axis_index)
+            action.triggered.connect(partial(self._set_roi_axis_index, idx))
+
+        stat_menu = menu.addMenu("Statistic")
+        for key, (label, _) in self._roi_reducers.items():
+            action = stat_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(key == self._roi_method_key)
+            action.triggered.connect(partial(self._set_roi_method, key))
+
+        menu.exec_(self.roi_plot.mapToGlobal(pos))
+
+    def _set_roi_axis_index(self, index: int):
+        if index == self._roi_axis_index:
+            return
+        self._roi_axis_index = max(0, min(index, len(self._roi_axis_options) - 1))
         self._update_roi_axis_label()
         self._update_roi_preview()
+
+    def _set_roi_method(self, key: str):
+        if key not in self._roi_reducers or key == self._roi_method_key:
+            return
+        self._roi_method_key = key
+        self._update_roi_preview()
+
+    def _on_roi_button_toggled(self, checked: bool):
+        view = getattr(self.image_view, "view", None)
+        if view is None:
+            try:
+                view = self.image_view.getView()
+            except Exception:
+                view = None
+        if view is not None:
+            try:
+                if checked:
+                    if self.roi.scene() is None:
+                        view.addItem(self.roi)
+                else:
+                    view.removeItem(self.roi)
+            except Exception:
+                pass
+        try:
+            self.roi.setVisible(checked)
+        except Exception:
+            pass
+        self._roi_enabled = bool(checked)
+        self.roi_box.setVisible(self._roi_enabled)
+        if self._roi_enabled:
+            self._reset_roi_to_image()
+            self._update_roi_preview()
+        else:
+            self.roi_curve.setData([], [])
 
     def _extract_roi_array(self) -> Optional[np.ndarray]:
         if self._processed_data is None:
@@ -486,25 +548,27 @@ class PipelineEditorDialog(QtWidgets.QDialog):
         if image_item is None:
             return None
         try:
-            roi_data, _ = self.roi.getArraySlice(self._processed_data, image_item)
+            roi_data = self.roi.getArrayRegion(self._processed_data, image_item)
         except Exception:
             try:
-                roi_data, _ = self.roi.getArraySlice(self._processed_data, image_item.getTransform())
+                roi_data = self.roi.getArraySlice(self._processed_data, image_item)
+                if isinstance(roi_data, tuple):
+                    roi_data = roi_data[0]
             except Exception:
                 return None
-        if isinstance(roi_data, tuple):
-            roi_data = roi_data[0]
+        if roi_data is None:
+            return None
         return np.asarray(roi_data)
 
     def _update_roi_preview(self):
-        if self._processed_data is None:
+        if not self._roi_enabled or self._processed_data is None:
             self.roi_curve.setData([], [])
             return
         roi_array = self._extract_roi_array()
         if roi_array is None or roi_array.size == 0:
             self.roi_curve.setData([], [])
             return
-        method_key = self.cmb_roi_method.currentData()
+        method_key = self._roi_method_key
         reducer_entry = self._roi_reducers.get(method_key)
         if reducer_entry is None:
             self.roi_curve.setData([], [])
@@ -526,7 +590,7 @@ class PipelineEditorDialog(QtWidgets.QDialog):
         self.roi_plot.enableAutoRange()
 
     def _reset_roi_to_image(self, shape: Optional[Tuple[int, int]] = None):
-        if not hasattr(self, "roi") or self.roi is None:
+        if not self._roi_enabled or not hasattr(self, "roi") or self.roi is None:
             return
         if shape is None:
             if self._processed_data is None:
