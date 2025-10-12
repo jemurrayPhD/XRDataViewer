@@ -17,7 +17,6 @@ import pkgutil
 import sys
 import os
 import re
-import secrets
 import shutil
 import socket
 import subprocess
@@ -125,8 +124,8 @@ class EmbeddedJupyterManager(QtCore.QObject):
             return False
 
         self._port = desired_port
-        self._token = secrets.token_urlsafe(16)
-        self._url = f"http://127.0.0.1:{self._port}/lab?token={self._token}"
+        self._token = None
+        self._url = f"http://127.0.0.1:{self._port}/lab"
 
         args = list(command)
         args.extend(
@@ -135,7 +134,7 @@ class EmbeddedJupyterManager(QtCore.QObject):
                 f"--ServerApp.port={self._port}",
                 "--ServerApp.ip=127.0.0.1",
                 "--ServerApp.port_retries=0",
-                f"--ServerApp.token={self._token}",
+                "--ServerApp.token=",
                 "--ServerApp.password=",
                 "--ServerApp.open_browser=False",
                 "--ServerApp.allow_remote_access=False",
@@ -231,9 +230,14 @@ class EmbeddedJupyterManager(QtCore.QObject):
                     self.message.emit(text)
                     if not self._ready_emitted:
                         match = re.search(r"http[s]?://[^\s]+", text)
-                        if match and "token=" in match.group(0):
+                        if match:
+                            candidate = match.group(0)
+                            if self._token:
+                                if f"token={self._token}" not in candidate:
+                                    continue
                             self._ready_emitted = True
-                            self._url = match.group(0)
+                            if candidate:
+                                self._url = candidate
                             self.urlReady.emit(self._url)
             stream.close()
         except Exception:
@@ -250,7 +254,10 @@ class EmbeddedJupyterManager(QtCore.QObject):
                     if not self._ready_emitted:
                         self._ready_emitted = True
                         self.urlReady.emit(self._url)
-                    self.message.emit("JupyterLab ready.")
+                    if self._url:
+                        self.message.emit(f"JupyterLab ready at {self._url}.")
+                    else:
+                        self.message.emit("JupyterLab ready.")
                     return
             except Exception:
                 time.sleep(0.5)
