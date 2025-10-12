@@ -2884,7 +2884,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             label.setWordWrap(True)
             column_layout.addWidget(label)
 
-            widget = VolumeAlphaCurveWidget(default_value=0.25)
+            widget = VolumeAlphaCurveWidget(default_value=0.8 if key == "value" else 1)
             widget.setMinimumWidth(150)
             widget.setSizePolicy(
                 QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
@@ -3220,7 +3220,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         if key not in self._curve_keys:
             key = "value"
         if not points:
-            default_value = 0.25
+            default_value = 0.8
             widget = self._curve_widgets.get(key)
             if widget is not None and hasattr(widget, "_default_value"):
                 default_value = float(getattr(widget, "_default_value"))
