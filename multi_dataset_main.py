@@ -2773,6 +2773,18 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
+        cmap_controls = QtWidgets.QHBoxLayout()
+        cmap_controls.setSpacing(6)
+        cmap_controls.addWidget(QtWidgets.QLabel("Colormap:"))
+
+        self.cmb_colormap = QtWidgets.QComboBox()
+        self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        self.cmb_colormap.currentIndexChanged.connect(self._on_colormap_combo_changed)
+        cmap_controls.addWidget(self.cmb_colormap, 0)
+
+        cmap_controls.addStretch(1)
+        layout.addLayout(cmap_controls)
+
         controls = QtWidgets.QHBoxLayout()
         controls.setSpacing(6)
         controls.addWidget(QtWidgets.QLabel("Opacity curve:"))
@@ -2797,6 +2809,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self._alpha_lut_x = np.array([0.0, 1.0], dtype=float)
         self._alpha_lut_y = np.array([0.0, 1.0], dtype=float)
 
+        self._populate_colormap_choices()
         self._update_alpha_controls()
         self._on_alpha_curve_changed(self.alpha_widget.curve_points())
 
@@ -2845,6 +2858,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             self.alpha_widget.set_colormap(self._colormap_name)
         except Exception:
             pass
+        self._sync_colormap_combo()
         self._update_volume_visual()
 
     def clear_volume(self):
@@ -2918,6 +2932,54 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         except TypeError:
             # Older pyqtgraph releases expect the array as the first argument.
             self._volume_item.setData(data=rgba)
+
+    def _populate_colormap_choices(self):
+        candidates = [
+            "gray",
+            "viridis",
+            "plasma",
+            "inferno",
+            "magma",
+            "cividis",
+            "turbo",
+            "thermal",
+            "blues",
+            "reds",
+        ]
+        self.cmb_colormap.blockSignals(True)
+        self.cmb_colormap.clear()
+        for name in candidates:
+            try:
+                pg.colormap.get(name)
+            except Exception:
+                continue
+            self.cmb_colormap.addItem(name.title(), name)
+        if self.cmb_colormap.count() == 0:
+            self.cmb_colormap.addItem("Viridis", "viridis")
+        self.cmb_colormap.blockSignals(False)
+        self._sync_colormap_combo()
+
+    def _sync_colormap_combo(self):
+        if not hasattr(self, "cmb_colormap"):
+            return
+        name = self._colormap_name or "viridis"
+        block = self.cmb_colormap.blockSignals(True)
+        idx = self.cmb_colormap.findData(name)
+        if idx < 0 and self.cmb_colormap.count():
+            idx = 0
+            name = self.cmb_colormap.itemData(0)
+            self._colormap_name = name
+        if idx >= 0:
+            self.cmb_colormap.setCurrentIndex(idx)
+        self.cmb_colormap.blockSignals(block)
+
+    def _on_colormap_combo_changed(self):
+        name = self.cmb_colormap.currentData()
+        if not name:
+            name = "viridis"
+        if name == self._colormap_name:
+            return
+        self.set_colormap(name)
         if hasattr(self._volume_item, "update"):
             try:
                 self._volume_item.update()
