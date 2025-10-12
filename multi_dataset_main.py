@@ -117,7 +117,14 @@ class EmbeddedJupyterManager(QtCore.QObject):
 
         self._stop_event.clear()
         self._ready_emitted = False
-        self._port = self._find_free_port()
+        desired_port = 8888
+        if not self._is_port_available(desired_port):
+            self.failed.emit(
+                "Port 8888 is already in use. Stop the existing service or free the port before launching the embedded JupyterLab server."
+            )
+            return False
+
+        self._port = desired_port
         self._token = secrets.token_urlsafe(16)
         self._url = f"http://127.0.0.1:{self._port}/lab?token={self._token}"
 
@@ -126,11 +133,12 @@ class EmbeddedJupyterManager(QtCore.QObject):
             [
                 "--no-browser",
                 f"--ServerApp.port={self._port}",
+                "--ServerApp.ip=127.0.0.1",
+                "--ServerApp.port_retries=0",
                 f"--ServerApp.token={self._token}",
                 "--ServerApp.password=",
                 "--ServerApp.open_browser=False",
-                "--ServerApp.allow_origin=*",
-                "--ServerApp.allow_remote_access=True",
+                "--ServerApp.allow_remote_access=False",
                 "--ServerApp.disable_check_xsrf=True",
                 f"--ServerApp.root_dir={os.getcwd()}",
             ]
@@ -204,12 +212,27 @@ class EmbeddedJupyterManager(QtCore.QObject):
             return [generic, "lab"]
         return None
 
-    def _find_free_port(self) -> int:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-        sock.close()
-        return int(port)
+    def _is_port_available(self, port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            result = sock.connect_ex(("127.0.0.1", int(port)))
+            return result != 0
+
+
+if QtWebEngineWidgets is not None:
+    class QuietWebEnginePage(QtWebEngineWidgets.QWebEnginePage):
+        """QWebEnginePage that captures JS console output without spamming stderr."""
+
+        consoleMessage = QtCore.Signal(int, str, int, str)
+
+        def javaScriptConsoleMessage(
+            self,
+            level: QtWebEngineWidgets.QWebEnginePage.JavaScriptConsoleMessageLevel,
+            message: str,
+            line_number: int,
+            source_id: str,
+        ) -> None:
+            self.consoleMessage.emit(int(level), message, int(line_number), source_id)
 
     def _forward_stream(self, stream):
         if stream is None:
@@ -4103,10 +4126,57 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         mode_row.addStretch(1)
         layout.addLayout(mode_row)
 
+        self._jupyter_nav_widget = QtWidgets.QWidget()
+        nav_layout = QtWidgets.QHBoxLayout(self._jupyter_nav_widget)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(4)
+        if self._web_engine_available:
+            self.btn_jupyter_back = QtWidgets.QToolButton()
+            self.btn_jupyter_back.setText("◀")
+            self.btn_jupyter_back.setToolTip("Go back")
+            self.btn_jupyter_back.setAutoRaise(True)
+            self.btn_jupyter_back.setEnabled(False)
+            self.btn_jupyter_back.clicked.connect(self._on_jupyter_back)
+            nav_layout.addWidget(self.btn_jupyter_back)
+
+            self.btn_jupyter_forward = QtWidgets.QToolButton()
+            self.btn_jupyter_forward.setText("▶")
+            self.btn_jupyter_forward.setToolTip("Go forward")
+            self.btn_jupyter_forward.setAutoRaise(True)
+            self.btn_jupyter_forward.setEnabled(False)
+            self.btn_jupyter_forward.clicked.connect(self._on_jupyter_forward)
+            nav_layout.addWidget(self.btn_jupyter_forward)
+
+            self.btn_jupyter_reload = QtWidgets.QToolButton()
+            self.btn_jupyter_reload.setText("⟳")
+            self.btn_jupyter_reload.setToolTip("Reload current page")
+            self.btn_jupyter_reload.setAutoRaise(True)
+            self.btn_jupyter_reload.setEnabled(False)
+            self.btn_jupyter_reload.clicked.connect(self._on_jupyter_reload)
+            nav_layout.addWidget(self.btn_jupyter_reload)
+
+            self.btn_jupyter_external = QtWidgets.QToolButton()
+            self.btn_jupyter_external.setText("↗")
+            self.btn_jupyter_external.setToolTip("Open in external browser")
+            self.btn_jupyter_external.setAutoRaise(True)
+            self.btn_jupyter_external.setEnabled(False)
+            self.btn_jupyter_external.clicked.connect(self._open_jupyter_external)
+            nav_layout.addWidget(self.btn_jupyter_external)
+
+            nav_layout.addStretch(1)
+        else:
+            nav_layout.addWidget(QtWidgets.QLabel(" "))
+            nav_layout.addStretch(1)
+        self._jupyter_nav_widget.setVisible(False)
+        layout.addWidget(self._jupyter_nav_widget)
+
         self.stack = QtWidgets.QStackedWidget()
         self._jupyter_view: Optional['QtWebEngineWidgets.QWebEngineView'] = None
         if self._web_engine_available:
             self._jupyter_view = QtWebEngineWidgets.QWebEngineView()
+            self._jupyter_page = QuietWebEnginePage(self._jupyter_view)
+            self._jupyter_page.consoleMessage.connect(self._on_jupyter_console_message)
+            self._jupyter_view.setPage(self._jupyter_page)
             self._jupyter_view.setHtml(
                 """
                 <html><body style='font-family: sans-serif; color: #333;'>
@@ -4115,6 +4185,8 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
                 </body></html>
                 """
             )
+            self._jupyter_view.urlChanged.connect(self._update_jupyter_nav)
+            self._jupyter_view.loadFinished.connect(self._update_jupyter_nav)
             self.stack.addWidget(self._jupyter_view)
         else:
             placeholder = QtWidgets.QTextBrowser()
@@ -4131,6 +4203,8 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             self._jupyter_manager.failed.connect(self._on_jupyter_failed)
             self._jupyter_manager.message.connect(self._on_jupyter_message)
         self._jupyter_url: Optional[str] = None
+        self._jupyter_js_seen: Set[str] = set()
+        self._jupyter_js_warned = False
 
         self.console_widget = InteractiveConsoleWidget(self.library)
         self.console_widget.datasetRegistered.connect(self._on_console_registered)
@@ -4168,6 +4242,10 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
     def _on_mode_changed(self, index: int):
         mode = self.cmb_mode.itemData(index)
         self._active_mode = str(mode)
+        show_nav = mode == "jupyter" and self._web_engine_available
+        self._jupyter_nav_widget.setVisible(bool(show_nav))
+        if self._web_engine_available:
+            self._update_jupyter_nav()
         if mode == "python":
             self.stack.setCurrentIndex(1)
             self._set_status(
@@ -4209,6 +4287,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self._jupyter_url = url
         if self._jupyter_view is not None:
             self._jupyter_view.setUrl(QtCore.QUrl(url))
+            self._update_jupyter_nav()
         if self._active_mode == "jupyter":
             self._set_status("Embedded JupyterLab ready.")
         else:
@@ -4233,6 +4312,72 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
     def _on_jupyter_message(self, text: str):
         if self._active_mode == "jupyter" and text:
             self._set_status(text)
+
+    def _update_jupyter_nav(self, *_args):
+        if not self._web_engine_available or self._jupyter_view is None:
+            return
+        history = self._jupyter_view.history()
+        current_url = self._jupyter_view.url() if self._jupyter_view else QtCore.QUrl()
+        if hasattr(self, "btn_jupyter_back"):
+            self.btn_jupyter_back.setEnabled(history.canGoBack())
+        if hasattr(self, "btn_jupyter_forward"):
+            self.btn_jupyter_forward.setEnabled(history.canGoForward())
+        has_url = current_url is not None and not current_url.isEmpty()
+        if hasattr(self, "btn_jupyter_reload"):
+            self.btn_jupyter_reload.setEnabled(has_url)
+        if hasattr(self, "btn_jupyter_external"):
+            target = self._jupyter_url or (current_url.toString() if has_url else "")
+            self.btn_jupyter_external.setEnabled(bool(target))
+
+    def _on_jupyter_back(self):
+        if self._web_engine_available and self._jupyter_view and self._jupyter_view.history().canGoBack():
+            self._jupyter_view.back()
+
+    def _on_jupyter_forward(self):
+        if self._web_engine_available and self._jupyter_view and self._jupyter_view.history().canGoForward():
+            self._jupyter_view.forward()
+
+    def _on_jupyter_reload(self):
+        if self._web_engine_available and self._jupyter_view:
+            self._jupyter_view.reload()
+
+    def _open_jupyter_external(self):
+        if not self._web_engine_available:
+            return
+        target = self._jupyter_url
+        if (not target or not target.strip()) and self._jupyter_view is not None:
+            url = self._jupyter_view.url()
+            if url and not url.isEmpty():
+                target = url.toString()
+        if target:
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl(target))
+
+    def _on_jupyter_console_message(self, level: int, message: str, line: int, source_id: str):
+        if not message:
+            return
+        key = f"{source_id}:{line}:{level}:{message}"
+        if key in self._jupyter_js_seen:
+            return
+        self._jupyter_js_seen.add(key)
+        cleaned = message.strip()
+        if not cleaned:
+            return
+        error_level = int(QtWebEngineWidgets.QWebEnginePage.JavaScriptConsoleMessageLevel.ErrorMessageLevel)
+        warning_level = int(QtWebEngineWidgets.QWebEnginePage.JavaScriptConsoleMessageLevel.WarningMessageLevel)
+        info_level = int(QtWebEngineWidgets.QWebEnginePage.JavaScriptConsoleMessageLevel.InfoMessageLevel)
+        if level == error_level:
+            log_action(f"JupyterLab JS error: {cleaned}")
+            if not self._jupyter_js_warned:
+                self._set_status(
+                    "Embedded JupyterLab reported browser compatibility warnings. Open in an external browser if features look incorrect."
+                )
+                self._jupyter_js_warned = True
+        elif level == warning_level:
+            log_action(f"JupyterLab JS warning: {cleaned}")
+        elif level == info_level:
+            log_action(f"JupyterLab JS info: {cleaned}")
+        else:
+            log_action(f"JupyterLab JS message: {cleaned}")
 
     def _on_vscode_status(self, message: str):
         if self._active_mode == "vscode" and message:
