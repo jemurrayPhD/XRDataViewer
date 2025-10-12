@@ -223,6 +223,7 @@ class PipelineEditorDialog(QtWidgets.QDialog):
             steps=[ProcessingStep(step.key, dict(step.params)) for step in pipeline.steps],
         )
         self._raw_data: Optional[np.ndarray] = None
+        self._processed_data: Optional[np.ndarray] = None
         self.setWindowTitle(f"Edit Pipeline – {self.pipeline.name or 'Untitled'}")
         self.resize(800, 700)
 
@@ -237,6 +238,32 @@ class PipelineEditorDialog(QtWidgets.QDialog):
         self.btn_load_data = QtWidgets.QPushButton("Load data…")
         self.btn_load_data.clicked.connect(self._load_data)
         top_row.addWidget(self.btn_load_data, 0)
+        cmap_label = QtWidgets.QLabel("Color map:")
+        cmap_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        top_row.addWidget(cmap_label, 0)
+        self.cmb_colormap = QtWidgets.QComboBox()
+        self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        candidate_maps = [
+            "gray",
+            "viridis",
+            "plasma",
+            "inferno",
+            "magma",
+            "cividis",
+            "turbo",
+            "thermal",
+        ]
+        for name in candidate_maps:
+            try:
+                pg.colormap.get(name)
+            except Exception:
+                continue
+            label = name.title()
+            self.cmb_colormap.addItem(label, name)
+        if self.cmb_colormap.count() == 0:
+            self.cmb_colormap.addItem("Default", "default")
+        self.cmb_colormap.currentIndexChanged.connect(self._on_colormap_changed)
+        top_row.addWidget(self.cmb_colormap, 0)
         layout.addLayout(top_row)
 
         self.image_view = pg.ImageView()
@@ -244,7 +271,65 @@ class PipelineEditorDialog(QtWidgets.QDialog):
             self.image_view.getView().invertY(True)
         except Exception:
             pass
-        layout.addWidget(self.image_view, 2)
+        self.roi = pg.RectROI([10, 10], [40, 40], pen=pg.mkPen('#ffaa00', width=2))
+        self.roi.addScaleHandle((1, 1), (0, 0))
+        self.roi.addScaleHandle((0, 0), (1, 1))
+        try:
+            self.image_view.getView().addItem(self.roi)
+        except Exception:
+            pass
+
+        self.preview_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.preview_splitter.setChildrenCollapsible(False)
+        self.preview_splitter.addWidget(self.image_view)
+
+        self.roi_box = QtWidgets.QGroupBox("ROI preview")
+        roi_layout = QtWidgets.QVBoxLayout(self.roi_box)
+        roi_layout.setContentsMargins(8, 8, 8, 8)
+        roi_layout.setSpacing(6)
+
+        controls_row = QtWidgets.QHBoxLayout()
+        controls_row.setSpacing(6)
+        controls_row.addWidget(QtWidgets.QLabel("Reduce over:"))
+        self.cmb_roi_axis = QtWidgets.QComboBox()
+        self._roi_axis_options: List[tuple[str, int, str, str]] = [
+            ("Collapse rows (Y) → profile across X", 0, "rows (Y)", "X"),
+            ("Collapse columns (X) → profile across Y", 1, "columns (X)", "Y"),
+        ]
+        for label, axis, collapsed, remaining in self._roi_axis_options:
+            self.cmb_roi_axis.addItem(label, (axis, collapsed, remaining))
+        self.cmb_roi_axis.currentIndexChanged.connect(self._on_roi_axis_changed)
+        controls_row.addWidget(self.cmb_roi_axis, 1)
+
+        controls_row.addWidget(QtWidgets.QLabel("Statistic:"))
+        self.cmb_roi_method = QtWidgets.QComboBox()
+        self._roi_reducers = {
+            "mean": ("Mean", lambda arr, axis: np.nanmean(arr, axis=axis)),
+            "median": ("Median", lambda arr, axis: np.nanmedian(arr, axis=axis)),
+            "min": ("Minimum", lambda arr, axis: np.nanmin(arr, axis=axis)),
+            "max": ("Maximum", lambda arr, axis: np.nanmax(arr, axis=axis)),
+            "std": ("Std. dev", lambda arr, axis: np.nanstd(arr, axis=axis)),
+            "ptp": ("Peak-to-peak", lambda arr, axis: np.nanmax(arr, axis=axis) - np.nanmin(arr, axis=axis)),
+        }
+        for key, (label, _) in self._roi_reducers.items():
+            self.cmb_roi_method.addItem(label, key)
+        self.cmb_roi_method.currentIndexChanged.connect(self._update_roi_preview)
+        controls_row.addWidget(self.cmb_roi_method, 1)
+        roi_layout.addLayout(controls_row)
+
+        self.lbl_roi_axis = QtWidgets.QLabel()
+        self.lbl_roi_axis.setStyleSheet("color: #555;")
+        roi_layout.addWidget(self.lbl_roi_axis)
+
+        self.roi_plot = pg.PlotWidget()
+        self.roi_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.roi_curve = self.roi_plot.plot([], [], pen=pg.mkPen('#ffaa00', width=2))
+        roi_layout.addWidget(self.roi_plot, 1)
+
+        self.preview_splitter.addWidget(self.roi_box)
+        self.preview_splitter.setStretchFactor(0, 3)
+        self.preview_splitter.setStretchFactor(1, 2)
+        layout.addWidget(self.preview_splitter, 2)
 
         self.steps_scroll = QtWidgets.QScrollArea()
         self.steps_scroll.setWidgetResizable(True)
@@ -261,6 +346,11 @@ class PipelineEditorDialog(QtWidgets.QDialog):
 
         self._forms: List[tuple[ProcessingStep, ParameterForm]] = []
         self._rebuild_forms()
+        self._update_roi_axis_label()
+        try:
+            self.roi.sigRegionChanged.connect(self._update_roi_preview)
+        except Exception:
+            pass
 
     # ----- helpers -----
     def result_pipeline(self) -> ProcessingPipeline:
@@ -317,10 +407,128 @@ class PipelineEditorDialog(QtWidgets.QDialog):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Processing failed", str(e))
             return
+        self._processed_data = data
         try:
             self.image_view.setImage(data, autoLevels=True)
+            self._apply_selected_colormap()
         except Exception:
             pass
+        self._update_roi_preview()
+
+    def _apply_selected_colormap(self):
+        if not hasattr(self, "cmb_colormap"):
+            return
+        name = self.cmb_colormap.currentData()
+        if not name or name == "default":
+            return
+        try:
+            cmap = pg.colormap.get(str(name))
+        except Exception:
+            return
+        try:
+            self.image_view.setColorMap(cmap)
+        except Exception:
+            pass
+
+    def _update_roi_axis_label(self):
+        data = self.cmb_roi_axis.currentData() if hasattr(self, "cmb_roi_axis") else None
+        if not data:
+            self.roi_box.setTitle("ROI preview")
+            self.lbl_roi_axis.setText("")
+            return
+        axis, collapsed, remaining = data
+        self.roi_box.setTitle(f"ROI preview – reducing {collapsed}")
+        self.lbl_roi_axis.setText(f"Reducing over {collapsed} to plot along {remaining}.")
+        self.roi_plot.setLabel("bottom", f"{remaining} index")
+
+    def _current_roi_axis(self) -> int:
+        data = self.cmb_roi_axis.currentData()
+        if not data:
+            return 0
+        axis, *_ = data
+        return int(axis)
+
+    def _on_colormap_changed(self):
+        self._apply_selected_colormap()
+
+    def _on_roi_axis_changed(self):
+        self._update_roi_axis_label()
+        self._update_roi_preview()
+
+    def _extract_roi_array(self) -> Optional[np.ndarray]:
+        if self._processed_data is None:
+            return None
+        if not hasattr(self, "roi") or self.roi is None:
+            return None
+        image_item = getattr(self.image_view, "imageItem", None)
+        if image_item is None:
+            return None
+        try:
+            roi_data, _ = self.roi.getArraySlice(self._processed_data, image_item)
+        except Exception:
+            try:
+                roi_data, _ = self.roi.getArraySlice(self._processed_data, image_item.getTransform())
+            except Exception:
+                return None
+        if isinstance(roi_data, tuple):
+            roi_data = roi_data[0]
+        return np.asarray(roi_data)
+
+    def _update_roi_preview(self):
+        if self._processed_data is None:
+            self.roi_curve.setData([], [])
+            return
+        roi_array = self._extract_roi_array()
+        if roi_array is None or roi_array.size == 0:
+            self.roi_curve.setData([], [])
+            return
+        method_key = self.cmb_roi_method.currentData()
+        reducer_entry = self._roi_reducers.get(method_key)
+        if reducer_entry is None:
+            self.roi_curve.setData([], [])
+            return
+        _, reducer = reducer_entry
+        axis = self._current_roi_axis()
+        axis = max(0, min(axis, roi_array.ndim - 1))
+        with np.errstate(all="ignore"):
+            profile = reducer(roi_array, axis=axis)
+        if profile is None:
+            self.roi_curve.setData([], [])
+            return
+        profile = np.asarray(profile).ravel()
+        if profile.size == 0:
+            self.roi_curve.setData([], [])
+            return
+        x = np.arange(profile.size)
+        self.roi_curve.setData(x, profile)
+        self.roi_plot.enableAutoRange()
+
+    def _reset_roi_to_image(self, shape: Optional[Tuple[int, int]] = None):
+        if not hasattr(self, "roi") or self.roi is None:
+            return
+        if shape is None:
+            if self._processed_data is None:
+                return
+            shape = self._processed_data.shape
+        if not shape or len(shape) < 2:
+            return
+        height, width = int(shape[0]), int(shape[1])
+        if width <= 0 or height <= 0:
+            return
+        rect_width = max(2, width // 2)
+        rect_height = max(2, height // 2)
+        pos_x = max(0, (width - rect_width) // 2)
+        pos_y = max(0, (height - rect_height) // 2)
+        try:
+            self.roi.blockSignals(True)
+            self.roi.setPos((pos_x, pos_y))
+            self.roi.setSize((rect_width, rect_height))
+        finally:
+            try:
+                self.roi.blockSignals(False)
+            except Exception:
+                pass
+        self._update_roi_preview()
 
     # ----- slots -----
     def _on_parameters_changed(self):
@@ -358,11 +566,9 @@ class PipelineEditorDialog(QtWidgets.QDialog):
             return
         da = ds[var]
         self._raw_data = np.asarray(da.values, float)
+        self._processed_data = np.asarray(self._raw_data)
         self.lbl_data.setText(f"{p.name}:{var}")
-        try:
-            self.image_view.setImage(self._raw_data, autoLevels=True)
-        except Exception:
-            pass
+        self._reset_roi_to_image(self._raw_data.shape if hasattr(self._raw_data, "shape") else None)
         self._apply_pipeline()
 
 # ---------------------------------------------------------------------------
