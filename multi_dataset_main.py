@@ -2087,14 +2087,30 @@ class SliceDataTab(QtWidgets.QWidget):
             slice_dims.append((dim, indices))
 
         data_vars: Dict[str, xr.DataArray] = {}
+
+        def _prepare_slice(arr: xr.DataArray) -> xr.DataArray:
+            arr = arr.transpose(row_dim, col_dim)
+            arr = arr.copy(deep=True)
+            try:
+                extra_coords = [name for name in arr.coords if name not in arr.dims]
+                if extra_coords:
+                    arr = arr.drop_vars(extra_coords)
+            except Exception:
+                # If drop_vars fails (older xarray), fall back to resetting coords
+                try:
+                    arr = arr.reset_coords(drop=True)
+                except Exception:
+                    pass
+            return arr
+
         if not slice_dims:
-            arr = self._current_da.transpose(row_dim, col_dim)
-            data_vars[self._current_var] = arr.copy(deep=True)
+            data_vars[self._current_var] = _prepare_slice(self._current_da)
         else:
             combos = itertools.product(*[indices for _, indices in slice_dims])
             for combo in combos:
                 selectors = {dim: idx for (dim, _), idx in zip(slice_dims, combo)}
-                arr = self._current_da.isel(**selectors).transpose(row_dim, col_dim)
+                arr = self._current_da.isel(**selectors)
+                arr = _prepare_slice(arr)
                 label_parts = [f"{dim}{idx}" for dim, idx in selectors.items()]
                 suffix = "_" + "_".join(label_parts) if label_parts else ""
                 name = f"{self._current_var}{suffix}"
