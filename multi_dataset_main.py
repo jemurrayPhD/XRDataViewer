@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import io
+import base64
 import warnings
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -23,6 +24,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import html
 from types import ModuleType
 
@@ -291,6 +293,218 @@ class EmbeddedJupyterManager(QtCore.QObject):
             self.stop()
         except Exception:
             pass
+
+
+class InteractiveBridgeServer(QtCore.QObject):
+    """Lightweight HTTP bridge to register datasets from external sessions."""
+
+    datasetRegistered = QtCore.Signal(str)
+    _executeRequested = QtCore.Signal(object)
+
+    def __init__(self, library: 'DatasetsPane', parent=None):
+        super().__init__(parent)
+        self.library = library
+        self._httpd: Optional[ThreadingHTTPServer] = None
+        self._thread: Optional[threading.Thread] = None
+        self._port: Optional[int] = None
+        self._executeRequested.connect(self._on_execute_requested)
+
+    def is_running(self) -> bool:
+        return self._httpd is not None
+
+    def start(self) -> Optional[str]:
+        if self._httpd is not None:
+            return self.register_url()
+
+        server_ref = self
+
+        class BridgeHandler(BaseHTTPRequestHandler):
+            def _send_json(self, code: int, payload: Dict[str, object]):
+                data = json.dumps(payload).encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_POST(self):  # noqa: N802 - Qt naming style
+                if self.path not in ("/register", "/register/"):
+                    self._send_json(404, {"ok": False, "error": "Unknown endpoint"})
+                    return
+
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except Exception:
+                    self._send_json(400, {"ok": False, "error": "Missing content length"})
+                    return
+
+                raw = self.rfile.read(max(0, length))
+                try:
+                    payload = json.loads(raw.decode("utf-8")) if raw else {}
+                except Exception:
+                    self._send_json(400, {"ok": False, "error": "Invalid JSON payload"})
+                    return
+
+                encoded = payload.get("payload")
+                if not encoded:
+                    self._send_json(400, {"ok": False, "error": "Missing dataset payload"})
+                    return
+
+                try:
+                    decoded = base64.b64decode(encoded)
+                except Exception:
+                    self._send_json(400, {"ok": False, "error": "Payload is not valid base64"})
+                    return
+
+                buffer = io.BytesIO(decoded)
+                try:
+                    dataset = xr.open_dataset(buffer)
+                    dataset.load()
+                except Exception as exc:
+                    buffer.close()
+                    self._send_json(400, {"ok": False, "error": f"Unable to decode dataset: {exc}"})
+                    return
+
+                kind = str(payload.get("kind") or "dataset").lower()
+                label = str(payload.get("label") or "").strip()
+
+                if kind == "dataarray":
+                    var_name = payload.get("var_name")
+                    fallback = None
+                    try:
+                        if var_name and var_name in dataset.data_vars:
+                            arr = dataset[var_name]
+                        else:
+                            names = list(dataset.data_vars)
+                            if not names:
+                                raise KeyError("dataset contains no data variables")
+                            fallback = names[0]
+                            arr = dataset[names[0]]
+                        arr = arr.copy(deep=True)
+                    except Exception as exc:
+                        try:
+                            dataset.close()
+                        except Exception:
+                            pass
+                        buffer.close()
+                        self._send_json(400, {"ok": False, "error": f"Unable to extract data array: {exc}"})
+                        return
+                    finally:
+                        try:
+                            dataset.close()
+                        except Exception:
+                            pass
+                        buffer.close()
+
+                    arr.name = var_name or fallback or arr.name or "variable"
+                    chosen_label = label or str(arr.name or "interactive_array")
+                    try:
+                        final_label = server_ref.handle_dataarray(chosen_label, arr)
+                    except Exception as exc:
+                        self._send_json(500, {"ok": False, "error": str(exc)})
+                        return
+                else:
+                    chosen_label = label or str(
+                        dataset.attrs.get("title")
+                        or dataset.attrs.get("name")
+                        or "interactive_dataset"
+                    )
+                    try:
+                        final_label = server_ref.handle_dataset(chosen_label, dataset)
+                    except Exception as exc:
+                        try:
+                            dataset.close()
+                        except Exception:
+                            pass
+                        buffer.close()
+                        self._send_json(500, {"ok": False, "error": str(exc)})
+                        return
+                    try:
+                        dataset.close()
+                    except Exception:
+                        pass
+                    buffer.close()
+
+                self._send_json(200, {"ok": True, "label": final_label})
+
+            def log_message(self, *_args):  # pragma: no cover - silence HTTP logs
+                return
+
+        try:
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), BridgeHandler)
+        except Exception:
+            return None
+
+        httpd.daemon_threads = True
+        self._httpd = httpd
+        self._port = httpd.server_address[1]
+        self._thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        self._thread.start()
+
+        url = self.register_url()
+        if url:
+            os.environ["XRVIEWER_BRIDGE_URL"] = url
+            log_action(f"Interactive bridge listening on {url}")
+        return url
+
+    def stop(self):
+        url = self.register_url()
+        if self._httpd:
+            try:
+                self._httpd.shutdown()
+            except Exception:
+                pass
+            try:
+                self._httpd.server_close()
+            except Exception:
+                pass
+            self._httpd = None
+        if self._thread and self._thread.is_alive():
+            try:
+                self._thread.join(timeout=1.0)
+            except Exception:
+                pass
+        self._thread = None
+        self._port = None
+        if url and os.environ.get("XRVIEWER_BRIDGE_URL") == url:
+            os.environ.pop("XRVIEWER_BRIDGE_URL", None)
+
+    def register_url(self) -> Optional[str]:
+        if self._port is None:
+            return None
+        return f"http://127.0.0.1:{self._port}/register"
+
+    def handle_dataset(self, label: str, dataset: xr.Dataset) -> str:
+        result = self._run_on_main(lambda: self.library.register_interactive_dataset(label, dataset))
+        self.datasetRegistered.emit(result)
+        return result
+
+    def handle_dataarray(self, label: str, dataarray: xr.DataArray) -> str:
+        result = self._run_on_main(lambda: self.library.register_interactive_dataarray(label, dataarray))
+        self.datasetRegistered.emit(result)
+        return result
+
+    def _run_on_main(self, callback):
+        payload = {"callback": callback, "event": threading.Event()}
+        self._executeRequested.emit(payload)
+        payload["event"].wait()
+        if "error" in payload:
+            raise payload["error"]
+        return payload.get("result", "")
+
+    @QtCore.Slot(object)
+    def _on_execute_requested(self, payload):
+        event = payload.get("event")
+        if event is None:
+            return
+        callback = payload.get("callback")
+        try:
+            if callable(callback):
+                payload["result"] = callback()
+        except Exception as exc:
+            payload["error"] = exc
+        finally:
+            event.set()
 
 
 if QtWebEngineWidgets is not None:
@@ -4152,19 +4366,34 @@ class InteractiveConsoleWidget(QtWidgets.QWidget):
 
 
 class InteractiveProcessingTab(QtWidgets.QWidget):
-    def __init__(self, library: DatasetsPane, parent=None):
+    def __init__(
+        self,
+        library: DatasetsPane,
+        bridge: Optional[InteractiveBridgeServer] = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.library = library
+        self.bridge_server = bridge
         self._active_mode = "jupyter"
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        hint = QtWidgets.QLabel(
+        hint_text = (
             "Choose an interactive environment. When using the Python console, call "
-            "RegisterDataset(...) or RegisterDataArray(...) to push results into the Interactive Data tab."
+            "<code>RegisterDataset(...)</code> or <code>RegisterDataArray(...)</code> to push results into the "
+            "Interactive Data tab."
         )
+        if self.bridge_server and self.bridge_server.register_url():
+            hint_text += (
+                "<br><br>From notebooks in this session you can also run:<br>"
+                "<code>from xrdataviewer_bridge import register_dataset, register_dataarray" "<br>"
+                "register_dataset(ds, label=\"My result\")</code>"
+            )
+        hint = QtWidgets.QLabel(hint_text)
+        hint.setTextFormat(QtCore.Qt.RichText)
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666;")
         layout.addWidget(hint)
@@ -4273,6 +4502,9 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self.console_widget.messageEmitted.connect(self._set_status)
         self.stack.addWidget(self.console_widget)
 
+        if self.bridge_server:
+            self.bridge_server.datasetRegistered.connect(self._on_bridge_registered)
+
         self.vscode_widget = VsCodeWebWidget()
         self.vscode_widget.statusMessage.connect(self._on_vscode_status)
         self.stack.addWidget(self.vscode_widget)
@@ -4345,6 +4577,9 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
 
     def _on_console_registered(self, label: str):
         self._set_status(f"Registered '{label}' in the Interactive Data tab.")
+
+    def _on_bridge_registered(self, label: str):
+        self._set_status(f"Registered '{label}' from external session.")
 
     def _on_jupyter_url_ready(self, url: str):
         self._jupyter_url = url
@@ -9549,6 +9784,8 @@ class MainWindow(QtWidgets.QMainWindow):
         left_splitter.setChildrenCollapsible(False)
         left_splitter.setHandleWidth(8)
         self.datasets = DatasetsPane()
+        self.bridge_server = InteractiveBridgeServer(self.datasets, self)
+        self.bridge_server.start()
         left_splitter.addWidget(self.datasets)
         self.processing_dock = ProcessingDockWidget(self.processing_manager)
         self.processing_panel = ProcessingDockContainer("Processing Pipelines", self.processing_dock)
@@ -9572,7 +9809,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_overlay = OverlayView(self.processing_manager, self.preferences)
         self.tabs.addTab(self.tab_overlay, "Overlay")
         self.tab_overlay.set_processing_manager(self.processing_manager)
-        self.tab_interactive = InteractiveProcessingTab(self.datasets)
+        self.tab_interactive = InteractiveProcessingTab(self.datasets, self.bridge_server)
         self.tabs.addTab(self.tab_interactive, "Interactive Processing")
 
         self.log_dock = LoggingDockWidget(ACTION_LOGGER, self)
@@ -9585,6 +9822,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event: QtGui.QCloseEvent):  # type: ignore[override]
         try:
             self.tab_interactive.shutdown()
+        except Exception:
+            pass
+        try:
+            self.bridge_server.stop()
         except Exception:
             pass
         super().closeEvent(event)
