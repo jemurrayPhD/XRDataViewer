@@ -1729,7 +1729,12 @@ class ViewerFrame(QtWidgets.QFrame):
         self._coords = {}
         self._display_mode = "image"
         try:
-            self.viewer.img_item.setImage(np.full((1, 1), np.nan), autoLevels=True)
+            blank = np.zeros((1, 1), dtype=float)
+            self.viewer.img_item.setImage(blank, autoLevels=False)
+            try:
+                self.viewer.img_item.setLevels((0.0, 1.0))
+            except Exception:
+                pass
         except Exception:
             pass
         try:
@@ -1815,6 +1820,11 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.btn_equalize_cols = QtWidgets.QPushButton("Equalize columns")
         self.btn_equalize_cols.clicked.connect(self.equalize_columns)
         bar.addWidget(self.btn_equalize_cols)
+
+        self.btn_select_all = QtWidgets.QPushButton("Select All Plots")
+        self.btn_select_all.setEnabled(False)
+        self.btn_select_all.clicked.connect(self._select_all_frames)
+        bar.addWidget(self.btn_select_all)
 
         self.btn_apply_processing = QtWidgets.QPushButton("Apply processing…")
         self.btn_apply_processing.setEnabled(False)
@@ -1912,8 +1922,21 @@ class MultiViewGrid(QtWidgets.QWidget):
         return [fr for fr in self.frames if fr in self._selected_frames]
 
     def _update_apply_button_state(self):
+        has_frames = bool(self.frames)
+        if hasattr(self, "btn_select_all"):
+            self.btn_select_all.setEnabled(has_frames)
         if hasattr(self, "btn_apply_processing"):
             self.btn_apply_processing.setEnabled(bool(self._selected_frames))
+
+    def _select_all_frames(self):
+        if not self.frames:
+            self._clear_selection()
+            self._update_apply_button_state()
+            return
+        self._clear_selection()
+        for fr in self.frames:
+            self._set_frame_selected(fr, True, clear=False)
+        self._update_apply_button_state()
 
     def _set_frame_selected(self, frame: Optional[ViewerFrame], selected: bool, *, clear: bool = False):
         if frame is None or frame not in self.frames:
