@@ -2878,7 +2878,9 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self._volume_scalar = scalar
         rgba = self._compute_rgba_volume(scalar)
         self._volume_item = gl.GLVolumeItem(rgba, smooth=False)
-        self._volume_item.setGLOptions("additive")
+        # Use translucent blending so colors remain readable instead of
+        # saturating to white as layers accumulate with additive blending.
+        self._volume_item.setGLOptions("translucent")
         self.view.addItem(self._volume_item)
         if hasattr(self._volume_item, "update"):
             try:
