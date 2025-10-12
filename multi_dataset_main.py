@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import warnings
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -2662,12 +2663,41 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         hi = max(self.spin_min.value(), self.spin_max.value())
         alpha_mask = ((values >= lo) & (values <= hi)).astype(float)
         lut[:, 3] = (alpha_mask * 255).astype(np.uint8)
-        # GLVolumeItem exposes color mapping through the "lut" argument on
-        # setData rather than a dedicated setter. Supplying only the lookup
-        # table keeps the cached volume data intact while updating the
-        # transfer function in-place.
-        self._volume_item.setData(lut=lut)
-        self._volume_item.setLevels((self._data_min, self._data_max))
+
+        item = self._volume_item
+        applied = False
+        # Preferred: direct lookup-table setter when available.
+        setter = getattr(item, "setLookupTable", None)
+        if callable(setter):
+            try:
+                setter(lut)
+                applied = True
+            except Exception:
+                applied = False
+        if not applied:
+            # Some versions of pyqtgraph expose lut assignment via setData.
+            try:
+                item.setData(lut=lut)
+                applied = True
+            except TypeError:
+                applied = False
+        if not applied:
+            # Fall back to setting the attribute directly and requesting a
+            # redraw. Older releases check ``self.lut`` during paint without a
+            # helper API, so we mirror that behaviour to stay compatible.
+            try:
+                item.lut = lut  # type: ignore[attr-defined]
+                if hasattr(item, "update"):
+                    item.update()
+                applied = True
+            except Exception:
+                applied = False
+        if not applied:
+            logging.getLogger(__name__).warning(
+                "Failed to apply volume lookup table; volume view may not "
+                "respect the selected opacity window."
+            )
+        item.setLevels((self._data_min, self._data_max))
 
     def _remove_volume(self):
         if self._volume_item is None:
