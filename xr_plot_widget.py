@@ -523,6 +523,13 @@ class CentralPlotWidget(QtWidgets.QWidget):
                 except Exception:
                     pass
             act_hist.toggled.connect(self._histogram_menu_setter)
+        menu.addSeparator()
+        act_title = menu.addAction("Set plot title…")
+        act_title.triggered.connect(self._prompt_plot_title)
+        act_xlabel = menu.addAction("Set X axis label…")
+        act_xlabel.triggered.connect(lambda: self._prompt_axis_label("bottom"))
+        act_ylabel = menu.addAction("Set Y axis label…")
+        act_ylabel.triggered.connect(lambda: self._prompt_axis_label("left"))
         try:
             screen_pos = event.screenPos()
         except Exception:
@@ -540,6 +547,42 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._histogram_menu_getter = getter
         self._histogram_menu_setter = setter
         self._histogram_menu_enabled_getter = enabled_getter
+
+    def _prompt_plot_title(self):
+        current = ""
+        try:
+            current = self.plot.titleLabel.text
+        except Exception:
+            current = ""
+        text, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Plot title",
+            "Enter plot title:",
+            text=str(current or ""),
+        )
+        if ok:
+            self.plot.setTitle(str(text))
+
+    def _prompt_axis_label(self, which: str):
+        axis = self.plot.getAxis(which)
+        current = ""
+        if axis is not None:
+            try:
+                current = axis.labelText
+            except Exception:
+                current = ""
+        label_text = "X axis" if which == "bottom" else "Y axis"
+        text, ok = QtWidgets.QInputDialog.getText(
+            self,
+            f"{label_text} label",
+            f"Enter {label_text.lower()} label:",
+            text=str(current or ""),
+        )
+        if ok:
+            if which == "bottom":
+                self.plot.setLabel("bottom", str(text))
+            elif which == "left":
+                self.plot.setLabel("left", str(text))
 
     # ---------- resampling helpers ----------
     def _rect_to_qrectf(self, x0, x1, y0, y1):

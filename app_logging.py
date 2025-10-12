@@ -25,6 +25,9 @@ class ActionLogger(QtCore.QObject):
     def entries(self) -> List[str]:
         return list(self._entries)
 
+    def to_text(self) -> str:
+        return "\n".join(self._entries)
+
     def clear(self):
         self._entries.clear()
         self.reset.emit()

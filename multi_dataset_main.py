@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 from functools import partial
 import itertools
+import copy
 
 import numpy as np
 import xarray as xr
@@ -35,6 +36,11 @@ from data_processing import (
     summarize_parameters,
 )
 from app_logging import ACTION_LOGGER, ActionLogger, log_action
+
+try:  # Optional dependency used when exporting movies
+    import cv2  # type: ignore
+except Exception:  # pragma: no cover - OpenCV may not be installed
+    cv2 = None  # type: ignore
 
 # ---------------------------------------------------------------------------
 # Helper: open_dataset
@@ -86,6 +92,89 @@ def _nan_aware_reducer(func):
 
 
     return wrapped
+
+
+def _compose_snapshot(widget: QtWidgets.QWidget, label: str = "") -> QtGui.QImage:
+    pixmap = widget.grab()
+    image = pixmap.toImage()
+    label = (label or "").strip()
+    if not label:
+        return image
+    return _image_with_label(image, label)
+
+
+def _image_with_label(image: QtGui.QImage, label: str) -> QtGui.QImage:
+    label = (label or "").strip()
+    if not label:
+        return image
+    font = QtGui.QFont()
+    font.setPointSize(11)
+    metrics = QtGui.QFontMetrics(font)
+    margin = 8
+    label_height = metrics.height() + 2 * margin
+    width = image.width()
+    result = QtGui.QImage(width, image.height() + label_height, QtGui.QImage.Format_ARGB32)
+    result.fill(QtGui.QColor("white"))
+    painter = QtGui.QPainter(result)
+    painter.fillRect(QtCore.QRect(0, 0, width, label_height), QtGui.QColor("white"))
+    painter.setPen(QtGui.QColor("black"))
+    painter.setFont(font)
+    painter.drawText(QtCore.QRect(0, 0, width, label_height), QtCore.Qt.AlignCenter, label)
+    painter.drawImage(0, label_height, image)
+    painter.end()
+    return result
+
+
+def _save_snapshot(widget: QtWidgets.QWidget, path: Path, label: str = "") -> bool:
+    image = _compose_snapshot(widget, label)
+    try:
+        return image.save(str(path))
+    except Exception:
+        return False
+
+
+def _qimage_to_array(image: QtGui.QImage) -> np.ndarray:
+    converted = image.convertToFormat(QtGui.QImage.Format_RGBA8888)
+    width = converted.width()
+    height = converted.height()
+    bytes_per_line = converted.bytesPerLine()
+    ptr = converted.bits()
+    ptr.setsize(converted.byteCount())
+    buffer = np.frombuffer(ptr, np.uint8).reshape((height, bytes_per_line // 4, 4))
+    return np.array(buffer[:, :width, :], copy=True)
+
+
+def _ask_layout_label(
+    parent: QtWidgets.QWidget, title: str, default_text: str = ""
+) -> Tuple[bool, str]:
+    text, ok = QtWidgets.QInputDialog.getText(
+        parent,
+        title,
+        "Enter a label to display above the saved layout (optional):",
+        text=str(default_text or ""),
+    )
+    if not ok:
+        return False, ""
+    return True, str(text).strip()
+
+
+def _process_events():
+    app = QtWidgets.QApplication.instance()
+    if app is not None:
+        app.processEvents(QtCore.QEventLoop.AllEvents, 50)
+
+
+def _sanitize_filename(text: str) -> str:
+    safe = [ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(text)]
+    cleaned = "".join(safe).strip("_")
+    return cleaned or "image"
+
+
+def _ensure_extension(path: str, default_suffix: str) -> Path:
+    p = Path(path)
+    if not p.suffix:
+        p = p.with_suffix(default_suffix)
+    return p
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +262,91 @@ class MemoryDatasetRegistry:
         if not entry:
             return key
         return entry[1]
+
+
+class PreferencesManager(QtCore.QObject):
+    changed = QtCore.Signal(dict)
+
+    def __init__(self):
+        super().__init__()
+        self._data = self._default_prefs()
+
+    def _default_prefs(self) -> Dict[str, object]:
+        return {
+            "general": {
+                "autoscale_on_load": True,
+                "default_layout_label": "",
+            },
+            "colormaps": {
+                "default": "viridis",
+                "variables": {},
+            },
+            "misc": {
+                "default_export_dir": "",
+            },
+        }
+
+    def data(self) -> Dict[str, object]:
+        return copy.deepcopy(self._data)
+
+    def update(self, data: Dict[str, object]):
+        normalized = self._default_prefs()
+        general = data.get("general", {}) if isinstance(data, dict) else {}
+        if isinstance(general, dict):
+            normalized["general"].update(general)
+        colormaps = data.get("colormaps", {}) if isinstance(data, dict) else {}
+        if isinstance(colormaps, dict):
+            normalized["colormaps"].update({k: v for k, v in colormaps.items() if k in ("default", "variables")})
+            variables = (
+                colormaps.get("variables", {})
+                if isinstance(colormaps.get("variables"), dict)
+                else {}
+            )
+            normalized["colormaps"]["variables"] = {
+                str(var): str(cmap)
+                for var, cmap in variables.items()
+                if str(var).strip() and str(cmap).strip()
+            }
+        misc = data.get("misc", {}) if isinstance(data, dict) else {}
+        if isinstance(misc, dict):
+            normalized["misc"].update(misc)
+        self._data = normalized
+        self.changed.emit(self.data())
+
+    def autoscale_on_load(self) -> bool:
+        return bool(self._data.get("general", {}).get("autoscale_on_load", True))
+
+    def default_layout_label(self) -> str:
+        return str(self._data.get("general", {}).get("default_layout_label", ""))
+
+    def default_export_directory(self) -> str:
+        return str(self._data.get("misc", {}).get("default_export_dir", ""))
+
+    def preferred_colormap(self, variable: Optional[str]) -> Optional[str]:
+        variables = self._data.get("colormaps", {}).get("variables", {})
+        if isinstance(variables, dict) and variable:
+            cmap = variables.get(variable)
+            if cmap:
+                return str(cmap)
+        default = self._data.get("colormaps", {}).get("default")
+        if default:
+            return str(default)
+        return None
+
+    def load_from_file(self, path: Path):
+        try:
+            data = json.loads(Path(path).read_text())
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load preferences: {exc}")
+        if not isinstance(data, dict):
+            raise RuntimeError("Invalid preferences file")
+        self.update(data)
+
+    def save_to_file(self, path: Path):
+        try:
+            Path(path).write_text(json.dumps(self._data, indent=2))
+        except Exception as exc:
+            raise RuntimeError(f"Failed to save preferences: {exc}")
 
 
 class MemoryDatasetRef(QtCore.QObject):
@@ -1104,6 +1278,8 @@ class LoggingDockWidget(QtWidgets.QDockWidget):
             QtWidgets.QDockWidget.DockWidgetMovable
             | QtWidgets.QDockWidget.DockWidgetClosable
         )
+        self._collapsed = False
+
         self._view = QtWidgets.QPlainTextEdit()
         self._view.setReadOnly(True)
         self._view.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
@@ -1111,9 +1287,14 @@ class LoggingDockWidget(QtWidgets.QDockWidget):
         self._view.setPlaceholderText("User actions will be logged here.")
         self.setWidget(self._view)
 
+        self._build_title_bar()
+
         clear_action = QtWidgets.QAction("Clear log", self)
         clear_action.triggered.connect(self._clear_log)
         self.addAction(clear_action)
+        export_action = QtWidgets.QAction("Export log…", self)
+        export_action.triggered.connect(self._export_log)
+        self.addAction(export_action)
         self.setContextMenuPolicy(QtCore.Qt.ActionsContextMenu)
 
         for entry in logger.entries():
@@ -1121,6 +1302,40 @@ class LoggingDockWidget(QtWidgets.QDockWidget):
 
         logger.log_added.connect(self._append)
         logger.reset.connect(self._reset)
+
+    def _build_title_bar(self):
+        title_widget = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(title_widget)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(4)
+
+        self._toggle_btn = QtWidgets.QToolButton()
+        self._toggle_btn.setArrowType(QtCore.Qt.DownArrow)
+        self._toggle_btn.setCheckable(True)
+        self._toggle_btn.setChecked(True)
+        self._toggle_btn.clicked.connect(self._toggle_collapsed)
+        layout.addWidget(self._toggle_btn, 0)
+
+        label = QtWidgets.QLabel("Action Log")
+        font = label.font()
+        font.setBold(True)
+        label.setFont(font)
+        layout.addWidget(label, 1)
+
+        self._export_btn = QtWidgets.QToolButton()
+        self._export_btn.setText("Export…")
+        self._export_btn.clicked.connect(self._export_log)
+        layout.addWidget(self._export_btn, 0)
+
+        layout.addStretch(0)
+        self.setTitleBarWidget(title_widget)
+
+    def _toggle_collapsed(self):
+        self._collapsed = not self._collapsed
+        self.widget().setVisible(not self._collapsed)
+        self._toggle_btn.setArrowType(
+            QtCore.Qt.RightArrow if self._collapsed else QtCore.Qt.DownArrow
+        )
 
     def _append(self, entry: str):
         self._view.appendPlainText(entry)
@@ -1133,7 +1348,244 @@ class LoggingDockWidget(QtWidgets.QDockWidget):
     def _clear_log(self):
         self._logger.clear()
 
+    def _export_log(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export action log",
+            "action-log.txt",
+            "Text files (*.txt);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            Path(path).write_text(self._logger.to_text())
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Export failed", str(exc))
 
+
+class PreferencesDialog(QtWidgets.QDialog):
+    def __init__(self, manager: PreferencesManager, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Preferences")
+        self.resize(520, 420)
+        self._manager = manager
+        self._data = manager.data()
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        self.tabs = QtWidgets.QTabWidget()
+        layout.addWidget(self.tabs)
+
+        self._build_general_tab()
+        self._build_colormap_tab()
+
+        controls = QtWidgets.QHBoxLayout()
+        self.btn_load_file = QtWidgets.QPushButton("Load from file…")
+        self.btn_load_file.clicked.connect(self._on_load_file)
+        controls.addWidget(self.btn_load_file)
+        self.btn_save_file = QtWidgets.QPushButton("Save to file…")
+        self.btn_save_file.clicked.connect(self._on_save_file)
+        controls.addWidget(self.btn_save_file)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _build_general_tab(self):
+        tab = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(tab)
+        form.setContentsMargins(6, 6, 6, 6)
+        form.setSpacing(6)
+
+        self.chk_autoscale = QtWidgets.QCheckBox("Autoscale images on load")
+        self.chk_autoscale.setChecked(bool(self._data.get("general", {}).get("autoscale_on_load", True)))
+        form.addRow(self.chk_autoscale)
+
+        self.txt_layout_label = QtWidgets.QLineEdit(
+            str(self._data.get("general", {}).get("default_layout_label", ""))
+        )
+        form.addRow("Default layout label", self.txt_layout_label)
+
+        export_row = QtWidgets.QHBoxLayout()
+        self.txt_export_dir = QtWidgets.QLineEdit(
+            str(self._data.get("misc", {}).get("default_export_dir", ""))
+        )
+        export_row.addWidget(self.txt_export_dir, 1)
+        btn_browse = QtWidgets.QPushButton("Browse…")
+        btn_browse.clicked.connect(self._browse_export_dir)
+        export_row.addWidget(btn_browse)
+        form.addRow("Default export folder", export_row)
+
+        self.tabs.addTab(tab, "General")
+
+    def _build_colormap_tab(self):
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        self.cmb_default_cmap = QtWidgets.QComboBox()
+        self.cmb_default_cmap.addItem("Use viewer default", "")
+        try:
+            maps = sorted(pg.colormap.listMaps())
+        except Exception:
+            maps = ["viridis", "plasma", "magma", "cividis", "gray"]
+        for name in maps:
+            self.cmb_default_cmap.addItem(name, name)
+        current_default = str(self._data.get("colormaps", {}).get("default", ""))
+        idx = self.cmb_default_cmap.findData(current_default)
+        if idx < 0:
+            idx = 0
+        self.cmb_default_cmap.setCurrentIndex(idx)
+        layout.addWidget(QtWidgets.QLabel("Default colormap"))
+        layout.addWidget(self.cmb_default_cmap)
+
+        self.table_colormaps = QtWidgets.QTableWidget(0, 2)
+        self.table_colormaps.setHorizontalHeaderLabels(["Variable", "Colormap"])
+        self.table_colormaps.horizontalHeader().setStretchLastSection(True)
+        self.table_colormaps.verticalHeader().setVisible(False)
+        self.table_colormaps.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table_colormaps.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked | QtWidgets.QAbstractItemView.EditKeyPressed)
+        layout.addWidget(QtWidgets.QLabel("Variable-specific colormaps"))
+        layout.addWidget(self.table_colormaps, 1)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_add_colormap = QtWidgets.QPushButton("Add mapping…")
+        self.btn_add_colormap.clicked.connect(self._add_colormap_mapping)
+        btn_row.addWidget(self.btn_add_colormap)
+        self.btn_remove_colormap = QtWidgets.QPushButton("Remove selected")
+        self.btn_remove_colormap.clicked.connect(self._remove_colormap_mapping)
+        btn_row.addWidget(self.btn_remove_colormap)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        variables = self._data.get("colormaps", {}).get("variables", {})
+        if isinstance(variables, dict):
+            for var, cmap in sorted(variables.items()):
+                row = self.table_colormaps.rowCount()
+                self.table_colormaps.insertRow(row)
+                self.table_colormaps.setItem(row, 0, QtWidgets.QTableWidgetItem(str(var)))
+                self.table_colormaps.setItem(row, 1, QtWidgets.QTableWidgetItem(str(cmap)))
+
+        self.tabs.addTab(tab, "Colormaps")
+
+    def _browse_export_dir(self):
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select default export folder",
+            self.txt_export_dir.text(),
+        )
+        if directory:
+            self.txt_export_dir.setText(directory)
+
+    def _add_colormap_mapping(self):
+        var, ok = QtWidgets.QInputDialog.getText(self, "Variable name", "Variable name:")
+        if not ok or not str(var).strip():
+            return
+        cmap, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "Colormap",
+            "Choose a colormap:",
+            [self.cmb_default_cmap.itemText(i) for i in range(self.cmb_default_cmap.count()) if self.cmb_default_cmap.itemData(i)],
+            editable=True,
+        )
+        if not ok or not str(cmap).strip():
+            return
+        row = self.table_colormaps.rowCount()
+        self.table_colormaps.insertRow(row)
+        self.table_colormaps.setItem(row, 0, QtWidgets.QTableWidgetItem(str(var).strip()))
+        self.table_colormaps.setItem(row, 1, QtWidgets.QTableWidgetItem(str(cmap).strip()))
+
+    def _remove_colormap_mapping(self):
+        rows = sorted({idx.row() for idx in self.table_colormaps.selectedIndexes()}, reverse=True)
+        for row in rows:
+            self.table_colormaps.removeRow(row)
+
+    def _on_load_file(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load preferences",
+            "",
+            "JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            temp = PreferencesManager()
+            temp.load_from_file(Path(path))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Load failed", str(exc))
+            return
+        self._data = temp.data()
+        self._apply_data()
+
+    def _on_save_file(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save preferences",
+            "preferences.json",
+            "JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            Path(path).write_text(json.dumps(self._collect_data(), indent=2))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Save failed", str(exc))
+
+    def _collect_data(self) -> Dict[str, object]:
+        general = {
+            "autoscale_on_load": self.chk_autoscale.isChecked(),
+            "default_layout_label": self.txt_layout_label.text(),
+        }
+        colormaps = {
+            "default": self.cmb_default_cmap.currentData() or "",
+            "variables": {},
+        }
+        for row in range(self.table_colormaps.rowCount()):
+            var_item = self.table_colormaps.item(row, 0)
+            cmap_item = self.table_colormaps.item(row, 1)
+            if not var_item or not cmap_item:
+                continue
+            var = var_item.text().strip()
+            cmap = cmap_item.text().strip()
+            if var and cmap:
+                colormaps["variables"][var] = cmap
+        misc = {
+            "default_export_dir": self.txt_export_dir.text().strip(),
+        }
+        return {"general": general, "colormaps": colormaps, "misc": misc}
+
+    def _apply_data(self):
+        data = self._data
+        self.chk_autoscale.setChecked(bool(data.get("general", {}).get("autoscale_on_load", True)))
+        self.txt_layout_label.setText(str(data.get("general", {}).get("default_layout_label", "")))
+        self.txt_export_dir.setText(str(data.get("misc", {}).get("default_export_dir", "")))
+        default_cmap = str(data.get("colormaps", {}).get("default", ""))
+        idx = self.cmb_default_cmap.findData(default_cmap)
+        if idx < 0:
+            idx = 0
+        self.cmb_default_cmap.setCurrentIndex(idx)
+        self.table_colormaps.setRowCount(0)
+        variables = data.get("colormaps", {}).get("variables", {})
+        if isinstance(variables, dict):
+            for var, cmap in sorted(variables.items()):
+                row = self.table_colormaps.rowCount()
+                self.table_colormaps.insertRow(row)
+                self.table_colormaps.setItem(row, 0, QtWidgets.QTableWidgetItem(str(var)))
+                self.table_colormaps.setItem(row, 1, QtWidgets.QTableWidgetItem(str(cmap)))
+
+    def accept(self):
+        self._data = self._collect_data()
+        super().accept()
+
+    def result_data(self) -> Dict[str, object]:
+        return self._collect_data()
 class ProcessingDockWidget(QtWidgets.QWidget):
     def __init__(self, manager: ProcessingManager, parent=None):
         super().__init__(parent)
@@ -2488,6 +2940,7 @@ class ViewerFrame(QtWidgets.QFrame):
         self._available_variables: List[str] = []
         self._variable_hints: Dict[str, str] = {}
         self._current_variable: Optional[str] = None
+        self.preferences: Optional[PreferencesManager] = None
 
         lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(2,2,2,2); lay.setSpacing(2)
         # Header
@@ -2725,6 +3178,44 @@ class ViewerFrame(QtWidgets.QFrame):
             self.viewer.img_item.setVisible(True)
         except Exception:
             pass
+        self._apply_preferences()
+
+    def set_preferences(self, preferences: Optional[PreferencesManager]):
+        if self.preferences is preferences:
+            return
+        if self.preferences:
+            try:
+                self.preferences.changed.disconnect(self._on_preferences_changed)
+            except Exception:
+                pass
+        self.preferences = preferences
+        if preferences is not None:
+            try:
+                preferences.changed.connect(self._on_preferences_changed)
+            except Exception:
+                pass
+            self._apply_preferences()
+
+    def _on_preferences_changed(self, _data):
+        self._apply_preferences()
+
+    def _apply_preferences(self):
+        prefs = self.preferences
+        if prefs is None:
+            return
+        cmap_name = prefs.preferred_colormap(self._current_variable)
+        if cmap_name:
+            try:
+                cmap = pg.colormap.get(cmap_name)
+                self.viewer.lut.gradient.setColorMap(cmap)
+                self.viewer.lut.rehide_stops()
+            except Exception:
+                pass
+        if prefs.autoscale_on_load():
+            try:
+                self.viewer.autoscale_levels()
+            except Exception:
+                pass
 
     def set_selected(self, selected: bool):
         selected = bool(selected)
@@ -2894,11 +3385,17 @@ class MultiViewGrid(QtWidgets.QWidget):
     - 'Columns' spinbox controls how many tiles per row.
     - 'Show histograms' toggles the classic HistogramLUTItem to the right of each tile.
     """
-    def __init__(self, processing_manager: Optional[ProcessingManager] = None, parent=None):
+    def __init__(
+        self,
+        processing_manager: Optional[ProcessingManager] = None,
+        preferences: Optional[PreferencesManager] = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.frames: List[ViewerFrame] = []
         self.processing_manager = processing_manager
+        self.preferences: Optional[PreferencesManager] = None
         self._selected_frames: Set[ViewerFrame] = set()
         self._mouse_down = False
         self._drag_select_active = False
@@ -2965,6 +3462,20 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.btn_apply_processing.clicked.connect(self._on_apply_processing_clicked)
         bar.addWidget(self.btn_apply_processing)
 
+        self.btn_export = QtWidgets.QToolButton()
+        self.btn_export.setText("Export")
+        self.btn_export.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        export_menu = QtWidgets.QMenu(self.btn_export)
+        self.act_export_active = export_menu.addAction("Save active plot…")
+        self.act_export_active.triggered.connect(self._export_active_plot)
+        self.act_export_selected = export_menu.addAction("Save selected plots to folder…")
+        self.act_export_selected.triggered.connect(self._export_selected_plots)
+        export_menu.addSeparator()
+        self.act_export_layout = export_menu.addAction("Save entire layout…")
+        self.act_export_layout.triggered.connect(self._export_layout_image)
+        self.btn_export.setMenu(export_menu)
+        bar.addWidget(self.btn_export)
+
         bar.addStretch(1)
         v.addLayout(bar)
 
@@ -2978,6 +3489,8 @@ class MultiViewGrid(QtWidgets.QWidget):
         self._cursor_handlers = {}
         self._syncing_levels = False
         self._syncing_views = False
+
+        self.set_preferences(preferences)
 
     # ---------- Drag & Drop ----------
     def dragEnterEvent(self, ev: QtGui.QDragEnterEvent):
@@ -3039,6 +3552,7 @@ class MultiViewGrid(QtWidgets.QWidget):
             return
 
         fr = ViewerFrame(title=frame_title, parent=self)
+        fr.set_preferences(self.preferences)
         fr.request_close.connect(self._remove_frame)
         try:
             if ds_ref:
@@ -3234,6 +3748,119 @@ class MultiViewGrid(QtWidgets.QWidget):
         name = str(item).strip()
         for fr in frames:
             fr.plot_variable(name)
+
+    # ---------- export helpers ----------
+    def _on_preferences_changed(self, _data):
+        for frame in self.frames:
+            frame.set_preferences(self.preferences)
+
+    def _default_layout_label(self) -> str:
+        if self.preferences:
+            return self.preferences.default_layout_label()
+        return ""
+
+    def _default_export_dir(self) -> str:
+        if self.preferences:
+            return self.preferences.default_export_directory()
+        return ""
+
+    def _store_export_dir(self, directory: str):
+        if self.preferences and directory:
+            data = self.preferences.data()
+            misc = data.setdefault("misc", {})
+            misc["default_export_dir"] = directory
+            self.preferences.update(data)
+
+    def _export_active_plot(self):
+        frames = self.selected_frames()
+        if len(frames) != 1:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Select a plot",
+                "Please select a single plot to export.",
+            )
+            return
+        frame = frames[0]
+        suggestion = _sanitize_filename(frame.lbl.text()) + ".png"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save plot",
+            suggestion,
+            "PNG image (*.png);;JPEG image (*.jpg *.jpeg);;All files (*)",
+        )
+        if not path:
+            return
+        suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
+        target = _ensure_extension(path, suffix)
+        if not _save_snapshot(frame, target):
+            QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to write the selected file.")
+            return
+        log_action(f"Saved MultiView plot to {target}")
+
+    def _export_selected_plots(self):
+        frames = self.selected_frames()
+        if not frames:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No plots selected",
+                "Select one or more plots to export individually.",
+            )
+            return
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select export folder",
+            self._default_export_dir(),
+        )
+        if not directory:
+            return
+        base = Path(directory)
+        self._store_export_dir(directory)
+        count = 0
+        for idx, frame in enumerate(frames, start=1):
+            label = frame.lbl.text() or f"plot_{idx}"
+            name = _sanitize_filename(label) or f"plot_{idx}"
+            target = base / f"{name}_{idx:02d}.png"
+            if _save_snapshot(frame, target):
+                count += 1
+        if count == 0:
+            QtWidgets.QMessageBox.warning(self, "Export failed", "No plots were exported.")
+            return
+        QtWidgets.QMessageBox.information(
+            self,
+            "Export complete",
+            f"Saved {count} plot(s) to {base}",
+        )
+        log_action(f"Exported {count} MultiView plots to {base}")
+
+    def _export_layout_image(self):
+        if not self.frames:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No plots",
+                "Add at least one plot before exporting the layout.",
+            )
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save layout",
+            "multiview-layout.png",
+            "PNG image (*.png);;JPEG image (*.jpg *.jpeg);;All files (*)",
+        )
+        if not path:
+            return
+        ok, label = _ask_layout_label(self, "Layout label", self._default_layout_label())
+        if not ok:
+            return
+        suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
+        target = _ensure_extension(path, suffix)
+        if not _save_snapshot(self, target, label):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Save failed",
+                "Unable to save the layout image.",
+            )
+            return
+        log_action(f"Saved MultiView layout to {target}")
 
     def _on_apply_processing_clicked(self):
         frames = self.selected_frames()
@@ -3922,7 +4549,7 @@ class VolumeAlphaCurveWidget(QtWidgets.QWidget):
 class SequentialVolumeWindow(QtWidgets.QWidget):
     closed = QtCore.Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, preferences: Optional[PreferencesManager] = None):
         if gl is None:
             raise RuntimeError("pyqtgraph.opengl is not available")
         super().__init__(parent, QtCore.Qt.Window)
@@ -3934,6 +4561,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self._data_min: float = 0.0
         self._data_max: float = 1.0
         self._colormap_name: str = "viridis"
+        self.preferences: Optional[PreferencesManager] = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -3963,6 +4591,17 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self.btn_reset_view.setEnabled(False)
         self.btn_reset_view.clicked.connect(self._on_reset_view)
         controls.addWidget(self.btn_reset_view)
+
+        self.btn_export = QtWidgets.QToolButton()
+        self.btn_export.setText("Export")
+        self.btn_export.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        export_menu = QtWidgets.QMenu(self.btn_export)
+        act_snapshot = export_menu.addAction("Save volume snapshot…")
+        act_snapshot.triggered.connect(self._export_volume_snapshot)
+        act_layout = export_menu.addAction("Save volume layout…")
+        act_layout.triggered.connect(self._export_volume_layout)
+        self.btn_export.setMenu(export_menu)
+        controls.addWidget(self.btn_export)
 
         controls.addStretch(1)
         layout.addLayout(controls)
@@ -4030,6 +4669,57 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self.view.opts["distance"] = 400
         self.view.setBackgroundColor(QtGui.QColor(20, 20, 20))
         layout.addWidget(self.view, 1)
+
+    def set_preferences(self, preferences: Optional[PreferencesManager]):
+        if self.preferences is preferences:
+            return
+        if self.preferences:
+            try:
+                self.preferences.changed.disconnect(self._on_preferences_changed)
+            except Exception:
+                pass
+        self.preferences = preferences
+        if preferences is not None:
+            try:
+                preferences.changed.connect(self._on_preferences_changed)
+            except Exception:
+                pass
+        self._apply_preference_defaults()
+
+    def _on_preferences_changed(self, _data):
+        self._apply_preference_defaults()
+
+    def _apply_preference_defaults(self):
+        if not self.preferences:
+            return
+        preferred = self.preferences.preferred_colormap(None)
+        if preferred:
+            self.set_colormap(preferred)
+
+    def _default_layout_label(self) -> str:
+        if self.preferences:
+            return self.preferences.default_layout_label()
+        return ""
+
+    def _default_export_dir(self) -> str:
+        if self.preferences:
+            return self.preferences.default_export_directory()
+        return ""
+
+    def _store_export_dir(self, directory: str):
+        if self.preferences and directory:
+            data = self.preferences.data()
+            misc = data.setdefault("misc", {})
+            misc["default_export_dir"] = directory
+            self.preferences.update(data)
+
+    def _initial_path(self, filename: str) -> str:
+        base = self._default_export_dir()
+        if base:
+            return str(Path(base) / filename)
+        return filename
+
+        self.set_preferences(preferences)
 
     # ----- public API -----
     def set_volume(self, data: Optional[np.ndarray]):
@@ -4277,6 +4967,71 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             widget.setEnabled(has_data)
         self.btn_reset_curve.setEnabled(has_data)
         self.btn_reset_view.setEnabled(has_data and self._volume_item is not None)
+        if hasattr(self, "btn_export"):
+            self.btn_export.setEnabled(has_data)
+
+    def _export_volume_snapshot(self):
+        if self._volume_item is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No volume",
+                "Load data into the volume view before exporting.",
+            )
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save volume snapshot",
+            self._initial_path("volume-snapshot.png"),
+            "PNG image (*.png);;JPEG image (*.jpg *.jpeg);;All files (*)",
+        )
+        if not path:
+            return
+        ok, label = _ask_layout_label(self, "Snapshot label", self._default_layout_label())
+        if not ok:
+            return
+        suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
+        target = _ensure_extension(path, suffix)
+        try:
+            image = self.view.grabFramebuffer()
+        except Exception:
+            image = QtGui.QImage()
+        if image.isNull():
+            QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to capture the 3D view.")
+            return
+        if label:
+            image = _image_with_label(image, label)
+        if not image.save(str(target)):
+            QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to save the snapshot.")
+            return
+        self._store_export_dir(str(Path(target).parent))
+        log_action(f"Saved volume snapshot to {target}")
+
+    def _export_volume_layout(self):
+        if self._volume_item is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No volume",
+                "Load data into the volume view before exporting.",
+            )
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save volume layout",
+            self._initial_path("volume-layout.png"),
+            "PNG image (*.png);;JPEG image (*.jpg *.jpeg);;All files (*)",
+        )
+        if not path:
+            return
+        ok, label = _ask_layout_label(self, "Layout label", self._default_layout_label())
+        if not ok:
+            return
+        suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
+        target = _ensure_extension(path, suffix)
+        if not _save_snapshot(self, target, label):
+            QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to save the layout image.")
+            return
+        self._store_export_dir(str(Path(target).parent))
+        log_action(f"Saved volume layout to {target}")
 
     def set_axis_labels(self, slice_label: str, row_label: str, column_label: str):
         self._axis_labels.update(
@@ -4374,10 +5129,16 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
 
 
 class SequentialView(QtWidgets.QWidget):
-    def __init__(self, processing_manager: Optional[ProcessingManager] = None, parent=None):
+    def __init__(
+        self,
+        processing_manager: Optional[ProcessingManager] = None,
+        preferences: Optional[PreferencesManager] = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.processing_manager = processing_manager
+        self.preferences: Optional[PreferencesManager] = None
 
         self._dataset: Optional[xr.Dataset] = None
         self._dataset_path: Optional[Path] = None
@@ -4510,6 +5271,24 @@ class SequentialView(QtWidgets.QWidget):
         self.btn_autorange.clicked.connect(self._on_autorange_clicked)
         btn_row.addWidget(self.btn_autorange)
 
+        self.btn_export = QtWidgets.QToolButton()
+        self.btn_export.setText("Export")
+        self.btn_export.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        export_menu = QtWidgets.QMenu(self.btn_export)
+        act_current = export_menu.addAction("Save current slice…")
+        act_current.triggered.connect(self._export_current_slice)
+        act_all = export_menu.addAction("Save all slices to folder…")
+        act_all.triggered.connect(self._export_all_slices)
+        act_movie = export_menu.addAction("Save slice movie…")
+        act_movie.triggered.connect(self._export_slice_movie)
+        act_grid = export_menu.addAction("Save slices as grid pages…")
+        act_grid.triggered.connect(self._export_slice_grid)
+        export_menu.addSeparator()
+        act_layout = export_menu.addAction("Save view layout…")
+        act_layout.triggered.connect(self._export_sequential_layout)
+        self.btn_export.setMenu(export_menu)
+        btn_row.addWidget(self.btn_export)
+
         btn_row.addSpacing(12)
 
         cmap_label = QtWidgets.QLabel("Color map:")
@@ -4582,6 +5361,8 @@ class SequentialView(QtWidgets.QWidget):
         self._roi_window: Optional[SequentialRoiWindow] = None
         self._volume_window: Optional[SequentialVolumeWindow] = None
 
+        self.set_preferences(preferences)
+
     # ---------- dataset helpers ----------
     def _populate_colormap_choices(self):
         candidates = [
@@ -4607,6 +5388,12 @@ class SequentialView(QtWidgets.QWidget):
         self.cmb_colormap.blockSignals(False)
         if self.cmb_colormap.count():
             self.cmb_colormap.setCurrentIndex(0)
+        if self.preferences is not None:
+            preferred = self.preferences.preferred_colormap(None)
+            if preferred:
+                idx = self.cmb_colormap.findData(preferred)
+                if idx >= 0:
+                    self.cmb_colormap.setCurrentIndex(idx)
 
     def _on_colormap_changed(self):
         if not hasattr(self, "viewer"):
@@ -5190,6 +5977,7 @@ class SequentialView(QtWidgets.QWidget):
         else:
             self.viewer.set_image(processed, autorange=autorange)
         self.cmb_colormap.setEnabled(True)
+        self._apply_preference_colormap()
         self._apply_selected_colormap()
         if autorange:
             try:
@@ -5229,6 +6017,339 @@ class SequentialView(QtWidgets.QWidget):
         self._invalidate_volume_cache()
         self._update_slice_display(autorange=True)
 
+    def _default_layout_label(self) -> str:
+        if self.preferences:
+            return self.preferences.default_layout_label()
+        return ""
+
+    def _default_export_dir(self) -> str:
+        if self.preferences:
+            return self.preferences.default_export_directory()
+        return ""
+
+    def _store_export_dir(self, directory: str):
+        if self.preferences and directory:
+            data = self.preferences.data()
+            misc = data.setdefault("misc", {})
+            misc["default_export_dir"] = directory
+            self.preferences.update(data)
+
+    def set_preferences(self, preferences: Optional[PreferencesManager]):
+        if self.preferences is preferences:
+            return
+        if self.preferences:
+            try:
+                self.preferences.changed.disconnect(self._on_preferences_changed)
+            except Exception:
+                pass
+        self.preferences = preferences
+        if preferences is not None:
+            try:
+                preferences.changed.connect(self._on_preferences_changed)
+            except Exception:
+                pass
+        self._apply_preference_colormap()
+        self._apply_selected_colormap()
+        if self._volume_window is not None:
+            try:
+                self._volume_window.set_preferences(preferences)
+            except Exception:
+                pass
+
+    def _initial_path(self, filename: str) -> str:
+        base = self._default_export_dir()
+        if base:
+            return str(Path(base) / filename)
+        return filename
+
+    def _apply_preference_colormap(self):
+        if not self.preferences:
+            return
+        preferred = self.preferences.preferred_colormap(self._current_variable)
+        if preferred:
+            idx = self.cmb_colormap.findData(preferred)
+            if idx >= 0 and idx != self.cmb_colormap.currentIndex():
+                block = self.cmb_colormap.blockSignals(True)
+                self.cmb_colormap.setCurrentIndex(idx)
+                self.cmb_colormap.blockSignals(block)
+
+    def _on_preferences_changed(self, _data):
+        self._apply_preference_colormap()
+        self._apply_selected_colormap()
+
+    # ---------- export helpers ----------
+    def _export_current_slice(self):
+        if self._slice_count <= 0:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No slice",
+                "Load a dataset and choose a slice before exporting.",
+            )
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save current slice",
+            self._initial_path("sequential-slice.png"),
+            "PNG image (*.png);;JPEG image (*.jpg *.jpeg);;All files (*)",
+        )
+        if not path:
+            return
+        ok, label = _ask_layout_label(self, "Slice label", self._default_layout_label())
+        if not ok:
+            return
+        suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
+        target = _ensure_extension(path, suffix)
+        _process_events()
+        image = self.viewer.grab().toImage()
+        if label:
+            image = _image_with_label(image, label)
+        if not image.save(str(target)):
+            QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to save the slice image.")
+            return
+        self._store_export_dir(str(Path(target).parent))
+        log_action(f"Saved sequential slice {self._slice_index} to {target}")
+
+    def _export_all_slices(self):
+        if self._slice_count <= 0:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No slices",
+                "Load a dataset with at least one slice before exporting.",
+            )
+            return
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select export folder",
+            self._default_export_dir(),
+        )
+        if not directory:
+            return
+        base = Path(directory)
+        self._store_export_dir(directory)
+        base_name = _sanitize_filename(self.lbl_dataset.text()) or "slice"
+        original = self._slice_index
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            count = 0
+            for idx in range(self._slice_count):
+                self._on_slice_changed(idx)
+                _process_events()
+                image = self.viewer.grab().toImage()
+                target = base / f"{base_name}_{idx:03d}.png"
+                if image.save(str(target)):
+                    count += 1
+            if count == 0:
+                QtWidgets.QMessageBox.warning(self, "Export failed", "No slices were exported.")
+                return
+        finally:
+            if self._slice_count > 0:
+                self._on_slice_changed(original)
+            QtWidgets.QApplication.restoreOverrideCursor()
+        QtWidgets.QMessageBox.information(
+            self,
+            "Export complete",
+            f"Saved {count} slice image(s) to {base}",
+        )
+        log_action(f"Exported {count} sequential slices to {base}")
+
+    def _export_slice_movie(self):
+        if self._slice_count <= 0:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No slices",
+                "Load a dataset with at least one slice before exporting a movie.",
+            )
+            return
+        if cv2 is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "OpenCV unavailable",
+                "Saving movies requires OpenCV (cv2). Install it and try again.",
+            )
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save slice movie",
+            self._initial_path("sequential-slices.mp4"),
+            "MP4 video (*.mp4);;AVI video (*.avi)",
+        )
+        if not path:
+            return
+        suffix = ".avi" if path.lower().endswith(".avi") else ".mp4"
+        target = _ensure_extension(path, suffix)
+        fps, ok = QtWidgets.QInputDialog.getDouble(
+            self,
+            "Frames per second",
+            "Frames per second:",
+            10.0,
+            0.1,
+            120.0,
+            1,
+        )
+        if not ok:
+            return
+        fourcc = cv2.VideoWriter_fourcc(*("MJPG" if suffix == ".avi" else "mp4v"))
+        original = self._slice_index
+        writer = None
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            for idx in range(self._slice_count):
+                self._on_slice_changed(idx)
+                _process_events()
+                image = self.viewer.grab().toImage()
+                frame = _qimage_to_array(image)
+                if frame.size == 0:
+                    continue
+                bgr = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                height, width = bgr.shape[:2]
+                if writer is None:
+                    writer = cv2.VideoWriter(str(target), fourcc, float(fps), (width, height))
+                    if not writer.isOpened():
+                        writer = None
+                        raise RuntimeError("Unable to open video writer")
+                if writer is not None:
+                    writer.write(bgr)
+        except Exception as exc:
+            if writer is not None:
+                writer.release()
+            QtWidgets.QApplication.restoreOverrideCursor()
+            self._on_slice_changed(original)
+            QtWidgets.QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        finally:
+            if writer is not None:
+                writer.release()
+            if self._slice_count > 0:
+                self._on_slice_changed(original)
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._store_export_dir(str(Path(target).parent))
+        QtWidgets.QMessageBox.information(
+            self,
+            "Export complete",
+            f"Saved movie to {target}",
+        )
+        log_action(f"Saved sequential slice movie to {target}")
+
+    def _export_slice_grid(self):
+        if self._slice_count <= 0:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No slices",
+                "Load a dataset with at least one slice before exporting grids.",
+            )
+            return
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select export folder",
+            self._default_export_dir(),
+        )
+        if not directory:
+            return
+        rows, ok = QtWidgets.QInputDialog.getInt(
+            self,
+            "Grid rows",
+            "Number of rows per page:",
+            2,
+            1,
+            10,
+        )
+        if not ok:
+            return
+        cols, ok = QtWidgets.QInputDialog.getInt(
+            self,
+            "Grid columns",
+            "Number of columns per page:",
+            2,
+            1,
+            10,
+        )
+        if not ok:
+            return
+        ok, label_prefix = _ask_layout_label(self, "Grid label")
+        if not ok:
+            return
+        base = Path(directory)
+        self._store_export_dir(directory)
+        images: List[QtGui.QImage] = []
+        original = self._slice_index
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            for idx in range(self._slice_count):
+                self._on_slice_changed(idx)
+                _process_events()
+                images.append(self.viewer.grab().toImage())
+        finally:
+            if self._slice_count > 0:
+                self._on_slice_changed(original)
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if not images:
+            QtWidgets.QMessageBox.warning(self, "Export failed", "No slice images were captured.")
+            return
+        tile_width = images[0].width()
+        tile_height = images[0].height()
+        per_page = max(1, rows * cols)
+        count = 0
+        for page_idx in range(0, len(images), per_page):
+            subset = images[page_idx : page_idx + per_page]
+            if not subset:
+                continue
+            page_image = QtGui.QImage(
+                cols * tile_width,
+                rows * tile_height,
+                QtGui.QImage.Format_ARGB32,
+            )
+            page_image.fill(QtGui.QColor("white"))
+            painter = QtGui.QPainter(page_image)
+            for idx, img in enumerate(subset):
+                r = idx // cols
+                c = idx % cols
+                painter.drawImage(c * tile_width, r * tile_height, img)
+            painter.end()
+            label = label_prefix
+            if label_prefix:
+                label = f"{label_prefix} – page {count + 1}"
+            if label:
+                page_image = _image_with_label(page_image, label)
+            target = base / f"slice-grid_{count + 1:02d}.png"
+            page_image.save(str(target))
+            count += 1
+        if count == 0:
+            QtWidgets.QMessageBox.warning(self, "Export failed", "No grids were produced.")
+            return
+        QtWidgets.QMessageBox.information(
+            self,
+            "Export complete",
+            f"Saved {count} grid page(s) to {base}",
+        )
+        log_action(f"Exported {count} sequential slice grids to {base}")
+
+    def _export_sequential_layout(self):
+        if self._slice_count <= 0:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No slices",
+                "Load a dataset before exporting the layout.",
+            )
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save sequential view layout",
+            self._initial_path("sequential-layout.png"),
+            "PNG image (*.png);;JPEG image (*.jpg *.jpeg);;All files (*)",
+        )
+        if not path:
+            return
+        ok, label = _ask_layout_label(self, "Layout label", self._default_layout_label())
+        if not ok:
+            return
+        suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
+        target = _ensure_extension(path, suffix)
+        if not _save_snapshot(self, target, label):
+            QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to save the layout image.")
+            return
+        self._store_export_dir(str(Path(target).parent))
+        log_action(f"Saved sequential view layout to {target}")
+
     # ---------- volume viewer ----------
     def _invalidate_volume_cache(self):
         self._volume_cache = None
@@ -5238,9 +6359,14 @@ class SequentialView(QtWidgets.QWidget):
             raise RuntimeError("pyqtgraph.opengl is not available")
         window = self._volume_window
         if window is None:
-            window = SequentialVolumeWindow(self)
+            window = SequentialVolumeWindow(self, self.preferences)
             window.closed.connect(self._on_volume_window_closed)
             self._volume_window = window
+        else:
+            try:
+                window.set_preferences(self.preferences)
+            except Exception:
+                pass
         return window
 
     def _on_volume_window_closed(self):
@@ -5935,6 +7061,10 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.layer = layer
         self._ready = False
 
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        )
+
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(8, 6, 8, 6)
         lay.setSpacing(6)
@@ -5957,6 +7087,9 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         cmap_row = QtWidgets.QHBoxLayout()
         cmap_row.addWidget(QtWidgets.QLabel("Colormap:"))
         self.cmb_colormap = QtWidgets.QComboBox()
+        self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.cmb_colormap.setMinimumContentsLength(12)
+        self.cmb_colormap.setMinimumWidth(200)
         try:
             cmaps = sorted(pg.colormap.listMaps())
         except Exception:
@@ -6002,6 +7135,9 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         manager_ref = getattr(view, "processing_manager", None)
         self.manager: Optional[ProcessingManager] = None
         proc_box = QtWidgets.QGroupBox("Processing")
+        proc_box.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        )
         proc_layout = QtWidgets.QVBoxLayout(proc_box)
         proc_layout.setContentsMargins(6, 6, 6, 6)
         proc_layout.setSpacing(4)
@@ -6009,11 +7145,17 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         proc_row = QtWidgets.QHBoxLayout()
         proc_row.addWidget(QtWidgets.QLabel("Operation:"))
         self.cmb_processing = QtWidgets.QComboBox()
+        self.cmb_processing.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.cmb_processing.setMinimumContentsLength(14)
+        self.cmb_processing.setMinimumWidth(220)
         self.cmb_processing.currentIndexChanged.connect(self._on_processing_mode_changed)
         proc_row.addWidget(self.cmb_processing, 1)
         proc_layout.addLayout(proc_row)
 
         self.param_stack = QtWidgets.QStackedWidget()
+        self.param_stack.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        )
         self.param_stack.addWidget(QtWidgets.QWidget())  # None placeholder
         self._function_forms: Dict[str, ParameterForm] = {}
         self._function_indices: Dict[str, int] = {}
@@ -6255,11 +7397,17 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
 
 
 class OverlayView(QtWidgets.QWidget):
-    def __init__(self, processing_manager: Optional[ProcessingManager] = None, parent=None):
+    def __init__(
+        self,
+        processing_manager: Optional[ProcessingManager] = None,
+        preferences: Optional[PreferencesManager] = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.layers: List[OverlayLayer] = []
         self.processing_manager: Optional[ProcessingManager] = processing_manager
+        self.preferences: Optional[PreferencesManager] = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -6272,6 +7420,19 @@ class OverlayView(QtWidgets.QWidget):
         self.btn_clear = QtWidgets.QPushButton("Clear layers")
         self.btn_clear.clicked.connect(self.clear_layers)
         toolbar.addWidget(self.btn_clear)
+        self.btn_export = QtWidgets.QToolButton()
+        self.btn_export.setText("Export")
+        self.btn_export.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        export_menu = QtWidgets.QMenu(self.btn_export)
+        act_composite = export_menu.addAction("Save composite image…")
+        act_composite.triggered.connect(self._export_composite)
+        act_layers = export_menu.addAction("Save layers to folder…")
+        act_layers.triggered.connect(self._export_individual_layers)
+        export_menu.addSeparator()
+        act_layout = export_menu.addAction("Save overlay layout…")
+        act_layout.triggered.connect(self._export_full_layout)
+        self.btn_export.setMenu(export_menu)
+        toolbar.addWidget(self.btn_export)
         toolbar.addStretch(1)
         layout.addLayout(toolbar)
 
@@ -6280,6 +7441,10 @@ class OverlayView(QtWidgets.QWidget):
 
         # Layer controls panel
         panel = QtWidgets.QWidget()
+        panel.setMinimumWidth(360)
+        panel.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        )
         panel_layout = QtWidgets.QVBoxLayout(panel)
         panel_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.setSpacing(6)
@@ -6308,8 +7473,16 @@ class OverlayView(QtWidgets.QWidget):
         self.plot.showGrid(x=False, y=False)
         self.plot.setLabel("left", "Y")
         self.plot.setLabel("bottom", "X")
+        try:
+            self.plot.scene().sigMouseClicked.connect(self._on_plot_context_click)
+        except Exception:
+            pass
         splitter.addWidget(self.glw)
+        splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+        QtCore.QTimer.singleShot(0, lambda: splitter.setSizes([420, 780]))
+
+        self.set_preferences(preferences)
 
     # ---------- drag & drop ----------
     def dragEnterEvent(self, ev):
@@ -6346,6 +7519,7 @@ class OverlayView(QtWidgets.QWidget):
         layer.set_widget(widget)
         self.layers.append(layer)
         self._insert_layer_widget(widget)
+        self._apply_preferences_to_layers()
         self._update_hint()
         self.auto_view_range()
         ev.acceptProposedAction()
@@ -6376,6 +7550,217 @@ class OverlayView(QtWidgets.QWidget):
     def clear_layers(self):
         for layer in list(self.layers):
             self.remove_layer(layer)
+
+    def _on_plot_context_click(self, event):
+        try:
+            button = event.button()
+        except Exception:
+            return
+        if button != QtCore.Qt.RightButton:
+            return
+        try:
+            pos = event.scenePos()
+            rect = self.plot.sceneBoundingRect()
+        except Exception:
+            return
+        if rect is None or not rect.contains(pos):
+            return
+        menu = QtWidgets.QMenu(self)
+        act_title = menu.addAction("Set plot title…")
+        act_title.triggered.connect(self._prompt_plot_title)
+        act_xlabel = menu.addAction("Set X axis label…")
+        act_xlabel.triggered.connect(lambda: self._prompt_axis_label("bottom"))
+        act_ylabel = menu.addAction("Set Y axis label…")
+        act_ylabel.triggered.connect(lambda: self._prompt_axis_label("left"))
+        menu.exec_(QtGui.QCursor.pos())
+
+    def _prompt_plot_title(self):
+        current = ""
+        try:
+            current = self.plot.titleLabel.text
+        except Exception:
+            current = ""
+        text, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Plot title",
+            "Enter plot title:",
+            text=str(current or ""),
+        )
+        if ok:
+            self.plot.setTitle(str(text))
+
+    def _prompt_axis_label(self, which: str):
+        axis = self.plot.getAxis(which)
+        current = ""
+        if axis is not None:
+            try:
+                current = axis.labelText
+            except Exception:
+                current = ""
+        label_text = "X axis" if which == "bottom" else "Y axis"
+        text, ok = QtWidgets.QInputDialog.getText(
+            self,
+            f"{label_text} label",
+            f"Enter {label_text.lower()} label:",
+            text=str(current or ""),
+        )
+        if ok:
+            if which == "bottom":
+                self.plot.setLabel("bottom", str(text))
+            elif which == "left":
+                self.plot.setLabel("left", str(text))
+
+    def set_preferences(self, preferences: Optional[PreferencesManager]):
+        if self.preferences is preferences:
+            return
+        if self.preferences:
+            try:
+                self.preferences.changed.disconnect(self._on_preferences_changed)
+            except Exception:
+                pass
+        self.preferences = preferences
+        if preferences is not None:
+            try:
+                preferences.changed.connect(self._on_preferences_changed)
+            except Exception:
+                pass
+        self._apply_preferences_to_layers()
+
+    def _on_preferences_changed(self, _data):
+        self._apply_preferences_to_layers()
+
+    def _apply_preferences_to_layers(self):
+        if not self.preferences:
+            return
+        preferred = self.preferences.preferred_colormap(None)
+        if not preferred:
+            return
+        fallback_names = {"", "default", "viridis"}
+        for layer in self.layers:
+            if layer.colormap_name not in fallback_names:
+                continue
+            if preferred != layer.colormap_name:
+                layer.set_colormap(preferred)
+                if layer.widget is not None:
+                    layer.widget._set_colormap_selection(preferred)
+
+    def _default_layout_label(self) -> str:
+        if self.preferences:
+            return self.preferences.default_layout_label()
+        return ""
+
+    def _default_export_dir(self) -> str:
+        if self.preferences:
+            return self.preferences.default_export_directory()
+        return ""
+
+    def _store_export_dir(self, directory: str):
+        if self.preferences and directory:
+            data = self.preferences.data()
+            misc = data.setdefault("misc", {})
+            misc["default_export_dir"] = directory
+            self.preferences.update(data)
+
+    def _initial_path(self, filename: str) -> str:
+        base = self._default_export_dir()
+        if base:
+            return str(Path(base) / filename)
+        return filename
+
+    # ---------- export helpers ----------
+    def _export_composite(self):
+        if not self.layers:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No layers",
+                "Add a layer before exporting the composite image.",
+            )
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save composite image",
+            self._initial_path("overlay-composite.png"),
+            "PNG image (*.png);;JPEG image (*.jpg *.jpeg);;All files (*)",
+        )
+        if not path:
+            return
+        suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
+        target = _ensure_extension(path, suffix)
+        if not _save_snapshot(self.glw, target):
+            QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to save the composite image.")
+            return
+        self._store_export_dir(str(Path(target).parent))
+        log_action(f"Saved overlay composite to {target}")
+
+    def _export_individual_layers(self):
+        if not self.layers:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No layers",
+                "Add a layer before exporting individual images.",
+            )
+            return
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select export folder",
+            self._default_export_dir(),
+        )
+        if not directory:
+            return
+        base = Path(directory)
+        self._store_export_dir(directory)
+        original_states = [(layer, bool(layer.visible)) for layer in self.layers]
+        count = 0
+        try:
+            for idx, layer in enumerate(self.layers, start=1):
+                for other in self.layers:
+                    other.set_visible(other is layer)
+                _process_events()
+                name = _sanitize_filename(layer.title) or f"layer_{idx}"
+                target = base / f"{name}_{idx:02d}.png"
+                if _save_snapshot(self.glw, target):
+                    count += 1
+        finally:
+            for layer, state in original_states:
+                layer.set_visible(state)
+            _process_events()
+            self.auto_view_range()
+        if count == 0:
+            QtWidgets.QMessageBox.warning(self, "Export failed", "No layers were exported.")
+            return
+            QtWidgets.QMessageBox.information(
+                self,
+                "Export complete",
+                f"Saved {count} layer image(s) to {base}",
+            )
+        log_action(f"Exported {count} overlay layers to {base}")
+
+    def _export_full_layout(self):
+        if not self.layers:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No layers",
+                "Add a layer before exporting the layout.",
+            )
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save overlay layout",
+            self._initial_path("overlay-layout.png"),
+            "PNG image (*.png);;JPEG image (*.jpg *.jpeg);;All files (*)",
+        )
+        if not path:
+            return
+        ok, label = _ask_layout_label(self, "Layout label", self._default_layout_label())
+        if not ok:
+            return
+        suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
+        target = _ensure_extension(path, suffix)
+        if not _save_snapshot(self, target, label):
+            QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to save the layout image.")
+            return
+        self._store_export_dir(str(Path(target).parent))
+        log_action(f"Saved overlay layout to {target}")
 
     def set_processing_manager(self, manager: Optional[ProcessingManager]):
         self.processing_manager = manager
@@ -6486,7 +7871,10 @@ class MainWindow(QtWidgets.QMainWindow):
         main = QtWidgets.QSplitter()
         self.setCentralWidget(main)
 
+        self.preferences = PreferencesManager()
         self.processing_manager = ProcessingManager()
+
+        self._build_menus()
 
         left_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         left_splitter.setChildrenCollapsible(False)
@@ -6506,13 +7894,13 @@ class MainWindow(QtWidgets.QMainWindow):
         main.addWidget(self.tabs)
         main.setStretchFactor(1, 1)
 
-        self.tab_multiview = MultiViewGrid(self.processing_manager)
+        self.tab_multiview = MultiViewGrid(self.processing_manager, self.preferences)
         self.tabs.addTab(self.tab_multiview, "MultiView")
-        self.tab_sequential = SequentialView(self.processing_manager)
+        self.tab_sequential = SequentialView(self.processing_manager, self.preferences)
         self.tabs.addTab(self.tab_sequential, "Sequential View")
         self.tab_slice = SliceDataTab(self.datasets)
         self.tabs.addTab(self.tab_slice, "Slice Data")
-        self.tab_overlay = OverlayView(self.processing_manager)
+        self.tab_overlay = OverlayView(self.processing_manager, self.preferences)
         self.tabs.addTab(self.tab_overlay, "Overlay")
         self.tab_overlay.set_processing_manager(self.processing_manager)
         self.tab_interactive = InteractiveProcessingTab(self.datasets)
@@ -6524,6 +7912,60 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_dock.resize(800, 200)
 
         self.resize(1500, 900)
+
+    def _build_menus(self):
+        menubar = self.menuBar()
+        prefs_menu = menubar.addMenu("Preferences")
+
+        act_edit = prefs_menu.addAction("Edit preferences…")
+        act_edit.triggered.connect(self._edit_preferences)
+
+        prefs_menu.addSeparator()
+
+        act_load = prefs_menu.addAction("Load preferences…")
+        act_load.triggered.connect(self._load_preferences)
+
+        act_save = prefs_menu.addAction("Save preferences…")
+        act_save.triggered.connect(self._save_preferences)
+
+    def _edit_preferences(self):
+        dialog = PreferencesDialog(self.preferences, self)
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            data = dialog.result_data()
+            self.preferences.update(data)
+            log_action("Updated preferences")
+
+    def _load_preferences(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load preferences",
+            "",
+            "JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            self.preferences.load_from_file(Path(path))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Load failed", str(exc))
+            return
+        log_action(f"Loaded preferences from {path}")
+
+    def _save_preferences(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save preferences",
+            "preferences.json",
+            "JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            self.preferences.save_to_file(Path(path))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Save failed", str(exc))
+            return
+        log_action(f"Saved preferences to {path}")
 
 
 def main():
