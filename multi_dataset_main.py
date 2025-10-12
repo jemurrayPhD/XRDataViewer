@@ -2675,7 +2675,9 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self._volume_item = None
 
     def _update_range_controls(self, *, reset: bool = False):
-        with QtCore.QSignalBlocker(self.spin_min), QtCore.QSignalBlocker(self.spin_max):
+        block_min = self.spin_min.blockSignals(True)
+        block_max = self.spin_max.blockSignals(True)
+        try:
             if self._data is None:
                 self.spin_min.setEnabled(False)
                 self.spin_max.setEnabled(False)
@@ -2691,6 +2693,9 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
                 if reset:
                     self.spin_min.setValue(self._data_min)
                     self.spin_max.setValue(self._data_max)
+        finally:
+            self.spin_min.blockSignals(block_min)
+            self.spin_max.blockSignals(block_max)
         if reset:
             self._apply_transfer_function()
 
