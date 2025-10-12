@@ -366,6 +366,10 @@ class CentralPlotWidget(QtWidgets.QWidget):
         except Exception:
             return None
 
+    def value_at(self, x: float, y: float):
+        """Return the value currently displayed at the given coordinates."""
+        return self._value_at(x, y)
+
     def _set_last_local_crosshair(self, x: float, y: float, value, label: str | None):
         self._last_local_crosshair = (x, y, value, label)
 
