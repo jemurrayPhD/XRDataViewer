@@ -3492,6 +3492,24 @@ class MultiViewGrid(QtWidgets.QWidget):
 
         self.set_preferences(preferences)
 
+    def set_preferences(self, preferences: Optional[PreferencesManager]):
+        if self.preferences is preferences:
+            return
+        if self.preferences:
+            try:
+                self.preferences.changed.disconnect(self._on_preferences_changed)
+            except Exception:
+                pass
+        self.preferences = preferences
+        for frame in self.frames:
+            frame.set_preferences(self.preferences)
+        if self.preferences:
+            try:
+                self.preferences.changed.connect(self._on_preferences_changed)
+            except Exception:
+                pass
+        self._on_preferences_changed(None)
+
     # ---------- Drag & Drop ----------
     def dragEnterEvent(self, ev: QtGui.QDragEnterEvent):
         ev.acceptProposedAction() if ev.mimeData().hasText() else ev.ignore()
