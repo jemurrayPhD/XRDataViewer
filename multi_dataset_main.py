@@ -2563,7 +2563,7 @@ class VolumeAlphaHandle(QtWidgets.QGraphicsEllipseItem):
 class VolumeAlphaCurveWidget(QtWidgets.QWidget):
     curveChanged = QtCore.Signal(list)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, default_value: float = 0.5):
         super().__init__(parent)
         self._scene = QtWidgets.QGraphicsScene(self)
         self._view = QtWidgets.QGraphicsView(self._scene)
@@ -2598,6 +2598,7 @@ class VolumeAlphaCurveWidget(QtWidgets.QWidget):
 
         self._handles: List[VolumeAlphaHandle] = []
         self._default_positions = [0.0, 0.25, 0.5, 0.75, 1.0]
+        self._default_value = max(0.0, min(1.0, float(default_value)))
         self._margin_left = 28.0
         self._margin_right = 16.0
         self._margin_top = 12.0
@@ -2761,7 +2762,7 @@ class VolumeAlphaCurveWidget(QtWidgets.QWidget):
             self._scene.removeItem(handle)
         self._handles.clear()
         for x_norm in self._default_positions:
-            self._add_handle(float(x_norm), float(x_norm), emit=False)
+            self._add_handle(float(x_norm), float(self._default_value), emit=False)
         self._update_curve_path()
         self.curveChanged.emit(self.curve_points())
 
@@ -2842,56 +2843,64 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         controls.setSpacing(6)
         controls.addWidget(QtWidgets.QLabel("Opacity curves:"))
 
-        self.btn_reset_curve = QtWidgets.QPushButton("Reset curve")
+        self.btn_reset_curve = QtWidgets.QPushButton("Reset curves")
         self.btn_reset_curve.clicked.connect(self._on_reset_curve)
         controls.addWidget(self.btn_reset_curve)
-
-        controls.addWidget(QtWidgets.QLabel("Edit:"))
-
-        self.cmb_curve_target = QtWidgets.QComboBox()
-        self.cmb_curve_target.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
-        self.cmb_curve_target.currentIndexChanged.connect(self._on_curve_target_changed)
-        controls.addWidget(self.cmb_curve_target)
 
         controls.addStretch(1)
         layout.addLayout(controls)
 
-        self.alpha_widget = VolumeAlphaCurveWidget()
-        self.alpha_widget.setSizePolicy(
-            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        )
-        self.alpha_widget.curveChanged.connect(self._on_alpha_curve_changed)
-        self.alpha_widget.setToolTip(
-            "Drag control points to sculpt opacity, double-click to add a new point."
-        )
-        layout.addWidget(self.alpha_widget)
+        curves_row = QtWidgets.QHBoxLayout()
+        curves_row.setSpacing(8)
+        layout.addLayout(curves_row)
 
-        self._volume_item: Optional[gl.GLVolumeItem] = None
-        self._volume_scalar: Optional[np.ndarray] = None
         self._curve_keys: Tuple[str, ...] = ("value", "slice", "row", "column")
-        default_points = self.alpha_widget.curve_points()
-        xs = np.array([float(x) for x, _ in default_points], dtype=float)
-        ys = np.array([float(y) for _, y in default_points], dtype=float)
-        self._curve_points: Dict[str, List[Tuple[float, float]]] = {
-            key: [(float(x), float(y)) for x, y in zip(xs, ys)] for key in self._curve_keys
-        }
-        self._curve_lut_x: Dict[str, np.ndarray] = {key: xs.copy() for key in self._curve_keys}
-        self._curve_lut_y: Dict[str, np.ndarray] = {key: ys.copy() for key in self._curve_keys}
-        self._active_curve: str = "value"
-        self._updating_curve_widget: bool = False
         self._axis_labels: Dict[str, str] = {
             "value": "Value",
             "slice": "Slice axis",
             "row": "Row axis",
             "column": "Column axis",
         }
+        self._curve_widgets: Dict[str, VolumeAlphaCurveWidget] = {}
+        self._curve_labels: Dict[str, QtWidgets.QLabel] = {}
+
+        for key in self._curve_keys:
+            column_layout = QtWidgets.QVBoxLayout()
+            column_layout.setSpacing(4)
+            label = QtWidgets.QLabel(self._axis_labels[key])
+            label.setAlignment(QtCore.Qt.AlignHCenter)
+            column_layout.addWidget(label)
+
+            widget = VolumeAlphaCurveWidget(default_value=0.25)
+            widget.setSizePolicy(
+                QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            )
+            widget.setToolTip(
+                "Drag control points to sculpt opacity, double-click to add a new point."
+            )
+            widget.curveChanged.connect(lambda points, k=key: self._on_alpha_curve_changed(k, points))
+            column_layout.addWidget(widget)
+
+            curves_row.addLayout(column_layout, 1)
+            self._curve_widgets[key] = widget
+            self._curve_labels[key] = label
+
+        self._volume_item: Optional[gl.GLVolumeItem] = None
+        self._volume_scalar: Optional[np.ndarray] = None
+        self._curve_points: Dict[str, List[Tuple[float, float]]] = {}
+        self._curve_lut_x: Dict[str, np.ndarray] = {}
+        self._curve_lut_y: Dict[str, np.ndarray] = {}
+        for key, widget in self._curve_widgets.items():
+            points = widget.curve_points()
+            xs = np.array([max(0.0, min(1.0, float(x))) for x, _ in points], dtype=float)
+            ys = np.array([max(0.0, min(1.0, float(y))) for _, y in points], dtype=float)
+            self._curve_points[key] = [(float(x), float(y)) for x, y in zip(xs, ys)]
+            self._curve_lut_x[key] = xs
+            self._curve_lut_y[key] = ys
         self._alpha_scale_base: float = 101.0
 
         self._populate_colormap_choices()
-        self._populate_curve_target_choices()
         self._update_alpha_controls()
-        self._sync_curve_target_labels()
-        self._sync_curve_widget_from_state()
 
         self.view = gl.GLViewWidget()
         self.view.setSizePolicy(
@@ -2934,10 +2943,11 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             self._colormap_name = str(name)
         else:
             self._colormap_name = "viridis"
-        try:
-            self.alpha_widget.set_colormap(self._colormap_name)
-        except Exception:
-            pass
+        for widget in self._curve_widgets.values():
+            try:
+                widget.set_colormap(self._colormap_name)
+            except Exception:
+                continue
         self._sync_colormap_combo()
         self._update_volume_visual()
 
@@ -3098,47 +3108,9 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
 
     def _update_alpha_controls(self):
         has_data = self._data is not None
-        self.alpha_widget.setEnabled(has_data)
+        for widget in self._curve_widgets.values():
+            widget.setEnabled(has_data)
         self.btn_reset_curve.setEnabled(has_data)
-        if hasattr(self, "cmb_curve_target"):
-            self.cmb_curve_target.setEnabled(has_data)
-
-    def _populate_curve_target_choices(self):
-        if not hasattr(self, "cmb_curve_target"):
-            return
-        self.cmb_curve_target.blockSignals(True)
-        self.cmb_curve_target.clear()
-        labels = {
-            "value": "Value",
-            "slice": "Slice axis",
-            "row": "Row axis",
-            "column": "Column axis",
-        }
-        for key in self._curve_keys:
-            text = labels.get(key, key.title())
-            self.cmb_curve_target.addItem(text, key)
-        self.cmb_curve_target.blockSignals(False)
-        self.cmb_curve_target.setCurrentIndex(0)
-
-    def _sync_curve_target_labels(self):
-        if not hasattr(self, "cmb_curve_target"):
-            return
-        block = self.cmb_curve_target.blockSignals(True)
-        for index in range(self.cmb_curve_target.count()):
-            key = self.cmb_curve_target.itemData(index)
-            label = self._axis_labels.get(str(key), None)
-            if label:
-                if str(key) == "value":
-                    text = label
-                else:
-                    pretty = str(label)
-                    lower = pretty.lower()
-                    if lower.endswith("axis"):
-                        text = pretty
-                    else:
-                        text = f"{pretty} axis"
-                self.cmb_curve_target.setItemText(index, text)
-        self.cmb_curve_target.blockSignals(block)
 
     def set_axis_labels(self, slice_label: str, row_label: str, column_label: str):
         self._axis_labels.update(
@@ -3149,31 +3121,18 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
                 "value": "Value",
             }
         )
-        self._sync_curve_target_labels()
-
-    def _on_curve_target_changed(self):
-        if not hasattr(self, "cmb_curve_target"):
-            return
-        key = self.cmb_curve_target.currentData()
-        if key not in self._curve_keys:
-            key = "value"
-        if key == self._active_curve:
-            self._sync_curve_widget_from_state()
-            return
-        self._active_curve = key
-        self._sync_curve_widget_from_state()
-
-    def _sync_curve_widget_from_state(self):
-        key = self._active_curve
-        points = self._curve_points.get(key)
-        if not points:
-            default_points = [(float(p), float(p)) for p in getattr(self.alpha_widget, "_default_positions", [0.0, 1.0])]
-            points = default_points
-        self._updating_curve_widget = True
-        try:
-            self.alpha_widget.set_curve(points)
-        finally:
-            self._updating_curve_widget = False
+        for key, label_widget in self._curve_labels.items():
+            label = self._axis_labels.get(key, key.title())
+            if key == "value":
+                text = label
+            else:
+                pretty = str(label)
+                lower = pretty.lower()
+                if lower.endswith("axis"):
+                    text = pretty
+                else:
+                    text = f"{pretty} axis"
+            label_widget.setText(text)
 
     def _store_curve(self, key: str, points: List[Tuple[float, float]]):
         xs = np.array([max(0.0, min(1.0, float(x))) for x, _ in points], dtype=float)
@@ -3196,18 +3155,23 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         if changed:
             self._update_volume_visual()
 
-    def _on_alpha_curve_changed(self, points: List[Tuple[float, float]]):
-        if self._updating_curve_widget:
-            return
-        key = self._active_curve
+    def _on_alpha_curve_changed(self, key: str, points: List[Tuple[float, float]]):
         if key not in self._curve_keys:
             key = "value"
         if not points:
-            points = [(0.0, 0.0), (1.0, 1.0)]
+            default_value = 0.25
+            widget = self._curve_widgets.get(key)
+            if widget is not None and hasattr(widget, "_default_value"):
+                default_value = float(getattr(widget, "_default_value"))
+            default_value = max(0.0, min(1.0, default_value))
+            points = [(0.0, default_value), (1.0, default_value)]
         self._store_curve(key, points)
 
     def _on_reset_curve(self):
-        self.alpha_widget.reset_curve()
+        for widget in self._curve_widgets.values():
+            widget.reset_curve()
+        for key, widget in self._curve_widgets.items():
+            self._store_curve(key, widget.curve_points())
 
     def _sample_alpha_curve(self, key: str, values: np.ndarray) -> np.ndarray:
         clipped = np.clip(values, 0.0, 1.0)
