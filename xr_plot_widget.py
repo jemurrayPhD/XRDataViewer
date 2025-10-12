@@ -7,6 +7,39 @@ FORCE_SOFT_RENDER = False
 if FORCE_SOFT_RENDER:
     pg.setConfigOptions(useOpenGL=False, antialias=False)
 
+class ScientificAxisItem(pg.AxisItem):
+    """Axis item that formats ticks with scientific notation and limited precision."""
+
+    def __init__(self, orientation, *, significant_figures: int = 4, **kwargs):
+        super().__init__(orientation=orientation, **kwargs)
+        self._sig_figs = max(1, int(significant_figures))
+
+    def tickStrings(self, values, scale, spacing):  # noqa: N802 (pyqtgraph API)
+        formatted = []
+        precision = max(0, self._sig_figs - 1)
+        for value in values:
+            try:
+                scaled = float(value) * float(scale)
+            except Exception:
+                formatted.append("")
+                continue
+            if not np.isfinite(scaled):
+                formatted.append("")
+                continue
+            if abs(scaled) < 1e-15:
+                formatted.append("0")
+                continue
+            formatted.append(
+                np.format_float_scientific(
+                    scaled,
+                    precision=precision,
+                    exp_digits=2,
+                    trim="k",
+                )
+            )
+        return formatted
+
+
 class MyHistogramLUT(pg.HistogramLUTItem):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -63,7 +96,11 @@ class CentralPlotWidget(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.glw = pg.GraphicsLayoutWidget()
-        self.plot = self.glw.addPlot(row=0, col=0)
+        axis_items = {
+            "bottom": ScientificAxisItem("bottom"),
+            "left": ScientificAxisItem("left"),
+        }
+        self.plot = self.glw.addPlot(row=0, col=0, axisItems=axis_items)
         self.plot.invertY(True)
         self.plot.setMenuEnabled(False)
         self.plot.setLabel("left", "Y")

@@ -13,7 +13,7 @@ import xarray as xr
 from PySide2 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 
-from xr_plot_widget import CentralPlotWidget
+from xr_plot_widget import CentralPlotWidget, ScientificAxisItem
 from xr_coords import guess_phys_coords
 from data_processing import (
     ParameterDefinition,
@@ -2379,7 +2379,11 @@ class SequentialRoiWindow(QtWidgets.QWidget):
         self.lbl_hint.setStyleSheet("color: #666;")
         layout.addWidget(self.lbl_hint)
 
-        self.profile_plot = pg.PlotWidget()
+        profile_axes = {
+            "bottom": ScientificAxisItem("bottom"),
+            "left": ScientificAxisItem("left"),
+        }
+        self.profile_plot = pg.PlotWidget(axisItems=profile_axes)
         self.profile_plot.setMinimumHeight(140)
         self.profile_plot.showGrid(x=True, y=True, alpha=0.3)
         self.profile_plot.setLabel("bottom", "Axis")
@@ -2387,7 +2391,11 @@ class SequentialRoiWindow(QtWidgets.QWidget):
         self.profile_curve = self.profile_plot.plot([], [], pen=pg.mkPen('#ffaa00', width=2))
         layout.addWidget(self.profile_plot, 1)
 
-        self.slice_plot = pg.PlotWidget()
+        slice_axes = {
+            "bottom": ScientificAxisItem("bottom"),
+            "left": ScientificAxisItem("left"),
+        }
+        self.slice_plot = pg.PlotWidget(axisItems=slice_axes)
         self.slice_plot.setMinimumHeight(160)
         self.slice_plot.showGrid(x=True, y=True, alpha=0.3)
         self.slice_plot.setLabel("bottom", "Slice coordinate")
@@ -2491,6 +2499,7 @@ class SequentialView(QtWidgets.QWidget):
         self._axis_coords: Optional[np.ndarray] = None
         self._current_processed_slice: Optional[np.ndarray] = None
         self._roi_last_shape: Optional[Tuple[int, int]] = None
+        self._roi_last_bounds: Optional[Tuple[int, int, int, int]] = None
 
         self._roi_enabled: bool = False
         self._roi_reducers = {
@@ -2648,6 +2657,10 @@ class SequentialView(QtWidgets.QWidget):
         self.roi.addScaleHandle((0, 0), (1, 1))
         self.roi.hide()
         self.roi.sigRegionChanged.connect(self._on_roi_region_changed)
+        try:
+            self.roi.sigRegionChangeFinished.connect(self._on_roi_region_changed)
+        except Exception:
+            pass
 
         self._roi_window: Optional[SequentialRoiWindow] = None
         self._roi_axis_options: List[Tuple[str, Tuple[int, ...], str, str]] = []
@@ -2782,6 +2795,7 @@ class SequentialView(QtWidgets.QWidget):
         self.lbl_roi_status.setText("ROI disabled")
         self._roi_enabled = False
         self._roi_last_slices = None
+        self._roi_last_bounds = None
         self._roi_last_shape = None
         self.viewer.set_image(np.zeros((1, 1)), autorange=True)
         self.sld_slice.blockSignals(True)
@@ -2842,6 +2856,7 @@ class SequentialView(QtWidgets.QWidget):
         self._current_processed_slice = None
         self._roi_last_shape = None
         self._roi_last_slices = None
+        self._roi_last_bounds = None
         self._roi_axis_options = []
         self._roi_axis_index = 0
         self._roi_axes_selection = (0, 1)
@@ -3229,13 +3244,7 @@ class SequentialView(QtWidgets.QWidget):
     def _current_roi_array(self) -> Optional[np.ndarray]:
         if self._current_processed_slice is None:
             return None
-        if self._roi_last_slices is not None:
-            sy, sx = self._roi_last_slices
-            try:
-                return np.asarray(self._current_processed_slice[sy, sx], float)
-            except Exception:
-                pass
-        return np.asarray(self._current_processed_slice, float)
+        return self._roi_extract_region(self._current_processed_slice)
 
     def _on_roi_toggled(self, checked: bool):
         checked = bool(checked)
@@ -3262,6 +3271,7 @@ class SequentialView(QtWidgets.QWidget):
             self.roi.hide()
             self._roi_enabled = False
             self._roi_last_slices = None
+            self._roi_last_bounds = None
             self._roi_last_shape = None
             if self._roi_window is not None:
                 try:
@@ -3275,6 +3285,7 @@ class SequentialView(QtWidgets.QWidget):
     def _reset_roi_to_image(self, shape: Optional[Tuple[int, int]] = None):
         if not self._roi_enabled:
             return
+        self._roi_last_bounds = None
         if shape is None:
             if self._current_processed_slice is None:
                 return
@@ -3299,7 +3310,7 @@ class SequentialView(QtWidgets.QWidget):
                 pass
         self._update_roi_slice_reference()
 
-    def _on_roi_region_changed(self):
+    def _on_roi_region_changed(self, *_args):
         if not self._roi_enabled:
             return
         self._update_roi_slice_reference()
@@ -3308,32 +3319,74 @@ class SequentialView(QtWidgets.QWidget):
     def _update_roi_slice_reference(self):
         if not self._roi_enabled or self._current_processed_slice is None:
             self._roi_last_slices = None
+            self._roi_last_bounds = None
             return
         img_item = getattr(self.viewer, "img_item", None)
         if img_item is None:
             self._roi_last_slices = None
+            self._roi_last_bounds = None
             return
         try:
             _, slc = self.roi.getArraySlice(self._current_processed_slice, img_item)
             if isinstance(slc, tuple) and len(slc) >= 2:
                 self._roi_last_slices = (slc[0], slc[1])
+                self._roi_last_bounds = self._normalize_roi_bounds(slc[0], slc[1])
             else:
                 self._roi_last_slices = None
+                self._roi_last_bounds = None
         except Exception:
             self._roi_last_slices = None
+            self._roi_last_bounds = None
+
+    def _normalize_roi_bounds(self, sy: slice, sx: slice) -> Optional[Tuple[int, int, int, int]]:
+        if self._current_processed_slice is None:
+            return None
+        height, width = self._current_processed_slice.shape[:2]
+
+        def _bounds(sl: slice, limit: int) -> Tuple[int, int]:
+            start = float(sl.start) if sl.start is not None else 0.0
+            stop = float(sl.stop) if sl.stop is not None else float(limit)
+            step = sl.step
+            if step is not None and step < 0:
+                start, stop = stop, start
+            a = int(np.floor(start))
+            b = int(np.ceil(stop))
+            a = max(0, min(limit, a))
+            b = max(a, min(limit, b))
+            return a, b
+
+        y0, y1 = _bounds(sy, height)
+        x0, x1 = _bounds(sx, width)
+        if y1 <= y0 or x1 <= x0:
+            return None
+        return (y0, y1, x0, x1)
+
+    def _roi_extract_region(self, data: np.ndarray) -> Optional[np.ndarray]:
+        arr = np.asarray(data, float)
+        bounds = self._roi_last_bounds
+        if bounds is None:
+            return arr
+        if arr.ndim < 2:
+            return arr
+        height, width = arr.shape[:2]
+        y0, y1, x0, x1 = bounds
+        y0 = max(0, min(height, y0))
+        y1 = max(y0, min(height, y1))
+        x0 = max(0, min(width, x0))
+        x1 = max(x0, min(width, x1))
+        if y1 <= y0 or x1 <= x0:
+            return None
+        region = arr[y0:y1, x0:x1]
+        if region.size == 0:
+            return None
+        return np.asarray(region, float)
 
     def _compute_roi_value(self, data: np.ndarray) -> float:
         reducer_entry = self._roi_reducers.get(self._roi_method_key)
         if reducer_entry is None:
             return float("nan")
         _, reducer = reducer_entry
-        roi_data = None
-        if self._roi_last_slices is not None:
-            sy, sx = self._roi_last_slices
-            try:
-                roi_data = np.asarray(data[sy, sx], float)
-            except Exception:
-                roi_data = None
+        roi_data = self._roi_extract_region(data)
         if roi_data is None:
             roi_data = np.asarray(data, float)
         axes = tuple(int(a) for a in self._roi_axes_selection) or (0, 1)
