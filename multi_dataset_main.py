@@ -15,6 +15,8 @@ import traceback
 import importlib
 import pkgutil
 import sys
+import shutil
+import subprocess
 from types import ModuleType
 
 import numpy as np
@@ -3131,6 +3133,87 @@ class InteractivePreviewWidget(QtWidgets.QWidget):
         self._plot_widget.setTitle(label)
 
 
+class VsCodeWebWidget(QtWidgets.QWidget):
+    """Optional embedded VS Code (web) workspace."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        intro = QtWidgets.QLabel(
+            "Work with a VS Code web instance for syntax highlighting and extensions. "
+            "Point the URL to an existing code-server or use the default vscode.dev site."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #555;")
+        layout.addWidget(intro)
+
+        controls = QtWidgets.QHBoxLayout()
+        controls.addWidget(QtWidgets.QLabel("URL:"))
+        self.url_edit = QtWidgets.QLineEdit("https://vscode.dev/")
+        self.url_edit.setPlaceholderText("https://vscode.dev/ or local code-server URL")
+        controls.addWidget(self.url_edit, 1)
+        self.btn_open = QtWidgets.QPushButton("Open")
+        controls.addWidget(self.btn_open)
+        self.btn_external = QtWidgets.QPushButton("Launch desktop VS Code")
+        controls.addWidget(self.btn_external)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self._code_path = shutil.which("code")
+        if not self._code_path:
+            self.btn_external.setEnabled(False)
+            self.btn_external.setToolTip("VS Code command-line launcher not detected in PATH.")
+
+        if QtWebEngineWidgets is not None:
+            self.web_view: Optional[QtWidgets.QWidget] = QtWebEngineWidgets.QWebEngineView()
+            self.web_view.setUrl(QtCore.QUrl(self.url_edit.text()))
+            layout.addWidget(self.web_view, 1)
+        else:
+            self.web_view = None
+            placeholder = QtWidgets.QTextBrowser()
+            placeholder.setReadOnly(True)
+            placeholder.setOpenExternalLinks(True)
+            placeholder.setHtml(
+                "<h2>VS Code web view unavailable</h2>"
+                "<p>QtWebEngineWidgets is not installed. Open VS Code separately using the "
+                "'Launch desktop VS Code' button or start code-server and visit it in your browser.</p>"
+            )
+            layout.addWidget(placeholder, 1)
+            self.btn_open.setEnabled(False)
+
+        self.btn_open.clicked.connect(self._load_requested_url)
+        self.btn_external.clicked.connect(self._launch_desktop_code)
+
+    def _load_requested_url(self):
+        if self.web_view is None:
+            return
+        url = QtCore.QUrl.fromUserInput(self.url_edit.text().strip())
+        if not url.isValid():
+            QtWidgets.QMessageBox.warning(self, "Invalid URL", "Please enter a valid URL to load.")
+            return
+        self.web_view.setUrl(url)
+
+    def _launch_desktop_code(self):
+        if not self._code_path:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VS Code unavailable",
+                "The 'code' launcher was not found in PATH. Install Visual Studio Code or add it to PATH.",
+            )
+            return
+        args = [self._code_path]
+        url = self.url_edit.text().strip()
+        if url and url.startswith("http"):
+            args.extend(["--new-window", url])
+        try:
+            subprocess.Popen(args)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Launch failed", str(exc))
+
+
 class InteractiveConsoleWidget(QtWidgets.QWidget):
     """Embeddable interactive Python console with preview support."""
 
@@ -3151,8 +3234,8 @@ class InteractiveConsoleWidget(QtWidgets.QWidget):
 
         console_panel = QtWidgets.QWidget()
         console_layout = QtWidgets.QVBoxLayout(console_panel)
-        console_layout.setContentsMargins(4, 4, 4, 4)
-        console_layout.setSpacing(4)
+        console_layout.setContentsMargins(8, 8, 8, 8)
+        console_layout.setSpacing(6)
 
         instructions = QtWidgets.QLabel(
             "Execute Python code below. Use RegisterDataset(ds, label=...), "
@@ -3160,17 +3243,64 @@ class InteractiveConsoleWidget(QtWidgets.QWidget):
             "to work with data and libraries from this Python environment."
         )
         instructions.setWordWrap(True)
-        instructions.setStyleSheet("color: #666;")
+        instructions.setStyleSheet("color: #606060; font-size: 12px;")
         console_layout.addWidget(instructions)
+
+        console_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        console_splitter.setChildrenCollapsible(False)
+        console_layout.addWidget(console_splitter, 1)
+
+        output_container = QtWidgets.QWidget()
+        output_layout = QtWidgets.QVBoxLayout(output_container)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        output_layout.setSpacing(4)
+
+        output_label = QtWidgets.QLabel("Console output")
+        output_label.setStyleSheet("color: #888; font-weight: 600;")
+        output_layout.addWidget(output_label)
 
         self.output_view = QtWidgets.QTextEdit()
         self.output_view.setReadOnly(True)
         self.output_view.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
-        console_layout.addWidget(self.output_view, 2)
+        output_layout.addWidget(self.output_view)
+
+        console_splitter.addWidget(output_container)
+
+        history_container = QtWidgets.QWidget()
+        history_layout = QtWidgets.QVBoxLayout(history_container)
+        history_layout.setContentsMargins(0, 0, 0, 0)
+        history_layout.setSpacing(4)
+
+        history_label = QtWidgets.QLabel("Command history (double-click to reuse)")
+        history_label.setStyleSheet("color: #888; font-weight: 600;")
+        history_layout.addWidget(history_label)
+
+        self.history_view = QtWidgets.QListWidget()
+        self.history_view.setAlternatingRowColors(True)
+        self.history_view.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.history_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.history_view.customContextMenuRequested.connect(self._on_history_menu)
+        self.history_view.itemActivated.connect(self._apply_history_item)
+        history_layout.addWidget(self.history_view)
+
+        console_splitter.addWidget(history_container)
+        console_splitter.setStretchFactor(0, 3)
+        console_splitter.setStretchFactor(1, 1)
+
+        input_container = QtWidgets.QWidget()
+        input_layout = QtWidgets.QVBoxLayout(input_container)
+        input_layout.setContentsMargins(0, 0, 0, 0)
+        input_layout.setSpacing(4)
+
+        input_label = QtWidgets.QLabel("Input (Ctrl+Enter to run, Ctrl+↑/↓ to browse history)")
+        input_label.setStyleSheet("color: #888; font-weight: 600;")
+        input_layout.addWidget(input_label)
 
         self.input_edit = QtWidgets.QPlainTextEdit()
         self.input_edit.setPlaceholderText("Type Python code here and click Run (Ctrl+Enter).")
-        console_layout.addWidget(self.input_edit, 1)
+        input_layout.addWidget(self.input_edit)
+
+        console_layout.addWidget(input_container, 0)
 
         button_row = QtWidgets.QHBoxLayout()
         self.btn_run = QtWidgets.QPushButton("Run")
@@ -3197,6 +3327,25 @@ class InteractiveConsoleWidget(QtWidgets.QWidget):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
 
+        base_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+        base_font.setPointSize(11)
+        self.output_view.setFont(base_font)
+        self.input_edit.setFont(base_font)
+        self.history_view.setFont(base_font)
+        self.output_view.setStyleSheet(
+            "QTextEdit { background-color: #1e1e1e; color: #dcdcdc; border: 1px solid #3c3c3c;"
+            " border-radius: 4px; padding: 4px; }"
+        )
+        self.input_edit.setStyleSheet(
+            "QPlainTextEdit { background-color: #252526; color: #f3f3f3; border: 1px solid #3c3c3c;"
+            " border-radius: 4px; padding: 4px; }"
+        )
+        self.history_view.setStyleSheet(
+            "QListWidget { background-color: #202124; color: #f1f1f1; border: 1px solid #3c3c3c;"
+            " border-radius: 4px; padding: 2px; }"
+            "QListWidget::item { padding: 4px; }"
+        )
+
         self._globals = {"__builtins__": __builtins__, "__name__": "__console__", "__package__": None}
         self._locals = {
             "np": np,
@@ -3207,11 +3356,21 @@ class InteractiveConsoleWidget(QtWidgets.QWidget):
             "ImportModule": self._cmd_import_module,
         }
         self._module_name_cache: Optional[List[str]] = None
+        self._history: List[str] = []
+        self._history_index: int = -1
 
     def eventFilter(self, obj, event):
         if obj is self.input_edit and event.type() == QtCore.QEvent.KeyPress:
-            if event.key() in (QtCore.Qt.Key_Enter, QtCore.Qt.Key_Return) and event.modifiers() & QtCore.Qt.ControlModifier:
+            key = event.key()
+            modifiers = event.modifiers()
+            if key in (QtCore.Qt.Key_Enter, QtCore.Qt.Key_Return) and modifiers & QtCore.Qt.ControlModifier:
                 self._execute_code()
+                return True
+            if key == QtCore.Qt.Key_Up and modifiers & QtCore.Qt.ControlModifier:
+                self._history_step(-1)
+                return True
+            if key == QtCore.Qt.Key_Down and modifiers & QtCore.Qt.ControlModifier:
+                self._history_step(1)
                 return True
         return super().eventFilter(obj, event)
 
@@ -3305,6 +3464,7 @@ class InteractiveConsoleWidget(QtWidgets.QWidget):
             prefix = ">>> " if idx == 0 else "... "
             self._append_output(prefix + line + "\n", role="input")
 
+        self._push_history(code_text)
         stdout_buffer = io.StringIO()
         stderr_buffer = io.StringIO()
         try:
@@ -3322,6 +3482,63 @@ class InteractiveConsoleWidget(QtWidgets.QWidget):
             self.messageEmitted.emit("Execution finished with errors.")
         elif not out_text.strip():
             self.messageEmitted.emit("Execution finished.")
+
+    def _push_history(self, code_text: str):
+        text = code_text.rstrip()
+        if not text:
+            return
+        if self._history and self._history[-1] == text:
+            self._history_index = len(self._history)
+            return
+        self._history.append(text)
+        self._history_index = len(self._history)
+        item = QtWidgets.QListWidgetItem(text.splitlines()[0][:120])
+        item.setToolTip(text)
+        item.setData(QtCore.Qt.UserRole, text)
+        self.history_view.addItem(item)
+        self.history_view.scrollToBottom()
+
+    def _history_step(self, delta: int):
+        if not self._history:
+            return
+        self._history_index = max(0, min(len(self._history), self._history_index + delta))
+        if self._history_index == len(self._history):
+            self.input_edit.clear()
+            return
+        self.input_edit.setPlainText(self._history[self._history_index])
+        cursor = self.input_edit.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.End)
+        self.input_edit.setTextCursor(cursor)
+
+    def _apply_history_item(self, item: QtWidgets.QListWidgetItem):
+        if not item:
+            return
+        text = item.data(QtCore.Qt.UserRole) or ""
+        self.input_edit.setPlainText(str(text))
+        self.input_edit.setFocus()
+        cursor = self.input_edit.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.End)
+        self.input_edit.setTextCursor(cursor)
+
+    def _on_history_menu(self, pos: QtCore.QPoint):
+        item = self.history_view.itemAt(pos)
+        menu = QtWidgets.QMenu(self.history_view)
+        if item:
+            act_send = menu.addAction("Send to input")
+            act_copy = menu.addAction("Copy command text")
+        act_clear = menu.addAction("Clear history")
+        chosen = menu.exec_(self.history_view.mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen == act_send and item:
+            self._apply_history_item(item)
+        elif chosen == act_copy and item:
+            text = item.data(QtCore.Qt.UserRole) or ""
+            QtWidgets.QApplication.clipboard().setText(str(text))
+        elif chosen == act_clear:
+            self._history.clear()
+            self._history_index = -1
+            self.history_view.clear()
 
     def _cmd_register_dataset(self, dataset: xr.Dataset, label: Optional[str] = None) -> str:
         if not isinstance(dataset, xr.Dataset):
@@ -3385,12 +3602,16 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         lbl_mode = QtWidgets.QLabel("Environment:")
         mode_row.addWidget(lbl_mode)
         self.cmb_mode = QtWidgets.QComboBox()
-        self._jupyter_available = QtWebEngineWidgets is not None
-        if self._jupyter_available:
+        self._web_engine_available = QtWebEngineWidgets is not None
+        if self._web_engine_available:
             self.cmb_mode.addItem("JupyterLab browser", "jupyter")
         else:
             self.cmb_mode.addItem("JupyterLab placeholder", "jupyter")
         self.cmb_mode.addItem("Python console", "python")
+        if self._web_engine_available:
+            self.cmb_mode.addItem("VS Code (web)", "vscode")
+        else:
+            self.cmb_mode.addItem("VS Code placeholder", "vscode")
         mode_row.addWidget(self.cmb_mode)
         mode_row.addStretch(1)
         layout.addLayout(mode_row)
@@ -3423,6 +3644,9 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self.console_widget.messageEmitted.connect(self._set_status)
         self.stack.addWidget(self.console_widget)
 
+        self.vscode_widget = VsCodeWebWidget()
+        self.stack.addWidget(self.vscode_widget)
+
         layout.addWidget(self.stack, 1)
 
         controls = QtWidgets.QHBoxLayout()
@@ -3437,7 +3661,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self.lbl_status.setWordWrap(True)
         layout.addWidget(self.lbl_status)
 
-        if not self._jupyter_available:
+        if not self._web_engine_available:
             self.cmb_mode.setCurrentIndex(1)
             self.stack.setCurrentIndex(1)
         else:
@@ -3454,6 +3678,14 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
                 "Python console ready. Use RegisterDataset(...) or RegisterDataArray(...) to export results."
             )
             self.console_widget.input_edit.setFocus()
+        elif mode == "vscode":
+            self.stack.setCurrentIndex(2)
+            if QtWebEngineWidgets is None:
+                self._set_status(
+                    "VS Code web view unavailable. Launch VS Code separately or install QtWebEngineWidgets."
+                )
+            else:
+                self._set_status("VS Code web workspace loaded.")
         else:
             self.stack.setCurrentIndex(0)
             self._set_status("Embedded JupyterLab placeholder shown.")
