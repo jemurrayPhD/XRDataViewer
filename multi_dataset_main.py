@@ -2450,11 +2450,17 @@ class SequentialRoiWindow(QtWidgets.QWidget):
 
         self._updating = False
 
-    def set_axis_options(self, options: List[Tuple[str, Tuple[int, ...], str, str]], current_index: int):
+    def set_axis_options(
+        self, options: List[Tuple[str, Tuple[int, ...], str, str, Optional[int]]], current_index: int
+    ):
         self._updating = True
         self.cmb_axes.clear()
-        for label, axes, _, _ in options:
-            self.cmb_axes.addItem(label, axes)
+        for entry in options:
+            if not entry:
+                continue
+            label = entry[0]
+            axes = entry[1] if len(entry) > 1 else ()
+            self.cmb_axes.addItem(label, tuple(int(a) for a in axes))
         self.cmb_axes.setEnabled(bool(options))
         if options:
             self.cmb_axes.setCurrentIndex(max(0, min(current_index, len(options) - 1)))
@@ -2562,6 +2568,14 @@ class SequentialView(QtWidgets.QWidget):
         }
         self._roi_method_key: str = "mean"
         self._roi_last_slices: Optional[Tuple[slice, slice]] = None
+        self._roi_axis_options: List[Tuple[str, Tuple[int, ...], str, str, Optional[int]]] = []
+        self._roi_axes_selection: Tuple[int, ...] = (0, 1)
+        self._roi_axis_index: int = 0
+        self._current_slice_coords: Dict[str, np.ndarray] = {}
+        self._row_coord_1d: Optional[np.ndarray] = None
+        self._row_coord_2d: Optional[np.ndarray] = None
+        self._col_coord_1d: Optional[np.ndarray] = None
+        self._col_coord_2d: Optional[np.ndarray] = None
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
@@ -2710,9 +2724,6 @@ class SequentialView(QtWidgets.QWidget):
             pass
 
         self._roi_window: Optional[SequentialRoiWindow] = None
-        self._roi_axis_options: List[Tuple[str, Tuple[int, ...], str, str]] = []
-        self._roi_axes_selection: Tuple[int, ...] = (0, 1)
-        self._roi_axis_index: int = 0
 
     # ---------- dataset helpers ----------
     def _populate_colormap_choices(self):
@@ -2844,6 +2855,10 @@ class SequentialView(QtWidgets.QWidget):
         self._roi_last_slices = None
         self._roi_last_bounds = None
         self._roi_last_shape = None
+        self._cache_slice_coords({})
+        self._roi_axis_options = []
+        self._roi_axes_selection = (0, 1)
+        self._roi_axis_index = 0
         self.viewer.set_image(np.zeros((1, 1)), autorange=True)
         self.sld_slice.blockSignals(True)
         self.spin_slice.blockSignals(True)
@@ -2999,6 +3014,82 @@ class SequentialView(QtWidgets.QWidget):
         except Exception:
             self._axis_coords = None
 
+    def _axis_display_name(self, axis: Optional[str]) -> str:
+        if not axis:
+            return "axis"
+        text = str(axis).replace("_", " ").strip()
+        return text or "axis"
+
+    def _cache_slice_coords(self, coords: Optional[Dict[str, np.ndarray]]):
+        cache = dict(coords or {})
+        self._current_slice_coords = cache
+
+        def _extract(key: str, allowed_ndim: Tuple[int, ...]) -> Optional[np.ndarray]:
+            arr = cache.get(key)
+            if arr is None:
+                return None
+            try:
+                arr = np.asarray(arr, float)
+            except Exception:
+                return None
+            if arr.size == 0:
+                return None
+            if allowed_ndim and arr.ndim not in allowed_ndim:
+                return None
+            return arr
+
+        self._row_coord_1d = (
+            _extract("row_values", (1,))
+            or _extract("y", (1,))
+            or _extract(self._row_axis or "", (1,))
+        )
+        self._col_coord_1d = (
+            _extract("col_values", (1,))
+            or _extract("x", (1,))
+            or _extract(self._col_axis or "", (1,))
+        )
+        self._row_coord_2d = _extract("row_grid", (2,)) or _extract("Y", (2,))
+        self._col_coord_2d = _extract("col_grid", (2,)) or _extract("X", (2,))
+
+    def _column_coordinates(self, start: int, stop: int) -> Optional[np.ndarray]:
+        if self._col_coord_1d is not None and self._col_coord_1d.size >= stop:
+            return np.asarray(self._col_coord_1d[start:stop], float)
+        if self._col_coord_2d is not None and self._col_coord_2d.shape[1] >= stop:
+            subset = self._col_coord_2d[:, start:stop]
+            with np.errstate(all="ignore"):
+                vals = np.nanmean(subset, axis=0)
+            return np.asarray(vals, float)
+        return None
+
+    def _row_coordinates(self, start: int, stop: int) -> Optional[np.ndarray]:
+        if self._row_coord_1d is not None and self._row_coord_1d.size >= stop:
+            return np.asarray(self._row_coord_1d[start:stop], float)
+        if self._row_coord_2d is not None and self._row_coord_2d.shape[0] >= stop:
+            subset = self._row_coord_2d[start:stop, :]
+            with np.errstate(all="ignore"):
+                vals = np.nanmean(subset, axis=1)
+            return np.asarray(vals, float)
+        return None
+
+    def _roi_profile_coordinates(self, profile_axis: int, length: int) -> List[float]:
+        if length <= 0:
+            return []
+        bounds = self._roi_last_bounds or self._roi_bounds_from_geometry()
+        if bounds is None:
+            start = 0
+        else:
+            y0, y1, x0, x1 = bounds
+            start = x0 if profile_axis == 1 else y0
+        stop = start + length
+        coords = (
+            self._column_coordinates(start, stop)
+            if profile_axis == 1
+            else self._row_coordinates(start, stop)
+        )
+        if coords is None or coords.size != length:
+            coords = np.arange(start, start + length, dtype=float)
+        return [float(v) if np.isfinite(v) else np.nan for v in np.asarray(coords, float)]
+
     def _rebuild_fixed_indices(self):
         self._clear_fixed_dim_widgets()
         if self._current_da is None:
@@ -3109,6 +3200,26 @@ class SequentialView(QtWidgets.QWidget):
             return None, {}
         data = np.asarray(slice_da.values, float)
         coords = guess_phys_coords(slice_da)
+        try:
+            row_coord = slice_da.coords.get(self._row_axis)
+            if row_coord is not None:
+                values = np.asarray(row_coord.values)
+                if values.ndim == 1:
+                    coords["row_values"] = np.asarray(values, float)
+                elif values.ndim >= 2:
+                    coords["row_grid"] = np.asarray(values, float)
+        except Exception:
+            pass
+        try:
+            col_coord = slice_da.coords.get(self._col_axis)
+            if col_coord is not None:
+                values = np.asarray(col_coord.values)
+                if values.ndim == 1:
+                    coords["col_values"] = np.asarray(values, float)
+                elif values.ndim >= 2:
+                    coords["col_grid"] = np.asarray(values, float)
+        except Exception:
+            pass
         return data, coords
 
     def _apply_processing(self, data: np.ndarray) -> np.ndarray:
@@ -3131,6 +3242,7 @@ class SequentialView(QtWidgets.QWidget):
         data, coords = self._extract_slice()
         if data is None:
             self._current_processed_slice = None
+            self._cache_slice_coords({})
             self.viewer.set_image(np.zeros((1, 1)), autorange=True)
             self._roi_last_shape = None
             if self._roi_enabled:
@@ -3144,6 +3256,7 @@ class SequentialView(QtWidgets.QWidget):
             self._processing_params = {}
             processed = np.asarray(data, float)
         self._current_processed_slice = np.asarray(processed, float)
+        self._cache_slice_coords(coords)
         shape = self._current_processed_slice.shape
         if self._roi_enabled and shape != self._roi_last_shape:
             self._reset_roi_to_image(shape)
@@ -3156,6 +3269,15 @@ class SequentialView(QtWidgets.QWidget):
             self.viewer.set_image(processed, autorange=autorange)
         self.cmb_colormap.setEnabled(True)
         self._apply_selected_colormap()
+        if autorange:
+            try:
+                self.viewer.autoscale_levels()
+            except Exception:
+                pass
+            try:
+                self.viewer.auto_view_range()
+            except Exception:
+                pass
         self._update_slice_label()
         if self._roi_enabled:
             self._update_roi_slice_reference()
@@ -3202,17 +3324,18 @@ class SequentialView(QtWidgets.QWidget):
             self._on_roi_toggled(False)
 
     def _update_roi_axis_options(self):
-        options: List[Tuple[str, Tuple[int, ...], str, str]] = []
+        options: List[Tuple[str, Tuple[int, ...], str, str, Optional[int]]] = []
         if self._row_axis and self._col_axis:
-            row_label = self._row_axis
-            col_label = self._col_axis
-            slice_label = self._slice_axis or "slice axis"
+            row_label = self._axis_display_name(self._row_axis)
+            col_label = self._axis_display_name(self._col_axis)
+            slice_label = self._axis_display_name(self._slice_axis)
             options.append(
                 (
-                    f"Reduce {row_label} & {col_label}",
+                    f"Reduce {row_label} & {col_label} → curve along {slice_label}",
                     (0, 1),
                     f"{row_label} & {col_label}",
                     slice_label,
+                    None,
                 )
             )
             options.append(
@@ -3221,6 +3344,7 @@ class SequentialView(QtWidgets.QWidget):
                     (0,),
                     row_label,
                     col_label,
+                    1,
                 )
             )
             options.append(
@@ -3229,6 +3353,7 @@ class SequentialView(QtWidgets.QWidget):
                     (1,),
                     col_label,
                     row_label,
+                    0,
                 )
             )
         self._roi_axis_options = options
@@ -3256,7 +3381,7 @@ class SequentialView(QtWidgets.QWidget):
         if self._roi_enabled:
             self._update_roi_curve()
 
-    def _current_roi_option(self) -> Optional[Tuple[str, Tuple[int, ...], str, str]]:
+    def _current_roi_option(self) -> Optional[Tuple[str, Tuple[int, ...], str, str, Optional[int]]]:
         if not self._roi_axis_options:
             return None
         idx = max(0, min(self._roi_axis_index, len(self._roi_axis_options) - 1))
@@ -3276,14 +3401,19 @@ class SequentialView(QtWidgets.QWidget):
         if option is None:
             self._roi_window.set_hint("")
             return
-        _, axes, collapsed, remaining = option
+        axes = option[1] if len(option) > 1 else ()
+        collapsed = option[2] if len(option) > 2 else "region"
+        remaining = option[3] if len(option) > 3 else ""
+        axes = tuple(int(a) for a in axes)
         if set(axes) == {0, 1}:
-            slice_label = self._slice_axis or "slice axis"
+            slice_label = remaining or self._axis_display_name(self._slice_axis)
             hint = f"Collapsing {collapsed} to track statistics along {slice_label}."
         elif axes == (0,):
-            hint = f"Collapsing {collapsed} to profile across {remaining} for the active slice."
+            target = remaining or self._axis_display_name(self._col_axis)
+            hint = f"Collapsing {collapsed} to profile across {target} for the active slice."
         elif axes == (1,):
-            hint = f"Collapsing {collapsed} to profile across {remaining} for the active slice."
+            target = remaining or self._axis_display_name(self._row_axis)
+            hint = f"Collapsing {collapsed} to profile across {target} for the active slice."
         else:
             hint = ""
         self._roi_window.set_hint(hint)
@@ -3539,7 +3669,7 @@ class SequentialView(QtWidgets.QWidget):
             else:
                 xs.append(float(idx))
         name = self._roi_reducers.get(self._roi_method_key, ("ROI statistic",))[0]
-        axis_label = self._slice_axis or "Slice"
+        axis_label = self._axis_display_name(self._slice_axis)
         if self._roi_window is not None:
             self._roi_window.update_slice_curve(xs, values, axis_label, name)
             self._update_roi_profile_plot()
@@ -3552,8 +3682,11 @@ class SequentialView(QtWidgets.QWidget):
         if option is None:
             self._roi_window.update_profile([], [], "", "", False)
             return
-        _, axes, _collapsed, remaining = option
-        if set(axes) == {0, 1}:
+        axes = option[1] if len(option) > 1 else ()
+        remaining = option[3] if len(option) > 3 else ""
+        profile_axis = option[4] if len(option) > 4 else None
+        axes = tuple(int(a) for a in axes)
+        if set(axes) == {0, 1} or profile_axis is None:
             self._roi_window.update_profile([], [], "", "", False)
             return
         data = self._current_roi_array()
@@ -3574,7 +3707,12 @@ class SequentialView(QtWidgets.QWidget):
             prof_arr = np.asarray(prof_arr).ravel()
         xs = list(range(int(prof_arr.size)))
         ys = [float(val) if np.isfinite(val) else np.nan for val in prof_arr]
-        xlabel = remaining or (self._col_axis if axis == 0 else self._row_axis) or "Index"
+        coords = self._roi_profile_coordinates(int(profile_axis), len(xs))
+        if len(coords) == len(xs):
+            xs = coords
+        xlabel = remaining or (
+            self._axis_display_name(self._col_axis) if profile_axis == 1 else self._axis_display_name(self._row_axis)
+        )
         ylabel = self._roi_reducers.get(self._roi_method_key, ("Value",))[0]
         self._roi_window.update_profile(xs, ys, xlabel, ylabel, True)
 
@@ -3582,7 +3720,8 @@ class SequentialView(QtWidgets.QWidget):
         name = self._roi_reducers.get(self._roi_method_key, ("statistic",))[0]
         option = self._current_roi_option()
         collapsed = option[2] if option else "region"
-        axis = self._slice_axis or "slice axis"
+        axis = option[3] if option and len(option) > 3 else self._axis_display_name(self._slice_axis)
+        axis = axis or self._axis_display_name(self._slice_axis)
         return f"ROI {name.lower()} of {collapsed} across {axis}"
 
     def _set_roi_method(self, key: str):

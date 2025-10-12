@@ -1,4 +1,7 @@
 from __future__ import annotations
+
+import math
+
 import numpy as np
 from PySide2 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
@@ -16,7 +19,7 @@ class ScientificAxisItem(pg.AxisItem):
 
     def tickStrings(self, values, scale, spacing):  # noqa: N802 (pyqtgraph API)
         formatted = []
-        precision = max(0, self._sig_figs - 1)
+        sci_precision = max(0, self._sig_figs - 1)
         for value in values:
             try:
                 scaled = float(value) * float(scale)
@@ -29,14 +32,29 @@ class ScientificAxisItem(pg.AxisItem):
             if abs(scaled) < 1e-15:
                 formatted.append("0")
                 continue
-            formatted.append(
-                np.format_float_scientific(
-                    scaled,
-                    precision=precision,
-                    exp_digits=2,
-                    trim="k",
+            abs_scaled = abs(scaled)
+            use_scientific = abs_scaled >= 1e3 or (abs_scaled > 0 and abs_scaled < 1e-3)
+            if use_scientific:
+                formatted.append(
+                    np.format_float_scientific(
+                        scaled,
+                        precision=sci_precision,
+                        exp_digits=2,
+                        trim="k",
+                    )
                 )
-            )
+                continue
+            digits = max(1, self._sig_figs)
+            text = format(scaled, f".{digits}g")
+            if "e" in text or "E" in text:
+                try:
+                    decimals = max(0, digits - int(math.floor(math.log10(abs_scaled))) - 1)
+                except ValueError:
+                    decimals = digits
+                text = format(scaled, f".{decimals}f")
+            if "." in text:
+                text = text.rstrip("0").rstrip(".")
+            formatted.append(text)
         return formatted
 
 
