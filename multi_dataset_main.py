@@ -2662,7 +2662,11 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         hi = max(self.spin_min.value(), self.spin_max.value())
         alpha_mask = ((values >= lo) & (values <= hi)).astype(float)
         lut[:, 3] = (alpha_mask * 255).astype(np.uint8)
-        self._volume_item.setLookupTable(lut)
+        # GLVolumeItem exposes color mapping through the "lut" argument on
+        # setData rather than a dedicated setter. Supplying only the lookup
+        # table keeps the cached volume data intact while updating the
+        # transfer function in-place.
+        self._volume_item.setData(lut=lut)
         self._volume_item.setLevels((self._data_min, self._data_max))
 
     def _remove_volume(self):
