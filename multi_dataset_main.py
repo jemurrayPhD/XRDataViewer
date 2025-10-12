@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 from functools import partial
@@ -58,6 +59,43 @@ class DataSetRef(QtCore.QObject):
             return DataSetRef(Path(data["path"]))
         except Exception:
             return None
+
+
+def _nan_aware_reducer(func):
+    def wrapped(arr, axis=None):
+        data = np.asarray(arr, float)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            result = func(data, axis=axis)
+        if axis is None:
+            if isinstance(result, np.ndarray) and result.shape == ():
+                return result.item()
+            return result
+        try:
+            axes = axis
+            if axes is None:
+                return result
+            if isinstance(axes, (list, tuple, set)):
+                axes = tuple(int(a) for a in axes)
+            else:
+                axes = (int(axes),)
+            ndim = data.ndim
+            normalized = []
+            for ax in axes:
+                if ax < 0:
+                    normalized.append((ax + ndim) % ndim)
+                else:
+                    normalized.append(ax)
+            mask = np.isnan(data)
+            for ax in sorted(normalized, reverse=True):
+                mask = np.all(mask, axis=ax)
+            if isinstance(result, np.ndarray) and np.any(mask):
+                result = np.array(result, dtype=float, copy=True)
+                result[mask] = np.nan
+        except Exception:
+            pass
+        return result
+
 
     def load(self) -> xr.Dataset:
         return open_dataset(self.path)
@@ -328,12 +366,17 @@ class PipelineEditorDialog(QtWidgets.QDialog):
         ]
         self._roi_axis_index: int = 0
         self._roi_reducers = {
-            "mean": ("Mean", lambda arr, axis: np.nanmean(arr, axis=axis)),
-            "median": ("Median", lambda arr, axis: np.nanmedian(arr, axis=axis)),
-            "min": ("Minimum", lambda arr, axis: np.nanmin(arr, axis=axis)),
-            "max": ("Maximum", lambda arr, axis: np.nanmax(arr, axis=axis)),
-            "std": ("Std. dev", lambda arr, axis: np.nanstd(arr, axis=axis)),
-            "ptp": ("Peak-to-peak", lambda arr, axis: np.nanmax(arr, axis=axis) - np.nanmin(arr, axis=axis)),
+            "mean": ("Mean", _nan_aware_reducer(lambda arr, axis=None: np.nanmean(arr, axis=axis))),
+            "median": ("Median", _nan_aware_reducer(lambda arr, axis=None: np.nanmedian(arr, axis=axis))),
+            "min": ("Minimum", _nan_aware_reducer(lambda arr, axis=None: np.nanmin(arr, axis=axis))),
+            "max": ("Maximum", _nan_aware_reducer(lambda arr, axis=None: np.nanmax(arr, axis=axis))),
+            "std": ("Std. dev", _nan_aware_reducer(lambda arr, axis=None: np.nanstd(arr, axis=axis))),
+            "ptp": (
+                "Peak-to-peak",
+                _nan_aware_reducer(
+                    lambda arr, axis=None: np.nanmax(arr, axis=axis) - np.nanmin(arr, axis=axis)
+                ),
+            ),
         }
         self._roi_method_key: str = "mean"
 
@@ -2503,14 +2546,16 @@ class SequentialView(QtWidgets.QWidget):
 
         self._roi_enabled: bool = False
         self._roi_reducers = {
-            "mean": ("Mean", lambda arr, axis=None: np.nanmean(arr, axis=axis)),
-            "median": ("Median", lambda arr, axis=None: np.nanmedian(arr, axis=axis)),
-            "min": ("Minimum", lambda arr, axis=None: np.nanmin(arr, axis=axis)),
-            "max": ("Maximum", lambda arr, axis=None: np.nanmax(arr, axis=axis)),
-            "std": ("Std. dev", lambda arr, axis=None: np.nanstd(arr, axis=axis)),
+            "mean": ("Mean", _nan_aware_reducer(lambda arr, axis=None: np.nanmean(arr, axis=axis))),
+            "median": ("Median", _nan_aware_reducer(lambda arr, axis=None: np.nanmedian(arr, axis=axis))),
+            "min": ("Minimum", _nan_aware_reducer(lambda arr, axis=None: np.nanmin(arr, axis=axis))),
+            "max": ("Maximum", _nan_aware_reducer(lambda arr, axis=None: np.nanmax(arr, axis=axis))),
+            "std": ("Std. dev", _nan_aware_reducer(lambda arr, axis=None: np.nanstd(arr, axis=axis))),
             "ptp": (
                 "Peak-to-peak",
-                lambda arr, axis=None: np.nanmax(arr, axis=axis) - np.nanmin(arr, axis=axis),
+                _nan_aware_reducer(
+                    lambda arr, axis=None: np.nanmax(arr, axis=axis) - np.nanmin(arr, axis=axis)
+                ),
             ),
         }
         self._roi_method_key: str = "mean"
