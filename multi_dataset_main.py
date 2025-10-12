@@ -2532,6 +2532,224 @@ class SequentialRoiWindow(QtWidgets.QWidget):
 # ---------------------------------------------------------------------------
 
 
+class VolumeAlphaHandle(QtWidgets.QGraphicsEllipseItem):
+    def __init__(self, owner: "VolumeAlphaCurveWidget", x_norm: float, y_norm: float):
+        radius = 5.0
+        super().__init__(-radius, -radius, radius * 2.0, radius * 2.0)
+        self._owner = owner
+        self.x_norm = float(x_norm)
+        self.y_norm = float(y_norm)
+        self.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 255)))
+        pen = QtGui.QPen(QtGui.QColor(20, 20, 20))
+        pen.setWidthF(1.2)
+        self.setPen(pen)
+        self.setZValue(20)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemSendsScenePositionChanges, True)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations, True)
+
+    def itemChange(self, change: QtWidgets.QGraphicsItem.GraphicsItemChange, value):
+        if change == QtWidgets.QGraphicsItem.ItemPositionChange:
+            if isinstance(value, QtCore.QPointF):
+                point = value
+            else:
+                point = QtCore.QPointF(value)
+            return self._owner.clamp_handle_position(self, point)
+        if change == QtWidgets.QGraphicsItem.ItemPositionHasChanged:
+            self._owner.handle_moved(self)
+        return super().itemChange(change, value)
+
+
+class VolumeAlphaCurveWidget(QtWidgets.QWidget):
+    curveChanged = QtCore.Signal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scene = QtWidgets.QGraphicsScene(self)
+        self._view = QtWidgets.QGraphicsView(self._scene)
+        self._view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._view.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._view.setRenderHints(
+            QtGui.QPainter.Antialiasing
+            | QtGui.QPainter.SmoothPixmapTransform
+            | QtGui.QPainter.TextAntialiasing
+        )
+        self._view.setDragMode(QtWidgets.QGraphicsView.NoDrag)
+        self._view.setFrameShape(QtWidgets.QFrame.NoFrame)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._view)
+
+        self._gradient_item = QtWidgets.QGraphicsPixmapItem()
+        self._gradient_item.setZValue(0)
+        self._scene.addItem(self._gradient_item)
+
+        border_pen = QtGui.QPen(QtGui.QColor(200, 200, 200))
+        border_pen.setWidthF(1.0)
+        self._border_item = self._scene.addRect(QtCore.QRectF(0, 0, 1, 1), border_pen)
+        self._border_item.setZValue(5)
+
+        curve_pen = QtGui.QPen(QtGui.QColor(245, 245, 245))
+        curve_pen.setWidthF(2.0)
+        self._curve_item = self._scene.addPath(QtGui.QPainterPath(), curve_pen)
+        self._curve_item.setZValue(15)
+
+        self._handles: List[VolumeAlphaHandle] = []
+        self._default_positions = [0.0, 0.25, 0.5, 0.75, 1.0]
+        self._margin_left = 28.0
+        self._margin_right = 16.0
+        self._margin_top = 12.0
+        self._margin_bottom = 26.0
+        self._colormap_name = "viridis"
+        self._updating = False
+
+        for x_norm in self._default_positions:
+            handle = VolumeAlphaHandle(self, x_norm, x_norm)
+            self._scene.addItem(handle)
+            self._handles.append(handle)
+
+        self.setMinimumHeight(120)
+        self._update_scene_geometry()
+        self.reset_curve()
+
+    # ----- geometry helpers -----
+    def resizeEvent(self, event: QtGui.QResizeEvent):
+        super().resizeEvent(event)
+        self._update_scene_geometry()
+
+    def _effective_rect(self) -> QtCore.QRectF:
+        rect = self._scene.sceneRect()
+        width = max(1.0, rect.width() - self._margin_left - self._margin_right)
+        height = max(1.0, rect.height() - self._margin_top - self._margin_bottom)
+        return QtCore.QRectF(
+            rect.left() + self._margin_left,
+            rect.top() + self._margin_top,
+            width,
+            height,
+        )
+
+    def _update_scene_geometry(self):
+        viewport = self._view.viewport()
+        width = max(1, viewport.width())
+        height = max(1, viewport.height())
+        self._scene.setSceneRect(0, 0, float(width), float(height))
+        eff = self._effective_rect()
+        self._update_gradient_pixmap(int(max(2.0, eff.width())), int(max(2.0, eff.height())))
+        self._gradient_item.setPos(eff.left(), eff.top())
+        self._border_item.setRect(eff)
+        self._position_handles()
+        self._update_curve_path()
+
+    # ----- colormap -----
+    def set_colormap(self, name: str):
+        if not name:
+            name = "viridis"
+        if self._colormap_name == name:
+            return
+        self._colormap_name = name
+        self._update_gradient_pixmap()
+        self._update_curve_path()
+
+    def _update_gradient_pixmap(self, width: Optional[int] = None, height: Optional[int] = None):
+        eff = self._effective_rect()
+        w = int(width or max(2.0, eff.width()))
+        h = int(height or max(2.0, eff.height()))
+        try:
+            cmap = pg.colormap.get(self._colormap_name)
+        except Exception:
+            cmap = pg.colormap.get("viridis")
+        lut = cmap.map(np.linspace(0.0, 1.0, max(2, w)), mode="byte")
+        gradient = np.repeat(lut[np.newaxis, :, :3], max(2, h), axis=0)
+        alpha = np.full((gradient.shape[0], gradient.shape[1], 1), 255, dtype=np.uint8)
+        rgba = np.concatenate((gradient, alpha), axis=2)
+        image = QtGui.QImage(
+            rgba.data, rgba.shape[1], rgba.shape[0], int(rgba.strides[0]), QtGui.QImage.Format_RGBA8888
+        )
+        image = image.copy()
+        self._gradient_item.setPixmap(QtGui.QPixmap.fromImage(image))
+
+    # ----- handle interactions -----
+    def clamp_handle_position(
+        self, handle: VolumeAlphaHandle, value: QtCore.QPointF
+    ) -> QtCore.QPointF:
+        if self._updating:
+            return value
+        eff = self._effective_rect()
+        x = eff.left() + handle.x_norm * eff.width()
+        y = float(value.y())
+        y = max(eff.top(), min(eff.bottom(), y))
+        return QtCore.QPointF(x, y)
+
+    def handle_moved(self, handle: VolumeAlphaHandle):
+        if self._updating:
+            return
+        eff = self._effective_rect()
+        if eff.height() <= 0:
+            return
+        y = handle.pos().y()
+        y_norm = (eff.bottom() - y) / eff.height()
+        y_norm = max(0.0, min(1.0, float(y_norm)))
+        handle.y_norm = y_norm
+        self._update_curve_path()
+        self.curveChanged.emit(self.curve_points())
+
+    def _position_handles(self):
+        eff = self._effective_rect()
+        if eff.height() <= 0 or eff.width() <= 0:
+            return
+        self._updating = True
+        try:
+            for handle in self._handles:
+                x = eff.left() + handle.x_norm * eff.width()
+                y = eff.bottom() - handle.y_norm * eff.height()
+                handle.setPos(QtCore.QPointF(x, y))
+        finally:
+            self._updating = False
+
+    def _update_curve_path(self):
+        if not self._handles:
+            self._curve_item.setPath(QtGui.QPainterPath())
+            return
+        path = QtGui.QPainterPath()
+        first = self._handles[0]
+        path.moveTo(first.pos())
+        for handle in self._handles[1:]:
+            path.lineTo(handle.pos())
+        self._curve_item.setPath(path)
+
+    # ----- curve helpers -----
+    def curve_points(self) -> List[Tuple[float, float]]:
+        return [(handle.x_norm, handle.y_norm) for handle in self._handles]
+
+    def set_curve(self, points: List[Tuple[float, float]]):
+        if not points:
+            return
+        mapping = {round(float(x), 4): float(y) for x, y in points}
+        self._updating = True
+        try:
+            for handle in self._handles:
+                key = round(handle.x_norm, 4)
+                if key in mapping:
+                    handle.y_norm = max(0.0, min(1.0, mapping[key]))
+        finally:
+            self._updating = False
+        self._position_handles()
+        self._update_curve_path()
+        self.curveChanged.emit(self.curve_points())
+
+    def reset_curve(self):
+        self._updating = True
+        try:
+            for handle in self._handles:
+                handle.y_norm = handle.x_norm
+        finally:
+            self._updating = False
+        self._position_handles()
+        self._update_curve_path()
+        self.curveChanged.emit(self.curve_points())
+
+
 class SequentialVolumeWindow(QtWidgets.QWidget):
     closed = QtCore.Signal()
 
@@ -2554,25 +2772,19 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
 
         controls = QtWidgets.QHBoxLayout()
         controls.setSpacing(6)
+        controls.addWidget(QtWidgets.QLabel("Opacity curve:"))
 
-        controls.addWidget(QtWidgets.QLabel("Visible range:"))
-
-        self.spin_min = QtWidgets.QDoubleSpinBox()
-        self.spin_min.setDecimals(6)
-        self.spin_min.valueChanged.connect(self._on_range_changed)
-        controls.addWidget(self.spin_min)
-
-        self.spin_max = QtWidgets.QDoubleSpinBox()
-        self.spin_max.setDecimals(6)
-        self.spin_max.valueChanged.connect(self._on_range_changed)
-        controls.addWidget(self.spin_max)
-
-        self.btn_reset_range = QtWidgets.QPushButton("Reset")
-        self.btn_reset_range.clicked.connect(self._on_reset_range)
-        controls.addWidget(self.btn_reset_range)
+        self.btn_reset_curve = QtWidgets.QPushButton("Reset curve")
+        self.btn_reset_curve.clicked.connect(self._on_reset_curve)
+        controls.addWidget(self.btn_reset_curve)
 
         controls.addStretch(1)
         layout.addLayout(controls)
+
+        self.alpha_widget = VolumeAlphaCurveWidget()
+        self.alpha_widget.curveChanged.connect(self._on_alpha_curve_changed)
+        layout.addWidget(self.alpha_widget)
+        self._on_alpha_curve_changed(self.alpha_widget.curve_points())
 
         self.view = gl.GLViewWidget()
         self.view.opts["distance"] = 400
@@ -2581,13 +2793,18 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
 
         self._volume_item: Optional[gl.GLVolumeItem] = None
         self._volume_scalar: Optional[np.ndarray] = None
+        self._alpha_curve: List[Tuple[float, float]] = [(0.0, 0.0), (1.0, 1.0)]
+        self._alpha_lut_x = np.array([0.0, 1.0], dtype=float)
+        self._alpha_lut_y = np.array([0.0, 1.0], dtype=float)
+
+        self._update_alpha_controls()
 
     # ----- public API -----
     def set_volume(self, data: Optional[np.ndarray]):
         if data is None or data.size == 0:
             self._data = None
             self._remove_volume()
-            self._update_range_controls()
+            self._update_alpha_controls()
             return
         arr = np.asarray(data, float)
         finite = np.isfinite(arr)
@@ -2605,7 +2822,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             self._data_max = max_val
         self._data = arr.astype(np.float32, copy=False)
         self._volume_scalar = self._prepare_volume_array(self._data)
-        self._update_range_controls(reset=True)
+        self._update_alpha_controls()
         self._ensure_volume_item()
         self._update_volume_visual()
 
@@ -2614,13 +2831,17 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             self._colormap_name = str(name)
         else:
             self._colormap_name = "viridis"
+        try:
+            self.alpha_widget.set_colormap(self._colormap_name)
+        except Exception:
+            pass
         self._update_volume_visual()
 
     def clear_volume(self):
         self._data = None
         self._volume_scalar = None
         self._remove_volume()
-        self._update_range_controls()
+        self._update_alpha_controls()
 
     # ----- helpers -----
     def _ensure_volume_item(self):
@@ -2669,11 +2890,11 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         norm = (scalar - data_min) / scale
         norm = np.clip(norm, 0.0, 1.0)
         rgba = cmap.map(norm.reshape(-1), mode="byte").reshape(scalar.shape + (4,))
-        lo = min(self.spin_min.value(), self.spin_max.value())
-        hi = max(self.spin_min.value(), self.spin_max.value())
-        mask = (scalar >= lo) & (scalar <= hi)
-        alpha = rgba[..., 3]
-        alpha = np.where(mask, alpha, 0)
+        if self._alpha_lut_x.size < 2:
+            alpha_norm = norm
+        else:
+            alpha_norm = np.interp(norm, self._alpha_lut_x, self._alpha_lut_y)
+        alpha = np.clip(alpha_norm * 255.0, 0.0, 255.0)
         rgba = rgba.copy()
         rgba[..., 3] = alpha.astype(np.uint8)
         return np.ascontiguousarray(rgba, dtype=np.ubyte)
@@ -2702,45 +2923,26 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             pass
         self._volume_item = None
 
-    def _update_range_controls(self, *, reset: bool = False):
-        block_min = self.spin_min.blockSignals(True)
-        block_max = self.spin_max.blockSignals(True)
-        try:
-            if self._data is None:
-                self.spin_min.setEnabled(False)
-                self.spin_max.setEnabled(False)
-                self.btn_reset_range.setEnabled(False)
-                self.spin_min.setValue(0.0)
-                self.spin_max.setValue(0.0)
-            else:
-                self.spin_min.setEnabled(True)
-                self.spin_max.setEnabled(True)
-                self.btn_reset_range.setEnabled(True)
-                self.spin_min.setRange(self._data_min, self._data_max)
-                self.spin_max.setRange(self._data_min, self._data_max)
-                if reset:
-                    self.spin_min.setValue(self._data_min)
-                    self.spin_max.setValue(self._data_max)
-        finally:
-            self.spin_min.blockSignals(block_min)
-            self.spin_max.blockSignals(block_max)
-        if reset:
-            self._update_volume_visual()
+    def _update_alpha_controls(self):
+        has_data = self._data is not None
+        self.alpha_widget.setEnabled(has_data)
+        self.btn_reset_curve.setEnabled(has_data)
 
-    def _on_range_changed(self):
-        if self._data is None:
+    def _on_alpha_curve_changed(self, points: List[Tuple[float, float]]):
+        if not points:
             return
-        if self.spin_min.value() > self.spin_max.value():
-            return
+        xs = np.array([max(0.0, min(1.0, float(x))) for x, _ in points], dtype=float)
+        ys = np.array([max(0.0, min(1.0, float(y))) for _, y in points], dtype=float)
+        order = np.argsort(xs)
+        xs = xs[order]
+        ys = ys[order]
+        self._alpha_curve = [(float(x), float(y)) for x, y in zip(xs, ys)]
+        self._alpha_lut_x = xs
+        self._alpha_lut_y = ys
         self._update_volume_visual()
 
-    def _on_reset_range(self):
-        if self._data is None:
-            return
-        with QtCore.QSignalBlocker(self.spin_min), QtCore.QSignalBlocker(self.spin_max):
-            self.spin_min.setValue(self._data_min)
-            self.spin_max.setValue(self._data_max)
-        self._update_volume_visual()
+    def _on_reset_curve(self):
+        self.alpha_widget.reset_curve()
 
     def closeEvent(self, event: QtGui.QCloseEvent):
         try:
