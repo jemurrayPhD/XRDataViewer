@@ -218,23 +218,8 @@ class EmbeddedJupyterManager(QtCore.QObject):
             result = sock.connect_ex(("127.0.0.1", int(port)))
             return result != 0
 
-
-if QtWebEngineWidgets is not None:
-    class QuietWebEnginePage(QtWebEngineWidgets.QWebEnginePage):
-        """QWebEnginePage that captures JS console output without spamming stderr."""
-
-        consoleMessage = QtCore.Signal(int, str, int, str)
-
-        def javaScriptConsoleMessage(
-            self,
-            level: QtWebEngineWidgets.QWebEnginePage.JavaScriptConsoleMessageLevel,
-            message: str,
-            line_number: int,
-            source_id: str,
-        ) -> None:
-            self.consoleMessage.emit(int(level), message, int(line_number), source_id)
-
     def _forward_stream(self, stream):
+        """Relay output from the Jupyter process to the UI signals."""
         if stream is None:
             return
         try:
@@ -292,6 +277,21 @@ if QtWebEngineWidgets is not None:
         except Exception:
             pass
 
+
+if QtWebEngineWidgets is not None:
+    class QuietWebEnginePage(QtWebEngineWidgets.QWebEnginePage):
+        """QWebEnginePage that captures JS console output without spamming stderr."""
+
+        consoleMessage = QtCore.Signal(int, str, int, str)
+
+        def javaScriptConsoleMessage(
+            self,
+            level: QtWebEngineWidgets.QWebEnginePage.JavaScriptConsoleMessageLevel,
+            message: str,
+            line_number: int,
+            source_id: str,
+        ) -> None:
+            self.consoleMessage.emit(int(level), message, int(line_number), source_id)
 
 class CodeServerManager(QtCore.QObject):
     """Run a local code-server or openvscode-server instance when available."""
