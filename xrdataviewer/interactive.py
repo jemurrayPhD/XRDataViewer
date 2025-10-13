@@ -913,16 +913,29 @@ class VsCodeWebWidget(QtWidgets.QWidget):
             location = f"{location}:{line}"
         if level == QtWebEngineWidgets.QWebEnginePage.JavaScriptConsoleMessageLevel.ErrorMessageLevel:
             log_action(f"VS Code JS error ({location}): {cleaned}")
-            if "Unexpected token" in cleaned:
+            if "Unexpected token" in cleaned or "SyntaxError" in cleaned:
                 hint = (
                     "The embedded browser hit a syntax error while loading the VS Code workspace. "
-                    "This usually means the page requires a newer Chromium engine than the bundled Qt version. "
-                    "Open the URL in an external browser or upgrade QtWebEngine."
+                    "This usually means the page requires newer web platform features than the bundled Qt version. "
+                    "Use the desktop launcher or open the URL in an external browser instead."
                 )
                 self._toggle_error_banner(True, hint)
                 if not getattr(self, "_js_warning_shown", False):
                     self.set_status(hint)
                     self._js_warning_shown = True
+                # Stop trying to render the incompatible site so the console is not
+                # flooded with repeated syntax errors.
+                if self.web_view is not None:
+                    self.web_view.setHtml(
+                        """
+                        <html><body style='color:#eee;background:#202020;font-family:sans-serif;padding:16px;'>
+                        <h2>VS Code web workspace unavailable</h2>
+                        <p>The embedded Chromium engine cannot display this page. Use the
+                        <b>Launch desktop VS Code</b> button or open the URL in your
+                        default browser.</p>
+                        </body></html>
+                        """
+                    )
             else:
                 self._toggle_error_banner(False)
                 self.set_status(cleaned or "JavaScript error in VS Code view.")
@@ -1776,11 +1789,24 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         info_level = int(QtWebEngineWidgets.QWebEnginePage.JavaScriptConsoleMessageLevel.InfoMessageLevel)
         if level == error_level:
             log_action(f"JupyterLab JS error ({location}): {cleaned}")
-            if not self._jupyter_js_warned:
+            friendly = None
+            if "Invalid selector" in cleaned:
+                friendly = (
+                    "The embedded browser does not support some of JupyterLab's styles. "
+                    "Layout may look different; open in an external browser for full support."
+                )
+            elif "Cannot read property 'id' of null" in cleaned:
+                friendly = (
+                    "JupyterLab hit a browser compatibility issue. Reload or open the session in an external browser "
+                    "if parts of the UI fail to appear."
+                )
+            if friendly:
+                self._set_status(friendly)
+            elif not self._jupyter_js_warned:
                 self._set_status(
                     "Embedded JupyterLab reported browser compatibility warnings. Open in an external browser if features look incorrect."
                 )
-                self._jupyter_js_warned = True
+            self._jupyter_js_warned = True
         elif level == warning_level:
             log_action(f"JupyterLab JS warning ({location}): {cleaned}")
         elif level == info_level:
