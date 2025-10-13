@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>XRDataViewer Overview</title>
+  <style>
+    body { font-family: "Segoe UI", Roboto, sans-serif; margin: 0; background: #f5f7fa; color: #202124; }
+    header { background: linear-gradient(135deg, #355c7d, #6c5b7b, #c06c84); color: #fff; padding: 2.5rem 3rem; }
+    header h1 { margin: 0 0 0.5rem; font-size: 2.4rem; }
+    header p { margin: 0; font-size: 1.1rem; max-width: 60rem; }
+    nav { background: #263238; color: #fff; padding: 0.6rem 3rem; }
+    nav a { color: #d0f0ff; margin-right: 1.5rem; text-decoration: none; font-weight: 600; }
+    main { padding: 2.5rem 3rem 4rem; max-width: 70rem; }
+    section { margin-bottom: 3rem; background: #fff; border-radius: 12px; box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08); padding: 2rem 2.5rem; }
+    section h2 { margin-top: 0; font-size: 1.8rem; color: #37474f; }
+    h3 { color: #455a64; margin-top: 1.8rem; }
+    ul { line-height: 1.6; }
+    code { background: #eceff1; padding: 0.2rem 0.4rem; border-radius: 4px; font-size: 0.95rem; }
+    .module-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.5rem; margin-top: 1.5rem; }
+    .card { background: #fafbfd; border-radius: 10px; border: 1px solid #e0e6ed; padding: 1.2rem 1.4rem; }
+    footer { padding: 2rem 3rem; text-align: center; color: #607d8b; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>XRDataViewer &mdash; Application Overview</h1>
+    <p>
+      XRDataViewer is a modular PySide2/pyqtgraph GUI for exploring, processing, and exporting
+      scientific datasets stored as <code>xarray.DataArray</code> and <code>xarray.Dataset</code> objects.
+      This document explains the high-level architecture, major subsystems, and the relationships
+      between the refactored modules.
+    </p>
+  </header>
+  <nav>
+    <a href="#architecture">Architecture</a>
+    <a href="#startup">Startup flow</a>
+    <a href="#dataflow">Data flow</a>
+    <a href="#extensibility">Extensibility tips</a>
+    <a href="features.html">Feature documentation &raquo;</a>
+  </nav>
+  <main>
+    <section id="architecture">
+      <h2>Modular architecture</h2>
+      <p>
+        The refactor introduces the <code>xrdataviewer</code> package, replacing the previous monolithic
+        <code>multi_dataset_main.py</code> script. Each responsibility lives in a dedicated module.
+      </p>
+      <div class="module-grid">
+        <div class="card">
+          <h3><code>xrdataviewer.app</code></h3>
+          <p>Entry point that configures Qt, creates shared managers, constructs the main window, and wires up shutdown hooks.</p>
+        </div>
+        <div class="card">
+          <h3><code>xrdataviewer.datasets</code></h3>
+          <p>Implements the datasets dock, drag-and-drop helpers, in-memory dataset references, and the slice builder workspace.</p>
+        </div>
+        <div class="card">
+          <h3><code>xrdataviewer.processing</code></h3>
+          <p>Contains function metadata, parameter forms, the processing manager, pipeline serialization, and the pipeline builder dialog.</p>
+        </div>
+        <div class="card">
+          <h3><code>xrdataviewer.views</code></h3>
+          <p>Provides the MultiView grid, Sequential slicing view, Overlay compositor, and 3D volume window. Each submodule focuses on one workspace.</p>
+        </div>
+        <div class="card">
+          <h3><code>xrdataviewer.interactive</code></h3>
+          <p>Hosts the Interactive Processing tab, embedded JupyterLab launcher, Python console, and bridge server for in-memory dataset registration.</p>
+        </div>
+        <div class="card">
+          <h3><code>xrdataviewer.annotations</code></h3>
+          <p>Reusable dialogs and configuration models for plot annotations, legends, fonts, and backgrounds.</p>
+        </div>
+        <div class="card">
+          <h3><code>xrdataviewer.preferences</code></h3>
+          <p>Preferences manager with JSON import/export, default directories, and color map presets.</p>
+        </div>
+        <div class="card">
+          <h3><code>xrdataviewer.utils</code></h3>
+          <p>Cross-cutting helpers: NaN-aware reducers, export utilities, filename sanitizers, and dataset loading wrappers.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="startup">
+      <h2>Startup sequence</h2>
+      <ol>
+        <li><strong>Launcher</strong> &mdash; <code>multi_dataset_main.py</code> or <code>python -m xrdataviewer.app</code> imports <code>xrdataviewer.app</code>.</li>
+        <li><strong>Qt initialization</strong> &mdash; the application enforces the PySide2 binding for pyqtgraph and creates a <code>QApplication</code>.</li>
+        <li><strong>Shared managers</strong> &mdash; logging, preferences, processing metadata, and the interactive bridge server are constructed and shared with panes.</li>
+        <li><strong>MainWindow</strong> &mdash; tabs (MultiView, Overlay, Sequential, Interactive Processing, Sequential Volume) and docks (datasets, processing, logging) are instantiated.</li>
+        <li><strong>Autoload</strong> &mdash; bundled sample datasets are registered in the datasets pane, ready for drag-and-drop.</li>
+      </ol>
+    </section>
+
+    <section id="dataflow">
+      <h2>Data flow and interaction</h2>
+      <h3>Dataset lifecycle</h3>
+      <ul>
+        <li>Datasets enter via loaders (NetCDF, JSON placeholder, database placeholder) or interactive registrations.</li>
+        <li>Each dataset is wrapped in a <code>DataSetRef</code> derivative that supports lazy <code>load()</code>, MIME serialization for drag-and-drop, and metadata introspection.</li>
+        <li>Drop targets (views) request data through these references, then cache the resulting <code>xarray.Dataset</code>/<code>DataArray</code>.</li>
+      </ul>
+      <h3>Processing pipelines</h3>
+      <ul>
+        <li>The processing manager exposes individual functions and multi-step pipelines with declarative parameter schemas.</li>
+        <li>Views request processing via <code>apply_processing_step</code>, ensuring consistent previews between docks, views, and exports.</li>
+        <li>Pipeline definitions are serializable to JSON and persisted per preferences-defined directories.</li>
+      </ul>
+      <h3>Logging and preferences</h3>
+      <ul>
+        <li>All significant actions (data loads, processing, exports, interactive registrations) emit log entries shown in the logging dock.</li>
+        <li>The preferences manager centralizes default directories, color maps, and saved application defaults and persists them as JSON.</li>
+      </ul>
+    </section>
+
+    <section id="extensibility">
+      <h2>Extending XRDataViewer</h2>
+      <h3>Adding datasets or loaders</h3>
+      <p>
+        Implement a new <code>DataSetRef</code> subclass in <code>xrdataviewer.datasets.references</code> (or equivalent) and register
+        it with the datasets pane. Expose a QAction in the pane to launch your importer, and add a corresponding entry in
+        <code>PreferencesManager</code> if it needs defaults.
+      </p>
+      <h3>Adding processing operations</h3>
+      <p>
+        Declare a new <code>ProcessingFunctionSpec</code> in <code>xrdataviewer.processing.registry</code> with metadata, parameter
+        schema, and callable. The pipeline builder dialog automatically picks up registered specs.</p>
+      <h3>Creating new views</h3>
+      <p>
+        Base new visual workspaces on <code>CentralPlotWidget</code> (from <code>xr_plot_widget.py</code>) to leverage consistent axis
+        formatting, 1D/2D plotting, ROI integration, and export helpers. Register the tab in <code>MainWindow</code> and share the
+        processing manager, preferences, and logging instances for uniform behaviour.
+      </p>
+    </section>
+  </main>
+  <footer>
+    Generated documentation for XRDataViewer &mdash; last updated <!--DATE_PLACEHOLDER-->.
+  </footer>
+</body>
+</html>

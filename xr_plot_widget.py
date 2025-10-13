@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import math
+import html
+import re
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from PySide2 import QtCore, QtWidgets, QtGui
@@ -9,6 +13,461 @@ import pyqtgraph as pg
 FORCE_SOFT_RENDER = False
 if FORCE_SOFT_RENDER:
     pg.setConfigOptions(useOpenGL=False, antialias=False)
+
+
+@dataclass
+class LineStyleConfig:
+    """Visual customization for 1D line plots."""
+
+    color: QtGui.QColor = field(default_factory=lambda: QtGui.QColor("#4fc3f7"))
+    opacity: float = 1.0
+    width: float = 2.0
+    pen_style: str = "solid"
+    curve_mode: str = "linear"  # "linear", "smooth", "step"
+    smooth_span: int = 3
+    markers: bool = False
+    marker_style: str = "o"
+    marker_size: int = 7
+
+    def normalized_opacity(self) -> float:
+        return max(0.0, min(1.0, float(self.opacity)))
+
+    def effective_color(self) -> QtGui.QColor:
+        color = QtGui.QColor(self.color)
+        if not color.isValid():
+            color = QtGui.QColor("#4fc3f7")
+        return color
+
+    def smooth_window(self, length: int) -> int:
+        length = int(max(1, length))
+        if length < 3:
+            return 3
+        span = max(1, int(self.smooth_span))
+        window = span * 2 + 1
+        if window > length:
+            window = length if length % 2 else max(3, length - 1)
+        if window < 3:
+            window = 3
+        if window % 2 == 0:
+            window += 1
+        return window
+
+
+def clone_line_style(style: Optional[LineStyleConfig]) -> LineStyleConfig:
+    src = style or LineStyleConfig()
+    return LineStyleConfig(
+        color=src.effective_color(),
+        opacity=src.opacity,
+        width=src.width,
+        pen_style=src.pen_style,
+        curve_mode=src.curve_mode,
+        smooth_span=src.smooth_span,
+        markers=src.markers,
+        marker_style=src.marker_style,
+        marker_size=src.marker_size,
+    )
+
+
+@dataclass
+class PlotAnnotationConfig:
+    """Configuration describing plot annotations and aesthetics."""
+
+    title: str = ""
+    xlabel: str = ""
+    ylabel: str = ""
+    colorbar_label: str = ""
+    font_family: str = ""
+    title_size: int = 14
+    axis_size: int = 12
+    tick_size: int = 10
+    colorbar_size: int = 12
+    background: QtGui.QColor = field(default_factory=lambda: QtGui.QColor("#1b1b1b"))
+    apply_to_all: bool = False
+    legend_visible: bool = False
+    legend_entries: List[str] = field(default_factory=list)
+    legend_position: str = "top-right"
+
+
+_LATEX_SYMBOLS = {
+    "\\alpha": "α",
+    "\\beta": "β",
+    "\\gamma": "γ",
+    "\\delta": "δ",
+    "\\epsilon": "ϵ",
+    "\\theta": "θ",
+    "\\lambda": "λ",
+    "\\mu": "μ",
+    "\\nu": "ν",
+    "\\pi": "π",
+    "\\phi": "φ",
+    "\\psi": "ψ",
+    "\\omega": "ω",
+    "\\times": "×",
+    "\\cdot": "·",
+    "\\pm": "±",
+    "\\geq": "≥",
+    "\\leq": "≤",
+    "\\infty": "∞",
+    "\\sqrt": "√",
+    "\\degree": "°",
+}
+
+
+class _SafeFormatDict(dict):
+    def __missing__(self, key):  # pragma: no cover - defensive
+        return "{" + key + "}"
+
+
+def _format_with_context(text: str, context: Optional[Dict[str, Any]]) -> str:
+    if not text:
+        return ""
+    if not context:
+        return text
+    try:
+        return str(text).format_map(_SafeFormatDict(context))
+    except Exception:
+        return str(text)
+
+
+def _parse_basic_latex(text: str) -> str:
+    """Convert a lightweight subset of LaTeX-like syntax to HTML."""
+
+    if text is None:
+        return ""
+
+    def parse_segment(segment: str) -> str:
+        i = 0
+        out_parts: list[str] = []
+        length = len(segment)
+        while i < length:
+            ch = segment[i]
+            if ch == "\\":
+                if i + 1 < length and segment[i + 1] == "\\":
+                    out_parts.append("<br/>")
+                    i += 2
+                    continue
+                if i + 1 < length and segment[i + 1] in ("n", "r"):
+                    out_parts.append("<br/>")
+                    i += 2
+                    continue
+                j = i + 1
+                while j < length and segment[j].isalpha():
+                    j += 1
+                command = segment[i:j]
+                replacement = _LATEX_SYMBOLS.get(command)
+                if replacement is not None:
+                    out_parts.append(replacement)
+                    i = j
+                    continue
+                if j < length and segment[j] in "{}":
+                    out_parts.append(html.escape(segment[j]))
+                    i = j + 1
+                    continue
+                out_parts.append(html.escape(command.lstrip("\\")))
+                i = j
+                continue
+            if ch in "^_":
+                sup = ch == "^"
+                i += 1
+                if i < length and segment[i] == "{":
+                    depth = 1
+                    j = i + 1
+                    while j < length and depth > 0:
+                        if segment[j] == "{":
+                            depth += 1
+                        elif segment[j] == "}":
+                            depth -= 1
+                            if depth == 0:
+                                break
+                        j += 1
+                    content = segment[i + 1:j] if j < length else segment[i + 1 :]
+                    i = j + 1 if j < length else length
+                elif i < length:
+                    content = segment[i]
+                    i += 1
+                else:
+                    content = ""
+                parsed = parse_segment(content)
+                tag = "sup" if sup else "sub"
+                out_parts.append(f"<{tag}>{parsed}</{tag}>")
+                continue
+            if ch == "\n":
+                out_parts.append("<br/>")
+                i += 1
+                continue
+            out_parts.append(html.escape(ch))
+            i += 1
+        return "".join(out_parts)
+
+    return parse_segment(str(text))
+
+
+def latex_to_html(text: str, context: Optional[Dict[str, Any]] = None) -> str:
+    """Public helper to convert a label with optional formatting context."""
+
+    formatted = _format_with_context(text, context)
+    return _parse_basic_latex(formatted)
+
+
+def _ensure_qcolor(value: Any) -> QtGui.QColor:
+    if isinstance(value, QtGui.QColor):
+        return QtGui.QColor(value)
+    if isinstance(value, QtGui.QBrush):
+        return QtGui.QColor(value.color())
+    if isinstance(value, str):
+        return QtGui.QColor(value)
+    color = QtGui.QColor()
+    if isinstance(value, (tuple, list)) and len(value) >= 3:
+        color.setRgb(int(value[0]), int(value[1]), int(value[2]))
+    return color if color.isValid() else QtGui.QColor("#1b1b1b")
+
+
+def _make_font(base: Optional[QtGui.QFont], family: str, size: int) -> QtGui.QFont:
+    font = QtGui.QFont(base) if base is not None else QtGui.QFont()
+    if family:
+        font.setFamily(family)
+    if size > 0:
+        font.setPointSize(int(size))
+    elif base is not None and base.pointSize() > 0:
+        font.setPointSize(base.pointSize())
+    return font
+
+
+def plotitem_annotation_state(
+    plot: pg.PlotItem,
+    colorbar_label: Optional[QtWidgets.QLabel] = None,
+) -> PlotAnnotationConfig:
+    title = ""
+    try:
+        title = plot.titleLabel.text
+    except Exception:
+        title = ""
+    stored = getattr(plot, "_annotation_sources", {})
+    xlabel = ""
+    ylabel = ""
+    axis_font_family = ""
+    axis_font_size = 12
+    tick_font_size = 10
+    bottom = plot.getAxis("bottom")
+    if bottom is not None:
+        try:
+            xlabel = bottom.labelText
+        except Exception:
+            xlabel = ""
+        label_item = getattr(bottom, "label", None)
+        if label_item is not None:
+            try:
+                font = label_item.font()
+            except Exception:
+                font = None
+            if font is not None:
+                axis_font_family = font.family()
+                if font.pointSize() > 0:
+                    axis_font_size = font.pointSize()
+        try:
+            tick_font = bottom.tickFont
+        except Exception:
+            tick_font = None
+        if tick_font is not None and tick_font.pointSize() > 0:
+            tick_font_size = tick_font.pointSize()
+    left = plot.getAxis("left")
+    if left is not None:
+        try:
+            ylabel = left.labelText
+        except Exception:
+            ylabel = ""
+        if not axis_font_family:
+            label_item = getattr(left, "label", None)
+            if label_item is not None:
+                try:
+                    font = label_item.font()
+                except Exception:
+                    font = None
+                if font is not None:
+                    axis_font_family = font.family()
+                    if font.pointSize() > 0:
+                        axis_font_size = font.pointSize()
+        try:
+            tick_font = left.tickFont
+        except Exception:
+            tick_font = None
+        if tick_font is not None and tick_font.pointSize() > 0:
+            tick_font_size = tick_font.pointSize()
+    colorbar_text = ""
+    colorbar_size = axis_font_size
+    if colorbar_label is not None:
+        try:
+            colorbar_text = colorbar_label.text()
+        except Exception:
+            colorbar_text = ""
+        try:
+            cb_font = colorbar_label.font()
+        except Exception:
+            cb_font = None
+        if cb_font is not None and cb_font.pointSize() > 0:
+            colorbar_size = cb_font.pointSize()
+    try:
+        background_brush = plot.getBackgroundBrush()
+    except Exception:
+        background_brush = None
+    config = PlotAnnotationConfig(
+        title=str(stored.get("title", title) or ""),
+        xlabel=str(stored.get("xlabel", xlabel) or ""),
+        ylabel=str(stored.get("ylabel", ylabel) or ""),
+        colorbar_label=str(stored.get("colorbar", colorbar_text) or ""),
+        font_family=str(axis_font_family or ""),
+        axis_size=int(axis_font_size),
+        tick_size=int(tick_font_size),
+        colorbar_size=int(colorbar_size),
+    )
+    config.background = _ensure_qcolor(background_brush)
+    try:
+        title_font = plot.titleLabel.item.font()
+        if title_font.pointSize() > 0:
+            config.title_size = int(title_font.pointSize())
+        if title_font.family() and not config.font_family:
+            config.font_family = title_font.family()
+    except Exception:
+        pass
+    legend_config = getattr(plot, "_legend_config", None)
+    if isinstance(legend_config, dict):
+        config.legend_visible = bool(legend_config.get("visible"))
+        entries = legend_config.get("entries")
+        if isinstance(entries, (list, tuple)):
+            config.legend_entries = [str(e) for e in entries]
+        else:
+            config.legend_entries = []
+        position = legend_config.get("position")
+        if isinstance(position, str):
+            config.legend_position = position
+    return config
+
+
+def apply_plotitem_annotation(
+    plot: pg.PlotItem,
+    config: PlotAnnotationConfig,
+    *,
+    context: Optional[Dict[str, Any]] = None,
+    colorbar_label: Optional[QtWidgets.QLabel] = None,
+    background_widget: Optional[QtWidgets.QWidget] = None,
+    legend_handler: Optional[Callable[[PlotAnnotationConfig], None]] = None,
+):
+    sources = getattr(plot, "_annotation_sources", {})
+    if not isinstance(sources, dict):
+        sources = {}
+    sources.update(
+        {
+            "title": config.title,
+            "xlabel": config.xlabel,
+            "ylabel": config.ylabel,
+            "colorbar": config.colorbar_label,
+        }
+    )
+    setattr(plot, "_annotation_sources", sources)
+    setattr(
+        plot,
+        "_legend_config",
+        {
+            "visible": bool(config.legend_visible),
+            "entries": list(config.legend_entries or []),
+            "position": str(config.legend_position or "top-right"),
+        },
+    )
+
+    title_html = latex_to_html(config.title, context)
+    xlabel_html = latex_to_html(config.xlabel, context)
+    ylabel_html = latex_to_html(config.ylabel, context)
+    colorbar_html = latex_to_html(config.colorbar_label, context)
+
+    plot.setTitle(f"<span>{title_html}</span>" if title_html else "")
+    try:
+        title_item = plot.titleLabel.item
+    except Exception:
+        title_item = None
+    if title_item is not None:
+        title_item.setFont(_make_font(title_item.font(), config.font_family, config.title_size))
+
+    for axis_name, html_text in (("bottom", xlabel_html), ("left", ylabel_html)):
+        axis = plot.getAxis(axis_name)
+        if axis is None:
+            continue
+        axis.setLabel(text=f"<span>{html_text}</span>" if html_text else "")
+        label_item = getattr(axis, "label", None)
+        if label_item is not None:
+            try:
+                current_font = label_item.font()
+            except Exception:
+                current_font = None
+            label_item.setFont(_make_font(current_font, config.font_family, config.axis_size))
+        tick_font = _make_font(None, config.font_family, config.tick_size)
+        try:
+            axis.setTickFont(tick_font)
+        except Exception:
+            pass
+
+    if colorbar_label is not None:
+        colorbar_label.setText(colorbar_html)
+        colorbar_label.setVisible(bool(colorbar_html))
+        colorbar_label.setAlignment(QtCore.Qt.AlignCenter)
+        colorbar_label.setWordWrap(True)
+        try:
+            base_font = colorbar_label.font()
+        except Exception:
+            base_font = None
+        colorbar_label.setFont(_make_font(base_font, config.font_family, config.colorbar_size))
+
+    background = _ensure_qcolor(config.background)
+
+    try:
+        view_box = plot.getViewBox()
+    except Exception:
+        view_box = None
+
+    if view_box is not None:
+        try:
+            view_box.setBackgroundColor(background)
+        except Exception:
+            try:
+                view_box.setBackground(background)
+            except Exception:
+                pass
+
+    if hasattr(plot, "setBackground"):
+        try:
+            plot.setBackground(background)
+        except Exception:
+            try:
+                plot.getViewWidget().setBackground(background)
+            except Exception:
+                pass
+
+    if background_widget is not None:
+        try:
+            if hasattr(background_widget, "setBackground"):
+                background_widget.setBackground(background)
+            elif hasattr(background_widget, "setBackgroundBrush"):
+                background_widget.setBackgroundBrush(background)
+            elif hasattr(background_widget, "setBackgroundBrush"):
+                background_widget.setBackgroundBrush(background)
+            elif hasattr(background_widget, "setBackgroundColor"):
+                background_widget.setBackgroundColor(background)
+            else:
+                raise AttributeError
+        except Exception:
+            try:
+                palette = background_widget.palette()
+                palette.setColor(background_widget.backgroundRole(), background)
+                background_widget.setPalette(palette)
+            except Exception:
+                background_widget.setStyleSheet(f"background-color: {background.name()};")
+
+    if callable(legend_handler):
+        try:
+            legend_handler(config)
+        except Exception:
+            pass
+
+
 
 class ScientificAxisItem(pg.AxisItem):
     """Axis item that formats ticks with scientific notation and limited precision."""
@@ -110,7 +569,9 @@ class CentralPlotWidget(QtWidgets.QWidget):
     sigInfoMessage = QtCore.Signal(str)
     sigLevelsChanged = QtCore.Signal(tuple)
     sigViewChanged = QtCore.Signal(tuple, tuple)
+    sigLocalCrosshairToggled = QtCore.Signal(bool)
     sigCursorMoved = QtCore.Signal(object, float, float, object, bool, str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.glw = pg.GraphicsLayoutWidget()
@@ -125,6 +586,9 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self.plot.setLabel("bottom", "X")
         self.img_item = pg.ImageItem()
         self.plot.addItem(self.img_item)
+        self._line_item = pg.PlotDataItem()
+        self._line_item.setVisible(False)
+        self.plot.addItem(self._line_item)
         self.lut = MyHistogramLUT()
         self.lut.setImageItem(self.img_item)
 
@@ -133,6 +597,13 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._block_view_emit = False
         self._last_data = None
         self._last_rect = None
+        self._line_x: Optional[np.ndarray] = None
+        self._line_y: Optional[np.ndarray] = None
+        self._mode: str = "image"
+        self._line_style = LineStyleConfig()
+
+        self._legend_item: Optional[pg.LegendItem] = None
+        self._legend_sources: List[Tuple[pg.GraphicsObject, str]] = []
 
         self._histogram_menu_getter = None
         self._histogram_menu_setter = None
@@ -159,6 +630,16 @@ class CentralPlotWidget(QtWidgets.QWidget):
             self.lut.rehide_stops()
         except Exception:
             pass
+
+        # annotation helpers
+        self._colorbar_label_widget: Optional[QtWidgets.QLabel] = None
+        self._background_color = QtGui.QColor()
+        try:
+            brush = self.plot.getBackgroundBrush()
+            if isinstance(brush, QtGui.QBrush):
+                self._background_color = brush.color()
+        except Exception:
+            self._background_color = QtGui.QColor("#1b1b1b")
 
         # sample grid items (on main plot)
         self._grid_items = []
@@ -187,6 +668,96 @@ class CentralPlotWidget(QtWidgets.QWidget):
             pass
         try:
             self.plot.scene().sigMouseClicked.connect(self._on_scene_mouse_clicked)
+        except Exception:
+            pass
+
+    # ---------- annotation helpers ----------
+    def annotation_defaults(self) -> PlotAnnotationConfig:
+        config = plotitem_annotation_state(self.plot, self._colorbar_label_widget)
+        if self._background_color.isValid():
+            config.background = QtGui.QColor(self._background_color)
+        return config
+
+    def apply_annotation(
+        self,
+        config: PlotAnnotationConfig,
+        *,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        apply_plotitem_annotation(
+            self.plot,
+            config,
+            context=context,
+            colorbar_label=self._colorbar_label_widget,
+            background_widget=self.glw,
+            legend_handler=self._apply_legend,
+        )
+        self._background_color = _ensure_qcolor(config.background)
+
+    def set_colorbar_label(self, text: str, context: Optional[Dict[str, Any]] = None):
+        if self._colorbar_label_widget is None:
+            return
+        html_text = latex_to_html(text, context)
+        self._colorbar_label_widget.setText(html_text)
+        self._colorbar_label_widget.setVisible(bool(html_text))
+
+    def set_legend_sources(self, items: Sequence[Tuple[object, str]]):
+        processed: List[Tuple[object, str]] = []
+        for obj, label in items:
+            if obj is None:
+                continue
+            processed.append((obj, str(label)))
+        self._legend_sources = processed
+
+    def _ensure_legend(self) -> pg.LegendItem:
+        if self._legend_item is None:
+            legend = pg.LegendItem(offset=(10, 10))
+            legend.setParentItem(self.plot.graphicsItem())
+            self._legend_item = legend
+        return self._legend_item
+
+    def _apply_legend(self, config: PlotAnnotationConfig):
+        if not config.legend_visible or not self._legend_sources:
+            if self._legend_item is not None:
+                try:
+                    self._legend_item.hide()
+                except Exception:
+                    pass
+            return
+        legend = self._ensure_legend()
+        try:
+            legend.clear()
+        except Exception:
+            pass
+        entries = list(config.legend_entries or [])
+        if not entries:
+            entries = [label for _, label in self._legend_sources]
+        for idx, (item, default_label) in enumerate(self._legend_sources):
+            label = entries[idx] if idx < len(entries) else default_label
+            try:
+                if hasattr(item, "setName"):
+                    item.setName(label)
+            except Exception:
+                pass
+            try:
+                legend.addItem(item, label)
+            except Exception:
+                proxy = pg.PlotDataItem([0], [0])
+                proxy.setPen(pg.mkPen((200, 200, 200)))
+                legend.addItem(proxy, label)
+        anchor_map = {
+            "top-left": ((0, 0), (0, 0)),
+            "top-right": ((1, 0), (1, 0)),
+            "bottom-left": ((0, 1), (0, 1)),
+            "bottom-right": ((1, 1), (1, 1)),
+        }
+        pos = anchor_map.get(config.legend_position, anchor_map["top-right"])
+        try:
+            legend.anchor(pos[0], pos[1])
+        except Exception:
+            pass
+        try:
+            legend.show()
         except Exception:
             pass
 
@@ -255,11 +826,25 @@ class CentralPlotWidget(QtWidgets.QWidget):
             return None
         if getattr(self, "_hist_container", None) is None:
             try:
+                container = QtWidgets.QWidget()
+                container.setObjectName("HistogramContainer")
+                layout = QtWidgets.QVBoxLayout(container)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setSpacing(4)
+                label = QtWidgets.QLabel("")
+                label.setAlignment(QtCore.Qt.AlignCenter)
+                label.setWordWrap(True)
+                label.setVisible(False)
+                layout.addWidget(label, 0)
                 glw = pg.GraphicsLayoutWidget()
                 glw.addItem(self.lut, row=0, col=0)
                 glw.setObjectName("HistogramLUTContainer")
-                glw.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
-                self._hist_container = glw
+                glw.setSizePolicy(
+                    QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+                )
+                layout.addWidget(glw, 1)
+                self._colorbar_label_widget = label
+                self._hist_container = container
             except Exception:
                 self._hist_container = None
         return self._hist_container
@@ -286,27 +871,202 @@ class CentralPlotWidget(QtWidgets.QWidget):
             pass
 
     # ---------- data display ----------
+    def image_item(self) -> pg.ImageItem:
+        return self.img_item
+
+    def line_item(self) -> pg.PlotDataItem:
+        return self._line_item
+
     def set_image(self, Z: np.ndarray, autorange: bool = True, rect=None):
         Z = np.asarray(Z, float, order="C")
         self.img_item.setImage(Z, autoLevels=autorange)
         try:
             from PySide2.QtCore import QRectF
             if rect is None:
-                Ny, Nx = Z.shape; rect = QRectF(0.0, 0.0, float(Nx), float(Ny))
+                Ny, Nx = Z.shape
+                rect = QRectF(0.0, 0.0, float(Nx), float(Ny))
             self.img_item.setRect(rect)
-        except Exception: pass
+        except Exception:
+            rect = None
         self._last_data = np.asarray(Z, float)
         try:
             self._last_rect = rect
         except Exception:
             self._last_rect = None
-        if autorange: self.plot.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
+        self._line_x = None
+        self._line_y = None
+        self._mode = "image"
+        try:
+            self.img_item.setVisible(True)
+            self._line_item.setVisible(False)
+        except Exception:
+            pass
+        container = self.histogram_widget()
+        if container is not None:
+            container.setVisible(True)
+        try:
+            self.lut.setVisible(True)
+        except Exception:
+            pass
+        if autorange:
+            try:
+                self.plot.enableAutoRange(x=True, y=True)
+            except Exception:
+                pass
 
     def set_rectilinear(self, x1: np.ndarray, y1: np.ndarray, Z: np.ndarray, autorange: bool = True):
-        Zu, xr = self._resample_rectilinear(x1, y1, Z, return_rect=True); self.set_image(Zu, autorange, rect=xr)
+        Zu, xr = self._resample_rectilinear(x1, y1, Z, return_rect=True)
+        self.set_image(Zu, autorange, rect=xr)
 
     def set_warped(self, X: np.ndarray, Y: np.ndarray, Z: np.ndarray, autorange: bool = True):
-        Zu, xr = self._resample_warped(X, Y, Z, return_rect=True); self.set_image(Zu, autorange, rect=xr)
+        Zu, xr = self._resample_warped(X, Y, Z, return_rect=True)
+        self.set_image(Zu, autorange, rect=xr)
+
+    def set_line(self, x: np.ndarray, y: np.ndarray, autorange: bool = True):
+        xs = np.asarray(x, float)
+        ys = np.asarray(y, float)
+        if xs.ndim != 1:
+            xs = xs.ravel()
+        if ys.ndim != 1:
+            ys = ys.ravel()
+        if xs.size == 0 and ys.size:
+            xs = np.arange(ys.size, dtype=float)
+        if ys.size != xs.size:
+            if ys.size == 0:
+                xs = np.array([], dtype=float)
+            else:
+                xs = np.linspace(0.0, float(ys.size - 1), ys.size)
+        self._line_x = xs.astype(float, copy=False)
+        self._line_y = ys.astype(float, copy=False)
+        self._last_data = np.array(self._line_y, copy=True)
+        self._last_rect = None
+        self._mode = "line"
+        self._render_line_data(autorange=autorange)
+
+    def line_style(self) -> LineStyleConfig:
+        return clone_line_style(self._line_style)
+
+    def set_line_style(self, style: LineStyleConfig, *, refresh: bool = True):
+        self._line_style = clone_line_style(style)
+        if refresh and self._mode == "line":
+            self._render_line_data(autorange=False)
+
+    def _render_line_data(self, *, autorange: bool):
+        if self._line_x is None or self._line_y is None:
+            return
+        style = self._line_style or LineStyleConfig()
+        xs = np.asarray(self._line_x, float)
+        ys = np.asarray(self._line_y, float)
+        x_plot = xs
+        y_plot = ys
+        step_mode = style.curve_mode == "step"
+        if style.curve_mode == "smooth" and ys.size >= 3:
+            try:
+                window = style.smooth_window(ys.size)
+                y_plot = pg.functions.smooth(ys, window=window)
+            except Exception:
+                y_plot = ys
+
+        color = style.effective_color()
+        color.setAlphaF(style.normalized_opacity())
+        width = max(0.1, float(style.width))
+        pen = pg.mkPen(color, width=width)
+        try:
+            pen_style = {
+                "solid": QtCore.Qt.SolidLine,
+                "dashed": QtCore.Qt.DashLine,
+                "dotted": QtCore.Qt.DotLine,
+                "dashdot": QtCore.Qt.DashDotLine,
+            }.get(style.pen_style, QtCore.Qt.SolidLine)
+            pen.setStyle(pen_style)
+        except Exception:
+            pass
+
+        kwargs: Dict[str, object] = {}
+        if step_mode:
+            kwargs["stepMode"] = True
+            x_plot = self._step_edges(xs)
+
+        symbol = None
+        marker_pen: Optional[QtGui.QPen] = None
+        marker_brush: Optional[QtGui.QBrush] = None
+        marker_size: Optional[int] = None
+        if style.markers and not step_mode:
+            symbol_map = {
+                "o": "o",
+                "s": "s",
+                "t": "t",
+                "d": "d",
+                "+": "+",
+                "x": "x",
+            }
+            symbol = symbol_map.get(style.marker_style, "o")
+            marker_color = QtGui.QColor(color)
+            marker_pen = QtGui.QPen(marker_color)
+            marker_pen.setWidthF(max(1.0, width * 0.75))
+            marker_brush = QtGui.QBrush(marker_color)
+            marker_size = max(1, int(style.marker_size))
+
+        try:
+            self._line_item.setData(x_plot, y_plot, pen=pen, **kwargs)
+            if style.markers and symbol is not None:
+                try:
+                    self._line_item.setSymbol(symbol)
+                    if marker_brush is not None:
+                        self._line_item.setSymbolBrush(marker_brush)
+                    if marker_pen is not None:
+                        self._line_item.setSymbolPen(marker_pen)
+                    if marker_size is not None:
+                        self._line_item.setSymbolSize(marker_size)
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._line_item.setSymbol(None)
+                    self._line_item.setSymbolBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
+                    self._line_item.setSymbolPen(QtGui.QPen(QtCore.Qt.NoPen))
+                except Exception:
+                    pass
+            self._line_item.setVisible(True)
+            self.img_item.setVisible(False)
+        except Exception:
+            pass
+
+        container = self.histogram_widget()
+        if container is not None:
+            container.setVisible(False)
+        try:
+            self.lut.setVisible(False)
+        except Exception:
+            pass
+        if autorange:
+            try:
+                self.plot.enableAutoRange(x=True, y=True)
+            except Exception:
+                pass
+
+    def _step_edges(self, xs: np.ndarray) -> np.ndarray:
+        xs = np.asarray(xs, float)
+        n = xs.size
+        if n == 0:
+            return xs
+        if n == 1:
+            x0 = float(xs[0])
+            return np.array([x0 - 0.5, x0 + 0.5], dtype=float)
+
+        diffs = np.diff(xs)
+        if np.all(diffs > 0):
+            edges = np.empty(n + 1, dtype=float)
+            edges[1:-1] = xs[:-1] + diffs / 2.0
+            edges[0] = xs[0] - diffs[0] / 2.0
+            edges[-1] = xs[-1] + diffs[-1] / 2.0
+            return edges
+
+        # Fallback for unsorted or repeated x values: pad with duplicates.
+        edges = np.empty(n + 1, dtype=float)
+        edges[:-1] = xs
+        edges[-1] = xs[-1]
+        return edges
 
     # ---------- sample grid overlay on main plot ----------
     def show_sample_grid(self, show: bool, *, x1=None, y1=None, X=None, Y=None, step: int = 10):
@@ -398,13 +1158,34 @@ class CentralPlotWidget(QtWidgets.QWidget):
         return f"x={fmt(x)}\ny={fmt(y)}\nvalue={fmt(value)}"
 
     def _value_at(self, x: float, y: float):
+        if self._mode == "line":
+            xs = self._line_x
+            ys = self._line_y
+            if xs is None or ys is None or xs.size == 0:
+                return None
+            try:
+                diffs = np.abs(xs - float(x))
+            except Exception:
+                return None
+            try:
+                idx = int(np.nanargmin(diffs))
+            except Exception:
+                idx = 0
+            idx = max(0, min(idx, ys.size - 1))
+            try:
+                return float(ys[idx])
+            except Exception:
+                return ys[idx]
+
         data = self._last_data
         rect = self._last_rect
         if data is None or rect is None:
             return None
         try:
-            x0 = float(rect.left()); y0 = float(rect.top())
-            w = float(rect.width()); h = float(rect.height())
+            x0 = float(rect.left())
+            y0 = float(rect.top())
+            w = float(rect.width())
+            h = float(rect.height())
         except Exception:
             return None
         if w == 0 or h == 0:
@@ -434,6 +1215,10 @@ class CentralPlotWidget(QtWidgets.QWidget):
             return
         self._local_crosshair_enabled = enabled
         self._update_local_crosshair()
+        try:
+            self.sigLocalCrosshairToggled.emit(self._local_crosshair_enabled)
+        except Exception:
+            pass
 
     def _update_local_crosshair(self):
         if self._local_crosshair_enabled and self._last_local_crosshair:
@@ -540,6 +1325,9 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._histogram_menu_getter = getter
         self._histogram_menu_setter = setter
         self._histogram_menu_enabled_getter = enabled_getter
+
+    def local_crosshair_enabled(self) -> bool:
+        return bool(self._local_crosshair_enabled)
 
     # ---------- resampling helpers ----------
     def _rect_to_qrectf(self, x0, x1, y0, y1):
