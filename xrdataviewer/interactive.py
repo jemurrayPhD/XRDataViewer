@@ -152,11 +152,10 @@ class EmbeddedJupyterManager(QtCore.QObject):
             }
             with open(kernels_dir / "kernel.json", "w", encoding="utf-8") as handle:
                 json.dump(kernel_spec, handle)
-            existing_path = env.get("JUPYTER_PATH")
-            if existing_path:
-                env["JUPYTER_PATH"] = os.pathsep.join([self._kernelspec_dir, existing_path])
-            else:
-                env["JUPYTER_PATH"] = self._kernelspec_dir
+            env["JUPYTER_PATH"] = self._kernelspec_dir
+            self.message.emit(
+                "Provisioned dedicated kernel for embedded JupyterLab using the current Python environment."
+            )
         except Exception as exc:
             if self._kernelspec_dir:
                 shutil.rmtree(self._kernelspec_dir, ignore_errors=True)
