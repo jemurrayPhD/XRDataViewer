@@ -169,11 +169,20 @@ class EmbeddedJupyterManager(QtCore.QObject):
         self._settings_dir = None
         try:
             settings_dir = Path(tempfile.mkdtemp(prefix="xrdataviewer_jlab_settings_"))
+            overrides_path = settings_dir / "page_config.json"
+            overrides = {
+                "disabledExtensions": ["@jupyterlab/running-extension"],
+            }
+            with open(overrides_path, "w", encoding="utf-8") as handle:
+                json.dump(overrides, handle)
             plugin_dir = settings_dir / "@jupyterlab" / "running-extension"
             plugin_dir.mkdir(parents=True, exist_ok=True)
             plugin_settings = {"contextMenu": []}
             with open(plugin_dir / "plugin.jupyterlab-settings", "w", encoding="utf-8") as handle:
                 json.dump(plugin_settings, handle)
+            self.message.emit(
+                "Disabled JupyterLab's running sessions extension for embedded browser compatibility."
+            )
             env["JUPYTERLAB_SETTINGS_DIR"] = str(settings_dir)
             self._settings_dir = str(settings_dir)
         except Exception as exc:
