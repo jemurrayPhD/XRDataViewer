@@ -20,7 +20,7 @@ from ..datasets import (
 )
 from ..processing import ProcessingManager
 from ..preferences import PreferencesManager
-from ..utils import _ensure_extension, _sanitize_filename, _save_snapshot
+from ..utils import _ask_layout_label, _ensure_extension, _sanitize_filename, _save_snapshot
 
 
 class OverlayLayer(QtCore.QObject):

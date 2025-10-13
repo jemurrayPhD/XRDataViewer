@@ -26,7 +26,7 @@ from ..datasets import (
 )
 from ..processing import ProcessingManager, ProcessingSelectionDialog
 from ..preferences import PreferencesManager
-from ..utils import _ensure_extension, _sanitize_filename, _save_snapshot, open_dataset
+from ..utils import _ask_layout_label, _ensure_extension, _sanitize_filename, _save_snapshot, open_dataset
 
 
 class ViewerFrame(QtWidgets.QFrame):

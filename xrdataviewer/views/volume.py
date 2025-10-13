@@ -15,7 +15,7 @@ except Exception:  # pragma: no cover - optional dependency
 from app_logging import log_action
 
 from ..preferences import PreferencesManager
-from ..utils import _ensure_extension, _save_snapshot
+from ..utils import _ask_layout_label, _ensure_extension, _save_snapshot
 
 
 class VolumeAlphaHandle(QtWidgets.QGraphicsEllipseItem):

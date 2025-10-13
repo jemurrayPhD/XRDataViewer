@@ -27,7 +27,13 @@ from ..annotations import PlotAnnotationDialog
 from ..datasets import DataSetRef, HighDimVarRef, MemoryDatasetRef
 from ..preferences import PreferencesManager
 from ..processing import ProcessingManager, ProcessingSelectionDialog
-from ..utils import _ensure_extension, _nan_aware_reducer, _sanitize_filename, _save_snapshot
+from ..utils import (
+    _ask_layout_label,
+    _ensure_extension,
+    _nan_aware_reducer,
+    _sanitize_filename,
+    _save_snapshot,
+)
 from .volume import SequentialVolumeWindow
 
 
