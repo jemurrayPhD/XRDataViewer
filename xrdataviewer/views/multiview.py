@@ -11,9 +11,16 @@ from PySide2 import QtCore, QtGui, QtWidgets
 
 from app_logging import log_action
 from xr_coords import guess_phys_coords
-from xr_plot_widget import CentralPlotWidget, PlotAnnotationConfig, apply_plotitem_annotation, plotitem_annotation_state
+from xr_plot_widget import (
+    CentralPlotWidget,
+    LineStyleConfig,
+    PlotAnnotationConfig,
+    apply_plotitem_annotation,
+    clone_line_style,
+    plotitem_annotation_state,
+)
 
-from ..annotations import PlotAnnotationDialog
+from ..annotations import LineStyleDialog, PlotAnnotationDialog
 from ..datasets import (
     DataSetRef,
     HighDimVarRef,
@@ -31,6 +38,7 @@ from ..utils import ask_layout_label, ensure_extension, sanitize_filename, save_
 
 class ViewerFrame(QtWidgets.QFrame):
     request_close = QtCore.Signal(object)
+    display_mode_changed = QtCore.Signal(str)
 
     def __init__(self, title: str = "", parent=None):
         super().__init__(parent)
@@ -59,6 +67,7 @@ class ViewerFrame(QtWidgets.QFrame):
         self._variable_hints: Dict[str, str] = {}
         self._current_variable: Optional[str] = None
         self.preferences: Optional[PreferencesManager] = None
+        self._line_style = LineStyleConfig()
 
         lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(2,2,2,2); lay.setSpacing(2)
         # Header
@@ -102,6 +111,10 @@ class ViewerFrame(QtWidgets.QFrame):
         try:
             self.viewer.sigLocalCrosshairToggled.connect(self._on_viewer_crosshair_toggled)
             self._on_viewer_crosshair_toggled(self.viewer.local_crosshair_enabled())
+        except Exception:
+            pass
+        try:
+            self.viewer.set_line_style(self._line_style)
         except Exception:
             pass
         self.center_split.addWidget(self.viewer)
@@ -185,6 +198,19 @@ class ViewerFrame(QtWidgets.QFrame):
 
     def dispose(self):
         self._dispose_dataset()
+
+    def line_style_config(self) -> LineStyleConfig:
+        return clone_line_style(self._line_style)
+
+    def set_line_style_config(self, config: LineStyleConfig, *, refresh: bool = True):
+        self._line_style = clone_line_style(config)
+        try:
+            self.viewer.set_line_style(self._line_style, refresh=refresh)
+        except Exception:
+            pass
+
+    def is_line_display(self) -> bool:
+        return self._display_mode == "line"
 
     def set_dataset(self, dataset: xr.Dataset, path: Path, *, select: Optional[str] = None):
         self._dispose_dataset()
@@ -449,6 +475,10 @@ class ViewerFrame(QtWidgets.QFrame):
     def _display_data(self, data: np.ndarray, *, autorange: bool = False):
         if self._display_mode == "line":
             x = self._line_x if self._line_x is not None else np.arange(data.size, dtype=float)
+            try:
+                self.viewer.set_line_style(self._line_style, refresh=False)
+            except Exception:
+                pass
             self.viewer.set_line(x, data, autorange=autorange)
             y_label = self._current_variable or "Value"
             x_label = self._line_label or "Index"
@@ -457,6 +487,10 @@ class ViewerFrame(QtWidgets.QFrame):
             except Exception:
                 pass
             self.viewer.set_legend_sources([(self.viewer.line_item(), y_label)])
+            try:
+                self.display_mode_changed.emit("line")
+            except Exception:
+                pass
             return
 
         if self._display_mode == "warped" and "X" in self._coords and "Y" in self._coords:
@@ -467,6 +501,10 @@ class ViewerFrame(QtWidgets.QFrame):
             self.viewer.set_image(data, autorange=autorange)
         label = self._current_variable or "Image"
         self.viewer.set_legend_sources([(self.viewer.image_item(), label)])
+        try:
+            self.display_mode_changed.emit(self._display_mode)
+        except Exception:
+            pass
 
     def set_histogram_visible(self, on: bool):
         self._hist_master_enabled = bool(on)
@@ -680,6 +718,11 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.btn_export.setMenu(export_menu)
         bar.addWidget(self.btn_export)
 
+        self.btn_line_style = QtWidgets.QPushButton("Line style…")
+        self.btn_line_style.setEnabled(False)
+        self.btn_line_style.clicked.connect(self._open_line_style_dialog)
+        bar.addWidget(self.btn_line_style)
+
         self.btn_annotations = QtWidgets.QPushButton("Set annotations…")
         self.btn_annotations.clicked.connect(self._open_annotation_dialog)
         bar.addWidget(self.btn_annotations)
@@ -809,6 +852,7 @@ class MultiViewGrid(QtWidgets.QWidget):
         fr = ViewerFrame(title=frame_title, parent=self)
         fr.set_preferences(self.preferences)
         fr.request_close.connect(self._remove_frame)
+        fr.display_mode_changed.connect(self._on_frame_mode_changed)
 
         try:
             if ds_ref:
@@ -864,6 +908,10 @@ class MultiViewGrid(QtWidgets.QWidget):
             self.btn_select_all.setEnabled(has_frames)
         if hasattr(self, "btn_apply_processing"):
             self.btn_apply_processing.setEnabled(bool(self._selected_frames))
+        if hasattr(self, "btn_line_style"):
+            targets = self.selected_frames() or list(self.frames)
+            has_line = any(fr.is_line_display() for fr in targets)
+            self.btn_line_style.setEnabled(has_line)
 
     def _select_all_frames(self):
         if not self.frames:
@@ -1021,6 +1069,30 @@ class MultiViewGrid(QtWidgets.QWidget):
         base = replace(config, apply_to_all=False)
         for frame in targets:
             frame.apply_annotation(base)
+
+    def _open_line_style_dialog(self):
+        frames = self.selected_frames()
+        if frames:
+            targets = [fr for fr in frames if fr.is_line_display()]
+        else:
+            targets = [fr for fr in self.frames if fr.is_line_display()]
+        if not targets:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No 1D plots",
+                "Select a 1D plot before adjusting the line style.",
+            )
+            return
+        dialog = LineStyleDialog(self, initial=targets[0].line_style_config())
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        style = dialog.line_style()
+        if style is None:
+            return
+        for fr in targets:
+            fr.set_line_style_config(style, refresh=True)
+        log_action(f"Updated line style for {len(targets)} plot(s)")
+        self._update_apply_button_state()
 
     # ---------- export helpers ----------
     def _on_preferences_changed(self, _data):
@@ -1212,6 +1284,9 @@ class MultiViewGrid(QtWidgets.QWidget):
                 self._cursor_handlers[viewer] = True
             except Exception:
                 self._cursor_handlers.pop(viewer, None)
+
+    def _on_frame_mode_changed(self, *_):
+        self._update_apply_button_state()
 
     def _disconnect_frame_signals(self, fr: ViewerFrame):
         viewer = getattr(fr, "viewer", None)

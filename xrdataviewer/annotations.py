@@ -4,7 +4,7 @@ from typing import Optional
 
 from PySide2 import QtCore, QtGui, QtWidgets
 
-from xr_plot_widget import PlotAnnotationConfig
+from xr_plot_widget import LineStyleConfig, PlotAnnotationConfig
 
 
 class ColorButton(QtWidgets.QPushButton):
@@ -197,6 +197,139 @@ class PlotAnnotationDialog(QtWidgets.QDialog):
             legend_visible=self.chk_legend.isChecked(),
             legend_entries=[line.strip() for line in self.edit_legend_entries.toPlainText().splitlines() if line.strip()],
             legend_position=self.cmb_legend_position.currentText(),
+        )
+        self._result = config
+        super().accept()
+
+
+class LineStyleDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None, *, initial: Optional[LineStyleConfig] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Configure line style")
+        self._result: Optional[LineStyleConfig] = None
+        initial = initial or LineStyleConfig()
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        form = QtWidgets.QFormLayout()
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
+
+        self.btn_color = ColorButton(initial.color)
+        form.addRow("Line color", self.btn_color)
+
+        self.spin_width = QtWidgets.QDoubleSpinBox()
+        self.spin_width.setRange(0.1, 20.0)
+        self.spin_width.setDecimals(2)
+        self.spin_width.setSingleStep(0.1)
+        self.spin_width.setValue(max(0.1, float(initial.width)))
+        form.addRow("Line width", self.spin_width)
+
+        self.cmb_pen_style = QtWidgets.QComboBox()
+        self.cmb_pen_style.addItem("Solid", "solid")
+        self.cmb_pen_style.addItem("Dashed", "dashed")
+        self.cmb_pen_style.addItem("Dotted", "dotted")
+        self.cmb_pen_style.addItem("Dash-dot", "dashdot")
+        idx = self.cmb_pen_style.findData(initial.pen_style)
+        self.cmb_pen_style.setCurrentIndex(max(0, idx))
+        form.addRow("Line pattern", self.cmb_pen_style)
+
+        self.cmb_curve_mode = QtWidgets.QComboBox()
+        self.cmb_curve_mode.addItem("Straight (piecewise)", "linear")
+        self.cmb_curve_mode.addItem("Smooth curve", "smooth")
+        self.cmb_curve_mode.addItem("Step (staircase)", "step")
+        idx = self.cmb_curve_mode.findData(initial.curve_mode)
+        self.cmb_curve_mode.setCurrentIndex(max(0, idx))
+        form.addRow("Curve mode", self.cmb_curve_mode)
+
+        self._smooth_row = QtWidgets.QWidget()
+        smooth_layout = QtWidgets.QHBoxLayout(self._smooth_row)
+        smooth_layout.setContentsMargins(0, 0, 0, 0)
+        smooth_layout.setSpacing(6)
+        smooth_layout.addWidget(QtWidgets.QLabel("Smoothing strength"))
+        self.spin_smooth = QtWidgets.QSpinBox()
+        self.spin_smooth.setRange(1, 20)
+        self.spin_smooth.setValue(max(1, int(initial.smooth_span)))
+        smooth_layout.addWidget(self.spin_smooth)
+        smooth_layout.addStretch(1)
+        form.addRow("", self._smooth_row)
+
+        opacity_row = QtWidgets.QHBoxLayout()
+        opacity_row.setContentsMargins(0, 0, 0, 0)
+        opacity_row.setSpacing(6)
+        self.sld_opacity = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.sld_opacity.setRange(0, 100)
+        self.sld_opacity.setValue(int(round(initial.normalized_opacity() * 100)))
+        opacity_row.addWidget(self.sld_opacity, 1)
+        self.lbl_opacity = QtWidgets.QLabel(f"{int(round(initial.normalized_opacity() * 100))}%")
+        opacity_row.addWidget(self.lbl_opacity)
+        form.addRow("Opacity", opacity_row)
+
+        self.chk_markers = QtWidgets.QCheckBox("Show point markers")
+        self.chk_markers.setChecked(bool(initial.markers))
+        form.addRow(self.chk_markers)
+
+        marker_row = QtWidgets.QHBoxLayout()
+        marker_row.setContentsMargins(0, 0, 0, 0)
+        marker_row.setSpacing(6)
+        self.cmb_marker_style = QtWidgets.QComboBox()
+        self.cmb_marker_style.addItem("Circle", "o")
+        self.cmb_marker_style.addItem("Square", "s")
+        self.cmb_marker_style.addItem("Triangle", "t")
+        self.cmb_marker_style.addItem("Diamond", "d")
+        self.cmb_marker_style.addItem("Plus", "+")
+        self.cmb_marker_style.addItem("Cross", "x")
+        idx = self.cmb_marker_style.findData(initial.marker_style)
+        self.cmb_marker_style.setCurrentIndex(max(0, idx))
+        marker_row.addWidget(self.cmb_marker_style, 1)
+        self.spin_marker_size = QtWidgets.QSpinBox()
+        self.spin_marker_size.setRange(2, 48)
+        self.spin_marker_size.setValue(max(2, int(initial.marker_size)))
+        marker_row.addWidget(QtWidgets.QLabel("Size"))
+        marker_row.addWidget(self.spin_marker_size)
+        form.addRow("Marker style", marker_row)
+
+        layout.addLayout(form)
+
+        self.cmb_curve_mode.currentIndexChanged.connect(self._update_curve_controls)
+        self.chk_markers.toggled.connect(self._update_marker_controls)
+        self.sld_opacity.valueChanged.connect(self._update_opacity_label)
+
+        self._update_curve_controls()
+        self._update_marker_controls(self.chk_markers.isChecked())
+        self._update_opacity_label(self.sld_opacity.value())
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _update_curve_controls(self):
+        mode = self.cmb_curve_mode.currentData()
+        self._smooth_row.setVisible(mode == "smooth")
+
+    def _update_marker_controls(self, checked: bool):
+        self.cmb_marker_style.setEnabled(checked)
+        self.spin_marker_size.setEnabled(checked)
+
+    def _update_opacity_label(self, value: int):
+        self.lbl_opacity.setText(f"{int(value)}%")
+
+    def line_style(self) -> Optional[LineStyleConfig]:
+        return self._result
+
+    def accept(self):
+        config = LineStyleConfig(
+            color=self.btn_color.color(),
+            opacity=self.sld_opacity.value() / 100.0,
+            width=self.spin_width.value(),
+            pen_style=self.cmb_pen_style.currentData(),
+            curve_mode=self.cmb_curve_mode.currentData(),
+            smooth_span=self.spin_smooth.value(),
+            markers=self.chk_markers.isChecked(),
+            marker_style=self.cmb_marker_style.currentData(),
+            marker_size=self.spin_marker_size.value(),
         )
         self._result = config
         super().accept()

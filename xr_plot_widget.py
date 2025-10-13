@@ -14,6 +14,60 @@ FORCE_SOFT_RENDER = False
 if FORCE_SOFT_RENDER:
     pg.setConfigOptions(useOpenGL=False, antialias=False)
 
+
+@dataclass
+class LineStyleConfig:
+    """Visual customization for 1D line plots."""
+
+    color: QtGui.QColor = field(default_factory=lambda: QtGui.QColor("#4fc3f7"))
+    opacity: float = 1.0
+    width: float = 2.0
+    pen_style: str = "solid"
+    curve_mode: str = "linear"  # "linear", "smooth", "step"
+    smooth_span: int = 3
+    markers: bool = False
+    marker_style: str = "o"
+    marker_size: int = 7
+
+    def normalized_opacity(self) -> float:
+        return max(0.0, min(1.0, float(self.opacity)))
+
+    def effective_color(self) -> QtGui.QColor:
+        color = QtGui.QColor(self.color)
+        if not color.isValid():
+            color = QtGui.QColor("#4fc3f7")
+        return color
+
+    def smooth_window(self, length: int) -> int:
+        length = int(max(1, length))
+        if length < 3:
+            return 3
+        span = max(1, int(self.smooth_span))
+        window = span * 2 + 1
+        if window > length:
+            window = length if length % 2 else max(3, length - 1)
+        if window < 3:
+            window = 3
+        if window % 2 == 0:
+            window += 1
+        return window
+
+
+def clone_line_style(style: Optional[LineStyleConfig]) -> LineStyleConfig:
+    src = style or LineStyleConfig()
+    return LineStyleConfig(
+        color=src.effective_color(),
+        opacity=src.opacity,
+        width=src.width,
+        pen_style=src.pen_style,
+        curve_mode=src.curve_mode,
+        smooth_span=src.smooth_span,
+        markers=src.markers,
+        marker_style=src.marker_style,
+        marker_size=src.marker_size,
+    )
+
+
 @dataclass
 class PlotAnnotationConfig:
     """Configuration describing plot annotations and aesthetics."""
@@ -546,6 +600,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._line_x: Optional[np.ndarray] = None
         self._line_y: Optional[np.ndarray] = None
         self._mode: str = "image"
+        self._line_style = LineStyleConfig()
 
         self._legend_item: Optional[pg.LegendItem] = None
         self._legend_sources: List[Tuple[pg.GraphicsObject, str]] = []
@@ -883,16 +938,85 @@ class CentralPlotWidget(QtWidgets.QWidget):
                 xs = np.linspace(0.0, float(ys.size - 1), ys.size)
         self._line_x = xs.astype(float, copy=False)
         self._line_y = ys.astype(float, copy=False)
-        pen = pg.mkPen((200, 230, 255), width=2)
-        self._line_item.setData(self._line_x, self._line_y, pen=pen)
         self._last_data = np.array(self._line_y, copy=True)
         self._last_rect = None
         self._mode = "line"
+        self._render_line_data(autorange=autorange)
+
+    def line_style(self) -> LineStyleConfig:
+        return clone_line_style(self._line_style)
+
+    def set_line_style(self, style: LineStyleConfig, *, refresh: bool = True):
+        self._line_style = clone_line_style(style)
+        if refresh and self._mode == "line":
+            self._render_line_data(autorange=False)
+
+    def _render_line_data(self, *, autorange: bool):
+        if self._line_x is None or self._line_y is None:
+            return
+        style = self._line_style or LineStyleConfig()
+        xs = np.asarray(self._line_x, float)
+        ys = np.asarray(self._line_y, float)
+        x_plot = xs
+        y_plot = ys
+        step_mode = style.curve_mode == "step"
+        if style.curve_mode == "smooth" and ys.size >= 3:
+            try:
+                window = style.smooth_window(ys.size)
+                y_plot = pg.functions.smooth(ys, window=window)
+            except Exception:
+                y_plot = ys
+
+        color = style.effective_color()
+        color.setAlphaF(style.normalized_opacity())
+        width = max(0.1, float(style.width))
+        pen = pg.mkPen(color, width=width)
         try:
+            pen_style = {
+                "solid": QtCore.Qt.SolidLine,
+                "dashed": QtCore.Qt.DashLine,
+                "dotted": QtCore.Qt.DotLine,
+                "dashdot": QtCore.Qt.DashDotLine,
+            }.get(style.pen_style, QtCore.Qt.SolidLine)
+            pen.setStyle(pen_style)
+        except Exception:
+            pass
+
+        kwargs: Dict[str, object] = {}
+        if step_mode:
+            kwargs["stepMode"] = True
+
+        if style.markers:
+            symbol_map = {
+                "o": "o",
+                "s": "s",
+                "t": "t",
+                "d": "d",
+                "+": "+",
+                "x": "x",
+            }
+            symbol = symbol_map.get(style.marker_style, "o")
+            marker_color = QtGui.QColor(color)
+            marker_pen = QtGui.QPen(marker_color)
+            marker_pen.setWidthF(max(1.0, width * 0.75))
+            kwargs.update(
+                {
+                    "symbol": symbol,
+                    "symbolBrush": marker_color,
+                    "symbolPen": marker_pen,
+                    "symbolSize": max(1, int(style.marker_size)),
+                }
+            )
+        else:
+            kwargs["symbol"] = None
+
+        try:
+            self._line_item.setData(x_plot, y_plot, pen=pen, **kwargs)
             self._line_item.setVisible(True)
             self.img_item.setVisible(False)
         except Exception:
             pass
+
         container = self.histogram_widget()
         if container is not None:
             container.setVisible(False)
