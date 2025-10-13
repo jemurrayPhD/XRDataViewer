@@ -87,6 +87,7 @@ class EmbeddedJupyterManager(QtCore.QObject):
         self._startup_script: Optional[str] = None
         self._kernelspec_dir: Optional[str] = None
         self._kernel_name = "xrdataviewer"
+        self._settings_dir: Optional[str] = None
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
@@ -165,6 +166,28 @@ class EmbeddedJupyterManager(QtCore.QObject):
             )
             self.message.emit(str(exc))
 
+        self._settings_dir = None
+        try:
+            settings_dir = Path(tempfile.mkdtemp(prefix="xrdataviewer_jlab_settings_"))
+            plugin_dir = settings_dir / "@jupyterlab" / "running-extension"
+            plugin_dir.mkdir(parents=True, exist_ok=True)
+            plugin_settings = {"contextMenu": []}
+            with open(plugin_dir / "plugin.jupyterlab-settings", "w", encoding="utf-8") as handle:
+                json.dump(plugin_settings, handle)
+            env["JUPYTERLAB_SETTINGS_DIR"] = str(settings_dir)
+            self._settings_dir = str(settings_dir)
+        except Exception as exc:
+            try:
+                if "settings_dir" in locals():
+                    shutil.rmtree(settings_dir, ignore_errors=True)
+            except Exception:
+                pass
+            self._settings_dir = None
+            self.message.emit(
+                "Warning: failed to configure JupyterLab settings overrides; context menus may be missing."
+            )
+            self.message.emit(str(exc))
+
         startup_code = textwrap.dedent(
             """
             try:
@@ -201,6 +224,12 @@ class EmbeddedJupyterManager(QtCore.QObject):
                 except Exception:
                     pass
                 self._startup_script = None
+            if self._kernelspec_dir:
+                shutil.rmtree(self._kernelspec_dir, ignore_errors=True)
+                self._kernelspec_dir = None
+            if self._settings_dir:
+                shutil.rmtree(self._settings_dir, ignore_errors=True)
+                self._settings_dir = None
             self.failed.emit(f"Failed to start JupyterLab: {exc}")
             return False
 
@@ -258,6 +287,9 @@ class EmbeddedJupyterManager(QtCore.QObject):
         if self._kernelspec_dir:
             shutil.rmtree(self._kernelspec_dir, ignore_errors=True)
             self._kernelspec_dir = None
+        if self._settings_dir:
+            shutil.rmtree(self._settings_dir, ignore_errors=True)
+            self._settings_dir = None
 
     def url(self) -> Optional[str]:
         return self._url
@@ -350,6 +382,9 @@ class EmbeddedJupyterManager(QtCore.QObject):
         if self._kernelspec_dir:
             shutil.rmtree(self._kernelspec_dir, ignore_errors=True)
             self._kernelspec_dir = None
+        if self._settings_dir:
+            shutil.rmtree(self._settings_dir, ignore_errors=True)
+            self._settings_dir = None
 
     def __del__(self):
         try:
