@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Compatibility launcher for the XRDataViewer application."""
 
+import os
 import json
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -11,6 +12,8 @@ from functools import partial
 # Force pyqtgraph to use the same Qt binding as the rest of the application.
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide2")
 
+
+from xrdataviewer.app import main
 from xr_plot_widget import CentralPlotWidget
 from xr_coords import guess_phys_coords
 from data_processing import (
