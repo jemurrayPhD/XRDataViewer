@@ -21,8 +21,9 @@ except Exception:  # pragma: no cover - cv2 may be unavailable
 
 from app_logging import log_action
 from xr_coords import guess_phys_coords
-from xr_plot_widget import CentralPlotWidget, ScientificAxisItem
+from xr_plot_widget import CentralPlotWidget, PlotAnnotationConfig, ScientificAxisItem
 
+from ..annotations import PlotAnnotationDialog
 from ..datasets import DataSetRef, HighDimVarRef, MemoryDatasetRef
 from ..preferences import PreferencesManager
 from ..processing import ProcessingManager, ProcessingSelectionDialog

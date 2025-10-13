@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+import pyqtgraph as pg
 from PySide2 import QtCore, QtGui, QtWidgets
 
 try:  # Optional dependency
