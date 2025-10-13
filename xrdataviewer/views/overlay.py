@@ -947,6 +947,44 @@ class OverlayView(QtWidgets.QWidget):
     # ---------- data prep ----------
     def _prepare_image(self, da, coords):
         Z = np.asarray(da.values, float)
+        if Z.ndim == 0:
+            Z = Z.reshape(1, 1)
+            rect = self._rect_to_qrectf(0.0, 1.0, 0.0, 1.0)
+            return Z, rect
+        if Z.ndim == 1:
+            x_coord = coords.get("x") or coords.get("X")
+            y_coord = coords.get("y") or coords.get("Y")
+
+            if x_coord is None and y_coord is not None:
+                data = Z.reshape(Z.shape[0], 1)
+                y_vals = np.asarray(y_coord, float)
+                if y_vals.ndim and y_vals.size:
+                    y0, y1 = float(y_vals[0]), float(y_vals[-1])
+                else:
+                    y0, y1 = 0.0, float(data.shape[0])
+                x0, x1 = 0.0, 1.0
+            else:
+                data = Z.reshape(1, Z.shape[0])
+                if x_coord is not None:
+                    x_vals = np.asarray(x_coord, float)
+                    if x_vals.ndim and x_vals.size:
+                        x0, x1 = float(x_vals[0]), float(x_vals[-1])
+                    else:
+                        x0, x1 = 0.0, float(data.shape[1])
+                else:
+                    x0, x1 = 0.0, float(data.shape[1])
+
+                if y_coord is not None:
+                    y_vals = np.asarray(y_coord, float)
+                    if y_vals.ndim and y_vals.size:
+                        y0, y1 = float(y_vals[0]), float(y_vals[-1])
+                    else:
+                        y0, y1 = 0.0, 1.0
+                else:
+                    y0, y1 = 0.0, 1.0
+
+            rect = self._rect_to_qrectf(x0, x1, y0, y1)
+            return np.asarray(data, float), rect
         if "X" in coords and "Y" in coords:
             return self._resample_warped(coords["X"], coords["Y"], Z)
         if "x" in coords and "y" in coords:
