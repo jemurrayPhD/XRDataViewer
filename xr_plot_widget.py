@@ -478,6 +478,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
     sigInfoMessage = QtCore.Signal(str)
     sigLevelsChanged = QtCore.Signal(tuple)
     sigViewChanged = QtCore.Signal(tuple, tuple)
+    sigLocalCrosshairToggled = QtCore.Signal(bool)
     sigCursorMoved = QtCore.Signal(object, float, float, object, bool, str)
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -855,6 +856,10 @@ class CentralPlotWidget(QtWidgets.QWidget):
             return
         self._local_crosshair_enabled = enabled
         self._update_local_crosshair()
+        try:
+            self.sigLocalCrosshairToggled.emit(self._local_crosshair_enabled)
+        except Exception:
+            pass
 
     def _update_local_crosshair(self):
         if self._local_crosshair_enabled and self._last_local_crosshair:
@@ -961,6 +966,9 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._histogram_menu_getter = getter
         self._histogram_menu_setter = setter
         self._histogram_menu_enabled_getter = enabled_getter
+
+    def local_crosshair_enabled(self) -> bool:
+        return bool(self._local_crosshair_enabled)
 
     # ---------- resampling helpers ----------
     def _rect_to_qrectf(self, x0, x1, y0, y1):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
@@ -61,6 +62,12 @@ class ViewerFrame(QtWidgets.QFrame):
         # Header
         hdr = QtWidgets.QFrame(); hl = QtWidgets.QHBoxLayout(hdr); hl.setContentsMargins(6,3,6,3)
         self.lbl = QtWidgets.QLabel(title); hl.addWidget(self.lbl, 1)
+        self._crosshair_btn = QtWidgets.QToolButton()
+        self._crosshair_btn.setText("Crosshair")
+        self._crosshair_btn.setCheckable(True)
+        self._crosshair_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self._crosshair_btn.toggled.connect(self._on_crosshair_toggled)
+        hl.addWidget(self._crosshair_btn, 0)
         btn_close = QtWidgets.QToolButton(); btn_close.setText("×")
         btn_close.clicked.connect(lambda: self.request_close.emit(self))
         hl.addWidget(btn_close, 0)
@@ -90,6 +97,11 @@ class ViewerFrame(QtWidgets.QFrame):
         lay.addWidget(self.center_split, 1)
 
         self.viewer = CentralPlotWidget(self)
+        try:
+            self.viewer.sigLocalCrosshairToggled.connect(self._on_viewer_crosshair_toggled)
+            self._on_viewer_crosshair_toggled(self.viewer.local_crosshair_enabled())
+        except Exception:
+            pass
         self.center_split.addWidget(self.viewer)
 
         self._hist_master_enabled = True
@@ -494,6 +506,19 @@ class ViewerFrame(QtWidgets.QFrame):
 
     def apply_annotation(self, config: PlotAnnotationConfig):
         self.viewer.apply_annotation(config)
+
+    def _on_crosshair_toggled(self, enabled: bool):
+        try:
+            self.viewer.set_local_crosshair_enabled(enabled)
+        except Exception:
+            pass
+
+    def _on_viewer_crosshair_toggled(self, enabled: bool):
+        block = self._crosshair_btn.blockSignals(True)
+        try:
+            self._crosshair_btn.setChecked(bool(enabled))
+        finally:
+            self._crosshair_btn.blockSignals(block)
 
 class MultiViewGrid(QtWidgets.QWidget):
     """
