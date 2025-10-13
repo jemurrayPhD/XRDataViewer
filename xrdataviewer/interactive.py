@@ -86,6 +86,7 @@ class EmbeddedJupyterManager(QtCore.QObject):
         self._watcher_thread: Optional[threading.Thread] = None
         self._startup_script: Optional[str] = None
         self._kernelspec_dir: Optional[str] = None
+        self._kernel_name = "xrdataviewer"
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
@@ -129,16 +130,18 @@ class EmbeddedJupyterManager(QtCore.QObject):
                 "--ServerApp.allow_remote_access=False",
                 "--ServerApp.disable_check_xsrf=True",
                 f"--ServerApp.root_dir={os.getcwd()}",
+                f"--ServerApp.default_kernel_name={self._kernel_name}",
             ]
         )
 
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
+        env["JUPYTER_DEFAULT_KERNEL_NAME"] = self._kernel_name
 
         self._kernelspec_dir = None
         try:
             self._kernelspec_dir = tempfile.mkdtemp(prefix="xrdataviewer_kernel_")
-            kernels_dir = Path(self._kernelspec_dir) / "kernels" / "python3"
+            kernels_dir = Path(self._kernelspec_dir) / "kernels" / self._kernel_name
             kernels_dir.mkdir(parents=True, exist_ok=True)
             kernel_spec = {
                 "argv": [sys.executable, "-m", "ipykernel_launcher", "-f", "{connection_file}"],
@@ -581,422 +584,6 @@ if QtWebEngineWidgets is not None:
         ) -> None:  # type: ignore[override]
             self.consoleMessage.emit(int(level), message, int(line_number), source_id)
 
-
-class CodeServerManager(QtCore.QObject):
-    """Run a local code-server or openvscode-server instance when available."""
-
-    urlReady = QtCore.Signal(str)
-    message = QtCore.Signal(str)
-    failed = QtCore.Signal(str)
-    stopped = QtCore.Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._process: Optional[subprocess.Popen] = None
-        self._port: Optional[int] = None
-        self._url: Optional[str] = None
-        self._kind: Optional[str] = None
-        self._stop_event = threading.Event()
-
-    def is_running(self) -> bool:
-        return self._process is not None and self._process.poll() is None
-
-    def start(self) -> bool:
-        if self.is_running():
-            if self._url:
-                self.urlReady.emit(self._url)
-            return True
-
-        command = self._resolve_command()
-        if command is None:
-            self.failed.emit(
-                "No code-server or openvscode-server executable found. Install one to embed VS Code here."
-            )
-            return False
-
-        path, kind = command
-        self._kind = kind
-        self._port = self._find_free_port()
-        self._url = f"http://127.0.0.1:{self._port}/"
-        self._stop_event.clear()
-
-        if kind == "code-server":
-            args = [path, "--bind-addr", f"127.0.0.1:{self._port}", "--auth", "none", "--disable-telemetry"]
-        else:
-            args = [path, "--host", "127.0.0.1", "--port", str(self._port), "--without-connection-token"]
-
-        env = os.environ.copy()
-        env.setdefault("PYTHONUNBUFFERED", "1")
-
-        try:
-            self._process = subprocess.Popen(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                cwd=os.getcwd(),
-                env=env,
-            )
-        except Exception as exc:
-            self._process = None
-            self.failed.emit(f"Failed to start {kind}: {exc}")
-            return False
-
-        threading.Thread(target=self._forward_stream, args=(self._process.stdout,), daemon=True).start()
-        threading.Thread(target=self._forward_stream, args=(self._process.stderr,), daemon=True).start()
-        threading.Thread(target=self._probe_ready, daemon=True).start()
-        threading.Thread(target=self._watch_process, daemon=True).start()
-
-        self.message.emit("Starting local VS Code server…")
-        return True
-
-    def stop(self):
-        self._stop_event.set()
-        if self._process is None:
-            return
-        proc = self._process
-        self._process = None
-        try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        except Exception:
-            pass
-        finally:
-            self.stopped.emit()
-        self._port = None
-        self._url = None
-        self._kind = None
-
-    def url(self) -> Optional[str]:
-        return self._url
-
-    def _resolve_command(self) -> Optional[Tuple[str, str]]:
-        for name in ("code-server", "code-server.cmd", "code-server.exe"):
-            path = shutil.which(name)
-            if path:
-                return path, "code-server"
-        for name in ("openvscode-server", "openvscode-server.cmd", "openvscode-server.exe"):
-            path = shutil.which(name)
-            if path:
-                return path, "openvscode"
-        return None
-
-    def _find_free_port(self) -> int:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-        sock.close()
-        return int(port)
-
-    def _forward_stream(self, stream):
-        if stream is None:
-            return
-        try:
-            for line in iter(stream.readline, ""):
-                if self._stop_event.is_set():
-                    break
-                text = line.strip()
-                if text:
-                    self.message.emit(text)
-                    match = re.search(r"http[s]?://[^\s]+", text)
-                    if match and match.group(0).startswith("http"):
-                        self._url = match.group(0)
-                        self.urlReady.emit(self._url)
-            stream.close()
-        except Exception:
-            pass
-
-    def _probe_ready(self):
-        if not self._url:
-            return
-        for _ in range(60):
-            if self._stop_event.is_set() or not self.is_running():
-                return
-            try:
-                with urllib.request.urlopen(self._url, timeout=1):
-                    self.urlReady.emit(self._url)
-                    self.message.emit("Local VS Code server ready.")
-                    return
-            except Exception:
-                time.sleep(0.5)
-        if not self._stop_event.is_set():
-            self.failed.emit("Timed out waiting for the VS Code server to start.")
-
-    def _watch_process(self):
-        if self._process is None:
-            return
-        try:
-            code = self._process.wait()
-        except Exception:
-            return
-        if self._stop_event.is_set():
-            return
-        if code != 0:
-            self.failed.emit(f"VS Code server exited unexpectedly (code {code}).")
-        else:
-            self.message.emit("VS Code server stopped.")
-        self.stopped.emit()
-
-    def __del__(self):
-        try:
-            self.stop()
-        except Exception:
-            pass
-
-class VsCodeWebWidget(QtWidgets.QWidget):
-    """Optional embedded VS Code (web) workspace."""
-
-    statusMessage = QtCore.Signal(str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
-
-        intro = QtWidgets.QLabel(
-            "Launch a VS Code compatible environment. Provide a URL, start a local code-server, "
-            "or open a desktop instance."
-        )
-        intro.setWordWrap(True)
-        intro.setStyleSheet("color: #555;")
-        layout.addWidget(intro)
-
-        controls = QtWidgets.QHBoxLayout()
-        controls.addWidget(QtWidgets.QLabel("URL:"))
-        self.url_edit = QtWidgets.QLineEdit("https://vscode.dev/")
-        self.url_edit.setPlaceholderText("https://vscode.dev/ or http://127.0.0.1:port/")
-        controls.addWidget(self.url_edit, 1)
-        self.btn_open = QtWidgets.QPushButton("Open")
-        controls.addWidget(self.btn_open)
-        self.btn_start_local = QtWidgets.QPushButton("Start local server")
-        controls.addWidget(self.btn_start_local)
-        self.btn_stop_local = QtWidgets.QPushButton("Stop server")
-        controls.addWidget(self.btn_stop_local)
-        self.btn_external = QtWidgets.QPushButton("Launch desktop VS Code")
-        controls.addWidget(self.btn_external)
-        controls.addStretch(1)
-        layout.addLayout(controls)
-
-        self._code_path = shutil.which("code")
-        if not self._code_path:
-            self.btn_external.setEnabled(False)
-            self.btn_external.setToolTip("VS Code command-line launcher not detected in PATH.")
-
-        self.server_manager = CodeServerManager(self)
-        self.server_manager.urlReady.connect(self._on_server_ready)
-        self.server_manager.message.connect(self._relay_status)
-        self.server_manager.failed.connect(self._on_server_failed)
-        self.server_manager.stopped.connect(self._on_server_stopped)
-
-        self._js_warning_shown = False
-        if QtWebEngineWidgets is not None:
-            self._profile = QtWebEngineWidgets.QWebEngineProfile(self)
-            self._profile.setHttpUserAgent(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-            page = _ConsoleAwarePage(self._profile, self)
-            page.consoleMessage.connect(self._handle_console_message)
-            self.web_view = QtWebEngineWidgets.QWebEngineView()
-            self.web_view.setPage(page)
-            self.web_view.setUrl(QtCore.QUrl(self.url_edit.text()))
-            layout.addWidget(self.web_view, 1)
-            page.loadFinished.connect(lambda ok: self._toggle_error_banner(not ok))
-            self._error_banner = QtWidgets.QLabel(self.web_view)
-            self._error_banner.setStyleSheet(
-                "background: rgba(30, 30, 30, 0.85); color: white; padding: 8px; border-radius: 4px;"
-            )
-            self._error_banner.setAlignment(QtCore.Qt.AlignCenter)
-            self._error_banner.hide()
-        else:
-            self.web_view = None
-            self._error_banner = None
-            placeholder = QtWidgets.QTextBrowser()
-            placeholder.setReadOnly(True)
-            placeholder.setOpenExternalLinks(True)
-            placeholder.setHtml(
-                "<h2>VS Code web view unavailable</h2>"
-                "<p>QtWebEngineWidgets is not installed. Use the desktop launcher or open a browser manually.</p>"
-            )
-            layout.addWidget(placeholder, 1)
-            self.btn_open.setEnabled(False)
-
-        self.lbl_status = QtWidgets.QLabel(" ")
-        self.lbl_status.setStyleSheet("color: #666;")
-        self.lbl_status.setWordWrap(True)
-        layout.addWidget(self.lbl_status)
-
-        self.btn_open.clicked.connect(self._load_requested_url)
-        self.btn_external.clicked.connect(self._launch_desktop_code)
-        self.btn_start_local.clicked.connect(self._start_local_server)
-        self.btn_stop_local.clicked.connect(self._stop_local_server)
-        self._update_server_buttons()
-        self._shutdown_called = False
-        self.destroyed.connect(lambda *_: self.shutdown())
-
-    def _relay_status(self, text: str):
-        if text:
-            self.set_status(text)
-
-    def set_status(self, text: str):
-        if not text:
-            text = " "
-        self.lbl_status.setText(text)
-        self.statusMessage.emit(text)
-
-    def _load_requested_url(self):
-        if self.web_view is None:
-            return
-        url = QtCore.QUrl.fromUserInput(self.url_edit.text().strip())
-        if not url.isValid():
-            QtWidgets.QMessageBox.warning(self, "Invalid URL", "Please enter a valid URL to load.")
-            return
-        self._toggle_error_banner(False)
-        self.web_view.setUrl(url)
-        self.set_status(f"Loading {url.toString()}…")
-
-    def _launch_desktop_code(self):
-        if not self._code_path:
-            QtWidgets.QMessageBox.information(
-                self,
-                "VS Code unavailable",
-                "The 'code' launcher was not found in PATH. Install Visual Studio Code or add it to PATH.",
-            )
-            return
-        args = [self._code_path]
-        url = self.url_edit.text().strip()
-        if url and url.startswith("http"):
-            args.extend(["--new-window", url])
-        try:
-            subprocess.Popen(args)
-            self.set_status("Desktop VS Code launched.")
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "Launch failed", str(exc))
-
-    def _start_local_server(self):
-        if self.server_manager.start():
-            self._update_server_buttons()
-
-    def _stop_local_server(self):
-        self.server_manager.stop()
-        self._update_server_buttons()
-
-    def _on_server_ready(self, url: str):
-        self._update_server_buttons()
-        if url:
-            self.url_edit.setText(url)
-            self.set_status(f"Connected to {url}")
-            if self.web_view is not None:
-                self._toggle_error_banner(False)
-                self.web_view.setUrl(QtCore.QUrl(url))
-
-    def _on_server_failed(self, message: str):
-        self._update_server_buttons()
-        if message:
-            QtWidgets.QMessageBox.warning(self, "VS Code server", message)
-            self.set_status(message)
-
-    def _on_server_stopped(self):
-        self._update_server_buttons()
-        self.set_status("Local VS Code server stopped.")
-
-    def _handle_console_message(self, level: int, message: str, line: int, source: str):
-        if QtWebEngineWidgets is None:
-            return
-        cleaned = (message or "").strip()
-        location = source or "unknown source"
-        if line:
-            location = f"{location}:{line}"
-        if level == QtWebEngineWidgets.QWebEnginePage.JavaScriptConsoleMessageLevel.ErrorMessageLevel:
-            log_action(f"VS Code JS error ({location}): {cleaned}")
-            if "Unexpected token" in cleaned or "SyntaxError" in cleaned:
-                hint = (
-                    "The embedded browser hit a syntax error while loading the VS Code workspace. "
-                    "This usually means the page requires newer web platform features than the bundled Qt version. "
-                    "Use the desktop launcher or open the URL in an external browser instead."
-                )
-                self._toggle_error_banner(True, hint)
-                if not getattr(self, "_js_warning_shown", False):
-                    self.set_status(hint)
-                    self._js_warning_shown = True
-                # Stop trying to render the incompatible site so the console is not
-                # flooded with repeated syntax errors.
-                if self.web_view is not None:
-                    self.web_view.setHtml(
-                        """
-                        <html><body style='color:#eee;background:#202020;font-family:sans-serif;padding:16px;'>
-                        <h2>VS Code web workspace unavailable</h2>
-                        <p>The embedded Chromium engine cannot display this page. Use the
-                        <b>Launch desktop VS Code</b> button or open the URL in your
-                        default browser.</p>
-                        </body></html>
-                        """
-                    )
-            else:
-                self._toggle_error_banner(False)
-                self.set_status(cleaned or "JavaScript error in VS Code view.")
-        else:
-            if cleaned:
-                log_action(f"VS Code JS message ({location}): {cleaned}")
-
-    def _toggle_error_banner(self, show: bool, text: Optional[str] = None):
-        if not self._error_banner:
-            return
-        if not show:
-            self._error_banner.hide()
-            return
-        self._error_banner.setText(text or "Unable to load the requested page.")
-        self._error_banner.resize(self.web_view.size())
-        self._error_banner.move(0, 0)
-        self._error_banner.show()
-
-    def resizeEvent(self, event):  # type: ignore[override]
-        super().resizeEvent(event)
-        if self._error_banner and self._error_banner.isVisible() and self.web_view is not None:
-            self._error_banner.resize(self.web_view.size())
-
-    def _update_server_buttons(self):
-        running = self.server_manager.is_running()
-        self.btn_start_local.setEnabled(not running)
-        self.btn_stop_local.setEnabled(running)
-
-    def shutdown(self):
-        if self._shutdown_called:
-            return
-        self._shutdown_called = True
-        self.server_manager.stop()
-        if QtWebEngineWidgets is not None:
-            if getattr(self, "web_view", None) is not None:
-                page = self.web_view.page()
-                self.web_view.setPage(None)
-                if page is not None:
-                    try:
-                        page.deleteLater()
-                    except Exception:
-                        pass
-                try:
-                    self.web_view.deleteLater()
-                except Exception:
-                    pass
-                self.web_view = None
-            banner = getattr(self, "_error_banner", None)
-            if banner is not None:
-                try:
-                    banner.deleteLater()
-                except Exception:
-                    pass
-                self._error_banner = None
-            profile = getattr(self, "_profile", None)
-            if profile is not None:
-                try:
-                    profile.deleteLater()
-                except Exception:
-                    pass
-                self._profile = None
 
 class InteractivePreviewWidget(QtWidgets.QWidget):
     """Lightweight preview panel for the interactive Python console."""
@@ -1529,10 +1116,6 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         else:
             self.cmb_mode.addItem("JupyterLab placeholder", "jupyter")
         self.cmb_mode.addItem("Python console", "python")
-        if self._web_engine_available:
-            self.cmb_mode.addItem("VS Code (web)", "vscode")
-        else:
-            self.cmb_mode.addItem("VS Code placeholder", "vscode")
         mode_row.addWidget(self.cmb_mode)
         mode_row.addStretch(1)
         layout.addLayout(mode_row)
@@ -1626,10 +1209,6 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         if self.bridge_server:
             self.bridge_server.datasetRegistered.connect(self._on_bridge_registered)
 
-        self.vscode_widget = VsCodeWebWidget()
-        self.vscode_widget.statusMessage.connect(self._on_vscode_status)
-        self.stack.addWidget(self.vscode_widget)
-
         layout.addWidget(self.stack, 1)
 
         controls = QtWidgets.QHBoxLayout()
@@ -1668,14 +1247,6 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
                 "Python console ready. Use RegisterDataset(...) or RegisterDataArray(...) to export results."
             )
             self.console_widget.input_edit.setFocus()
-        elif mode == "vscode":
-            self.stack.setCurrentIndex(2)
-            if QtWebEngineWidgets is None:
-                self._set_status(
-                    "VS Code web view unavailable. Launch VS Code separately or install QtWebEngineWidgets."
-                )
-            else:
-                self._set_status("VS Code controls ready.")
         else:
             self.stack.setCurrentIndex(0)
             if not self._web_engine_available:
@@ -1814,10 +1385,6 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         else:
             log_action(f"JupyterLab JS message ({location}): {cleaned}")
 
-    def _on_vscode_status(self, message: str):
-        if self._active_mode == "vscode" and message:
-            self._set_status(message)
-
     def shutdown(self):
         if self._shutdown_called:
             return
@@ -1838,8 +1405,6 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
                 pass
             self._jupyter_view = None
             self._jupyter_page = None
-        self.vscode_widget.shutdown()
-
     def _register_dataset(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
