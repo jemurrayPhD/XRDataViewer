@@ -17,6 +17,7 @@ from ..datasets import (
     MemorySliceRef,
     MemoryVarRef,
     VarRef,
+    decode_mime_payloads,
 )
 from ..processing import apply_processing_step, ProcessingManager
 from ..preferences import PreferencesManager
@@ -603,14 +604,29 @@ class OverlayView(QtWidgets.QWidget):
 
     def dropEvent(self, ev):
         payload = ev.mimeData().text()
+        payloads = decode_mime_payloads(payload)
+        if not payloads:
+            payloads = [payload]
+
+        added = False
+        for entry in payloads:
+            if self._add_payload(entry):
+                added = True
+
+        if added:
+            self._apply_preferences_to_layers()
+            self._update_hint()
+            self.auto_view_range()
+            ev.acceptProposedAction()
+        else:
+            ev.ignore()
+
+    def _add_payload(self, payload: str) -> bool:
         vr = VarRef.from_mime(payload)
         mem_var = None if vr else MemoryVarRef.from_mime(payload)
-        slice_ref = None
-        if not vr and not mem_var:
-            slice_ref = MemorySliceRef.from_mime(payload)
+        slice_ref = None if (vr or mem_var) else MemorySliceRef.from_mime(payload)
         if not vr and not mem_var and not slice_ref:
-            ev.ignore()
-            return
+            return False
         try:
             if vr:
                 da, coords = vr.load()
@@ -623,7 +639,8 @@ class OverlayView(QtWidgets.QWidget):
                 label = f"{slice_ref.display_label()}:{alias}"
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Load failed", str(e))
-            return
+            return False
+
         data, rect = self._prepare_image(da, coords)
         layer = OverlayLayer(self, label, data, rect)
         self.plot.addItem(layer.image_item)
@@ -632,10 +649,7 @@ class OverlayView(QtWidgets.QWidget):
         layer.set_widget(widget)
         self.layers.append(layer)
         self._insert_layer_widget(widget)
-        self._apply_preferences_to_layers()
-        self._update_hint()
-        self.auto_view_range()
-        ev.acceptProposedAction()
+        return True
 
     # ---------- layer management ----------
     def _insert_layer_widget(self, widget: OverlayLayerWidget):

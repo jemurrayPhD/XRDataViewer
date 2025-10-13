@@ -22,6 +22,7 @@ from ..datasets import (
     MemorySliceRef,
     MemoryVarRef,
     VarRef,
+    decode_mime_payloads,
 )
 from ..processing import apply_processing_step, ProcessingManager, ProcessingSelectionDialog
 from ..preferences import PreferencesManager
@@ -661,30 +662,60 @@ class MultiViewGrid(QtWidgets.QWidget):
 
     def dropEvent(self, ev: QtGui.QDropEvent):
         text = ev.mimeData().text()
-        high_ref = HighDimVarRef.from_mime(text)
-        if high_ref:
+        payloads = decode_mime_payloads(text)
+        if not payloads:
+            payloads = [text]
+
+        frames: List[ViewerFrame] = []
+        high_dim_dropped = False
+        for payload in payloads:
+            if HighDimVarRef.from_mime(payload):
+                high_dim_dropped = True
+                continue
+            frame = self._build_frame_from_payload(payload)
+            if frame is not None:
+                frames.append(frame)
+
+        if not frames:
+            if high_dim_dropped:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Unsupported variable",
+                    "High-dimensional variables should be sent to the Slice Data tab.",
+                )
+            ev.ignore()
+            return
+
+        if high_dim_dropped:
             QtWidgets.QMessageBox.information(
                 self,
                 "Unsupported variable",
-                "High-dimensional variables should be sent to the Slice Data tab.",
+                "Some dropped items were high-dimensional and were ignored.",
             )
-            ev.ignore()
-            return
 
-        ds_ref = DataSetRef.from_mime(text)
-        mem_ds = MemoryDatasetRef.from_mime(text) if not ds_ref else None
-        vr = None if ds_ref or mem_ds else VarRef.from_mime(text)
-        mem_var = None if (ds_ref or mem_ds or vr) else MemoryVarRef.from_mime(text)
-        slice_ref = None
-        if not ds_ref and not mem_ds and not vr and not mem_var:
-            slice_ref = MemorySliceRef.from_mime(text)
+        for fr in frames:
+            self.frames.append(fr)
+            self._connect_frame_signals(fr)
+            self._sync_new_frame_to_links(fr)
+            fr.set_selected(False)
 
-        if not ds_ref and not mem_ds and not vr and not mem_var and not slice_ref:
-            ev.ignore()
-            return
+        self._reflow()
+        self._update_apply_button_state()
+        ev.acceptProposedAction()
+
+    def _build_frame_from_payload(self, payload: str) -> Optional[ViewerFrame]:
+        ds_ref = DataSetRef.from_mime(payload)
+        mem_ds = MemoryDatasetRef.from_mime(payload) if not ds_ref else None
+        vr = None if (ds_ref or mem_ds) else VarRef.from_mime(payload)
+        mem_var = None if (ds_ref or mem_ds or vr) else MemoryVarRef.from_mime(payload)
+        slice_ref = None if (ds_ref or mem_ds or vr or mem_var) else MemorySliceRef.from_mime(payload)
+
+        if not any([ds_ref, mem_ds, vr, mem_var, slice_ref]):
+            return None
 
         dataset = None
         frame_title = ""
+        alias: Optional[str] = None
         try:
             if ds_ref:
                 dataset = ds_ref.load()
@@ -711,12 +742,12 @@ class MultiViewGrid(QtWidgets.QWidget):
                 frame_title = slice_ref.display_label()
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Load failed", str(e))
-            ev.ignore()
-            return
+            return None
 
         fr = ViewerFrame(title=frame_title, parent=self)
         fr.set_preferences(self.preferences)
         fr.request_close.connect(self._remove_frame)
+
         try:
             if ds_ref:
                 fr.set_dataset(dataset, ds_ref.path)
@@ -728,7 +759,7 @@ class MultiViewGrid(QtWidgets.QWidget):
                 if mem_var.var not in dataset.data_vars:
                     raise RuntimeError("Selected variable is no longer available")
                 fr.set_dataset(dataset, None, select=mem_var.var)
-            elif slice_ref:
+            elif slice_ref and alias:
                 fr.set_dataset(dataset, None, select=alias)
         except Exception as exc:
             try:
@@ -738,17 +769,10 @@ class MultiViewGrid(QtWidgets.QWidget):
             except Exception:
                 pass
             QtWidgets.QMessageBox.warning(self, "Load failed", str(exc))
-            ev.ignore()
-            return
+            fr.deleteLater()
+            return None
 
-        self.frames.append(fr)
-        self._connect_frame_signals(fr)
-        self._sync_new_frame_to_links(fr)
-        fr.set_selected(False)
-
-        self._reflow()
-        self._update_apply_button_state()
-        ev.acceptProposedAction()
+        return fr
 
     # ---------- Tile management ----------
     def _remove_frame(self, fr: ViewerFrame):

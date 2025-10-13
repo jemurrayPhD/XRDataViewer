@@ -15,6 +15,35 @@ from xr_coords import guess_phys_coords
 
 from .utils import open_dataset
 
+_BATCH_PREFIX = "BatchRef:"
+
+
+def encode_mime_payloads(payloads: Iterable[str]) -> str:
+    values = [p for p in payloads if p]
+    if not values:
+        return ""
+    if len(values) == 1:
+        return values[0]
+    try:
+        return _BATCH_PREFIX + json.dumps(values)
+    except Exception:
+        # Fallback: return the first payload if encoding fails
+        return values[0]
+
+
+def decode_mime_payloads(text: str) -> List[str]:
+    if not text:
+        return []
+    if text.startswith(_BATCH_PREFIX):
+        try:
+            raw = json.loads(text.split(":", 1)[1])
+        except Exception:
+            return []
+        if isinstance(raw, list):
+            return [str(item) for item in raw if isinstance(item, str) and item]
+        return []
+    return [text]
+
 
 class DataSetRef(QtCore.QObject):
     def __init__(self, path: Path):
@@ -345,10 +374,11 @@ class DatasetsPane(QtWidgets.QWidget):
         def _mime_data(_items, *, _tree=tree):
             md = QtCore.QMimeData()
             sel = _tree.selectedItems()
-            if sel:
-                payload = sel[0].data(0, QtCore.Qt.UserRole)
-                if payload:
-                    md.setText(payload)
+            payloads = [item.data(0, QtCore.Qt.UserRole) for item in sel if item is not None]
+            payloads = [p for p in payloads if isinstance(p, str) and p]
+            text = encode_mime_payloads(payloads)
+            if text:
+                md.setText(text)
             return md
 
         tree.mimeData = _mime_data  # type: ignore[attr-defined]
