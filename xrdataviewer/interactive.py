@@ -85,6 +85,7 @@ class EmbeddedJupyterManager(QtCore.QObject):
         self._stderr_thread: Optional[threading.Thread] = None
         self._watcher_thread: Optional[threading.Thread] = None
         self._startup_script: Optional[str] = None
+        self._kernelspec_dir: Optional[str] = None
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
@@ -133,6 +134,33 @@ class EmbeddedJupyterManager(QtCore.QObject):
 
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
+
+        self._kernelspec_dir = None
+        try:
+            self._kernelspec_dir = tempfile.mkdtemp(prefix="xrdataviewer_kernel_")
+            kernels_dir = Path(self._kernelspec_dir) / "kernels" / "python3"
+            kernels_dir.mkdir(parents=True, exist_ok=True)
+            kernel_spec = {
+                "argv": [sys.executable, "-m", "ipykernel_launcher", "-f", "{connection_file}"],
+                "display_name": "Python (XRDataViewer)",
+                "language": "python",
+                "env": {},
+            }
+            with open(kernels_dir / "kernel.json", "w", encoding="utf-8") as handle:
+                json.dump(kernel_spec, handle)
+            existing_path = env.get("JUPYTER_PATH")
+            if existing_path:
+                env["JUPYTER_PATH"] = os.pathsep.join([self._kernelspec_dir, existing_path])
+            else:
+                env["JUPYTER_PATH"] = self._kernelspec_dir
+        except Exception as exc:
+            if self._kernelspec_dir:
+                shutil.rmtree(self._kernelspec_dir, ignore_errors=True)
+                self._kernelspec_dir = None
+            self.message.emit(
+                "Warning: failed to provision dedicated Jupyter kernel; the embedded server may use a different environment."
+            )
+            self.message.emit(str(exc))
 
         startup_code = textwrap.dedent(
             """
@@ -224,6 +252,9 @@ class EmbeddedJupyterManager(QtCore.QObject):
             except Exception:
                 pass
             self._startup_script = None
+        if self._kernelspec_dir:
+            shutil.rmtree(self._kernelspec_dir, ignore_errors=True)
+            self._kernelspec_dir = None
 
     def url(self) -> Optional[str]:
         return self._url
@@ -307,6 +338,15 @@ class EmbeddedJupyterManager(QtCore.QObject):
             self.failed.emit(f"JupyterLab exited unexpectedly (code {code}).")
         else:
             self.message.emit("JupyterLab server stopped.")
+        if self._startup_script:
+            try:
+                os.remove(self._startup_script)
+            except Exception:
+                pass
+            self._startup_script = None
+        if self._kernelspec_dir:
+            shutil.rmtree(self._kernelspec_dir, ignore_errors=True)
+            self._kernelspec_dir = None
 
     def __del__(self):
         try:
