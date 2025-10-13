@@ -41,6 +41,29 @@ if TYPE_CHECKING:  # pragma: no cover - typing helpers
     from .datasets import DatasetsPane
 
 
+if QtWebEngineWidgets is not None:  # pragma: no cover - requires QtWebEngine
+
+    class _ConsoleAwarePage(QtWebEngineWidgets.QWebEnginePage):
+        """QWebEnginePage variant that re-emits console output as a Qt signal."""
+
+        consoleMessage = QtCore.Signal(int, str, int, str)
+
+        def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):  # type: ignore[override]
+            # Emit the console message so the embedding widget can surface it in the
+            # logging pane or display compatibility hints when the bundled
+            # Chromium version cannot render a page.
+            self.consoleMessage.emit(level, message, lineNumber, sourceID)
+            super().javaScriptConsoleMessage(level, message, lineNumber, sourceID)
+
+else:
+
+    class _ConsoleAwarePage:  # type: ignore[too-many-ancestors]
+        """Fallback shim when QtWebEngine is unavailable."""
+
+        def __init__(self, *args, **kwargs):  # pragma: no cover - placeholder
+            raise RuntimeError("QtWebEngineWidgets is not available")
+
+
 class EmbeddedJupyterManager(QtCore.QObject):
     """Launch and manage an embedded JupyterLab server for the interactive tab."""
 
