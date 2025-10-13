@@ -8,6 +8,11 @@ import pyqtgraph as pg
 import xarray as xr
 from PySide2 import QtCore, QtGui, QtWidgets
 
+try:  # Optional dependency for volume rendering
+    from pyqtgraph import opengl as gl  # type: ignore
+except Exception:  # pragma: no cover - pyqtgraph.opengl may be missing
+    gl = None  # type: ignore
+
 try:  # Optional dependency for movie export
     import cv2  # type: ignore
 except Exception:  # pragma: no cover - cv2 may be unavailable
