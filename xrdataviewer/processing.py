@@ -29,7 +29,7 @@ from xr_plot_widget import (
 
 from .annotations import PlotAnnotationDialog
 from .utils import _nan_aware_reducer
-from .utils.io import open_dataset
+from .utils import open_dataset
 
 
 class ParameterForm(QtWidgets.QWidget):

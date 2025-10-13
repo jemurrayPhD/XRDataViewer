@@ -13,7 +13,7 @@ from PySide2 import QtCore, QtGui, QtWidgets
 from app_logging import log_action
 from xr_coords import guess_phys_coords
 
-from .utils.io import open_dataset
+from .utils import open_dataset
 
 
 class DataSetRef(QtCore.QObject):

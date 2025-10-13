@@ -5,8 +5,9 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 import numpy as np
-from PySide2 import QtCore, QtGui, QtWidgets
 import warnings
+import xarray as xr
+from PySide2 import QtCore, QtGui, QtWidgets
 
 __all__ = [
     "nan_aware_reducer",
@@ -18,7 +19,12 @@ __all__ = [
     "process_events",
     "sanitize_filename",
     "ensure_extension",
+    "open_dataset",
+    "FORCE_XARRAY_ENGINE",
 ]
+
+
+FORCE_XARRAY_ENGINE: Optional[str] = None
 
 
 def nan_aware_reducer(func: Callable[[np.ndarray, Optional[int]], np.ndarray]):
@@ -167,3 +173,13 @@ def ensure_extension(path: str, default_suffix: str) -> Path:
 
 
 _ensure_extension = ensure_extension
+
+
+def open_dataset(path: Path) -> xr.Dataset:
+    """Open an :class:`xarray.Dataset` from *path* with shared options."""
+
+    if path.suffix.lower() == ".zarr" or path.name.lower().endswith(".zarr"):
+        return xr.open_zarr(str(path))
+    if FORCE_XARRAY_ENGINE:
+        return xr.open_dataset(str(path), engine=FORCE_XARRAY_ENGINE)
+    return xr.open_dataset(str(path))
