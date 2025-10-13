@@ -24,6 +24,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
 
+import sys
+
 import numpy as np
 import pyqtgraph as pg
 import xarray as xr
