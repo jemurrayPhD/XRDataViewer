@@ -28,11 +28,14 @@ from ..datasets import DataSetRef, HighDimVarRef, MemoryDatasetRef
 from ..preferences import PreferencesManager
 from ..processing import ProcessingManager, ProcessingSelectionDialog
 from ..utils import (
-    _ask_layout_label,
-    _ensure_extension,
-    _nan_aware_reducer,
-    _sanitize_filename,
-    _save_snapshot,
+    ask_layout_label,
+    ensure_extension,
+    image_with_label,
+    nan_aware_reducer,
+    process_events,
+    qimage_to_array,
+    sanitize_filename,
+    save_snapshot,
 )
 from .volume import SequentialVolumeWindow
 
@@ -204,14 +207,14 @@ class SequentialView(QtWidgets.QWidget):
 
         self._roi_enabled: bool = False
         self._roi_reducers = {
-            "mean": ("Mean", _nan_aware_reducer(lambda arr, axis=None: np.nanmean(arr, axis=axis))),
-            "median": ("Median", _nan_aware_reducer(lambda arr, axis=None: np.nanmedian(arr, axis=axis))),
-            "min": ("Minimum", _nan_aware_reducer(lambda arr, axis=None: np.nanmin(arr, axis=axis))),
-            "max": ("Maximum", _nan_aware_reducer(lambda arr, axis=None: np.nanmax(arr, axis=axis))),
-            "std": ("Std. dev", _nan_aware_reducer(lambda arr, axis=None: np.nanstd(arr, axis=axis))),
+            "mean": ("Mean", nan_aware_reducer(lambda arr, axis=None: np.nanmean(arr, axis=axis))),
+            "median": ("Median", nan_aware_reducer(lambda arr, axis=None: np.nanmedian(arr, axis=axis))),
+            "min": ("Minimum", nan_aware_reducer(lambda arr, axis=None: np.nanmin(arr, axis=axis))),
+            "max": ("Maximum", nan_aware_reducer(lambda arr, axis=None: np.nanmax(arr, axis=axis))),
+            "std": ("Std. dev", nan_aware_reducer(lambda arr, axis=None: np.nanstd(arr, axis=axis))),
             "ptp": (
                 "Peak-to-peak",
-                _nan_aware_reducer(
+                nan_aware_reducer(
                     lambda arr, axis=None: np.nanmax(arr, axis=axis) - np.nanmin(arr, axis=axis)
                 ),
             ),
@@ -1200,15 +1203,15 @@ class SequentialView(QtWidgets.QWidget):
         )
         if not path:
             return
-        ok, label = _ask_layout_label(self, "Slice label", self._default_layout_label())
+        ok, label = ask_layout_label(self, "Slice label", self._default_layout_label())
         if not ok:
             return
         suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
-        target = _ensure_extension(path, suffix)
-        _process_events()
+        target = ensure_extension(path, suffix)
+        process_events()
         image = self.viewer.grab().toImage()
         if label:
-            image = _image_with_label(image, label)
+            image = image_with_label(image, label)
         if not image.save(str(target)):
             QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to save the slice image.")
             return
@@ -1232,14 +1235,14 @@ class SequentialView(QtWidgets.QWidget):
             return
         base = Path(directory)
         self._store_export_dir(directory)
-        base_name = _sanitize_filename(self.lbl_dataset.text()) or "slice"
+        base_name = sanitize_filename(self.lbl_dataset.text()) or "slice"
         original = self._slice_index
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
             count = 0
             for idx in range(self._slice_count):
                 self._on_slice_changed(idx)
-                _process_events()
+                process_events()
                 image = self.viewer.grab().toImage()
                 target = base / f"{base_name}_{idx:03d}.png"
                 if image.save(str(target)):
@@ -1282,7 +1285,7 @@ class SequentialView(QtWidgets.QWidget):
         if not path:
             return
         suffix = ".avi" if path.lower().endswith(".avi") else ".mp4"
-        target = _ensure_extension(path, suffix)
+        target = ensure_extension(path, suffix)
         fps, ok = QtWidgets.QInputDialog.getDouble(
             self,
             "Frames per second",
@@ -1301,9 +1304,9 @@ class SequentialView(QtWidgets.QWidget):
         try:
             for idx in range(self._slice_count):
                 self._on_slice_changed(idx)
-                _process_events()
+                process_events()
                 image = self.viewer.grab().toImage()
-                frame = _qimage_to_array(image)
+                frame = qimage_to_array(image)
                 if frame.size == 0:
                     continue
                 bgr = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
@@ -1371,7 +1374,7 @@ class SequentialView(QtWidgets.QWidget):
         )
         if not ok:
             return
-        ok, label_prefix = _ask_layout_label(self, "Grid label")
+        ok, label_prefix = ask_layout_label(self, "Grid label")
         if not ok:
             return
         base = Path(directory)
@@ -1382,7 +1385,7 @@ class SequentialView(QtWidgets.QWidget):
         try:
             for idx in range(self._slice_count):
                 self._on_slice_changed(idx)
-                _process_events()
+                process_events()
                 images.append(self.viewer.grab().toImage())
         finally:
             if self._slice_count > 0:
@@ -1415,7 +1418,7 @@ class SequentialView(QtWidgets.QWidget):
             if label_prefix:
                 label = f"{label_prefix} – page {count + 1}"
             if label:
-                page_image = _image_with_label(page_image, label)
+                page_image = image_with_label(page_image, label)
             target = base / f"slice-grid_{count + 1:02d}.png"
             page_image.save(str(target))
             count += 1
@@ -1445,12 +1448,12 @@ class SequentialView(QtWidgets.QWidget):
         )
         if not path:
             return
-        ok, label = _ask_layout_label(self, "Layout label", self._default_layout_label())
+        ok, label = ask_layout_label(self, "Layout label", self._default_layout_label())
         if not ok:
             return
         suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
-        target = _ensure_extension(path, suffix)
-        if not _save_snapshot(self, target, label):
+        target = ensure_extension(path, suffix)
+        if not save_snapshot(self, target, label):
             QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to save the layout image.")
             return
         self._store_export_dir(str(Path(target).parent))

@@ -15,7 +15,7 @@ except Exception:  # pragma: no cover - optional dependency
 from app_logging import log_action
 
 from ..preferences import PreferencesManager
-from ..utils import _ask_layout_label, _ensure_extension, _save_snapshot
+from ..utils import ask_layout_label, ensure_extension, image_with_label, save_snapshot
 
 
 class VolumeAlphaHandle(QtWidgets.QGraphicsEllipseItem):
@@ -738,11 +738,11 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         )
         if not path:
             return
-        ok, label = _ask_layout_label(self, "Snapshot label", self._default_layout_label())
+        ok, label = ask_layout_label(self, "Snapshot label", self._default_layout_label())
         if not ok:
             return
         suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
-        target = _ensure_extension(path, suffix)
+        target = ensure_extension(path, suffix)
         try:
             image = self.view.grabFramebuffer()
         except Exception:
@@ -751,7 +751,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to capture the 3D view.")
             return
         if label:
-            image = _image_with_label(image, label)
+            image = image_with_label(image, label)
         if not image.save(str(target)):
             QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to save the snapshot.")
             return
@@ -774,12 +774,12 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         )
         if not path:
             return
-        ok, label = _ask_layout_label(self, "Layout label", self._default_layout_label())
+        ok, label = ask_layout_label(self, "Layout label", self._default_layout_label())
         if not ok:
             return
         suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
-        target = _ensure_extension(path, suffix)
-        if not _save_snapshot(self, target, label):
+        target = ensure_extension(path, suffix)
+        if not save_snapshot(self, target, label):
             QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to save the layout image.")
             return
         self._store_export_dir(str(Path(target).parent))
