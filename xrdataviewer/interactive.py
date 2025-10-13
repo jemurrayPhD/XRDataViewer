@@ -1268,8 +1268,8 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self.btn_toggle_instructions.setText("Interactive environment instructions")
         self.btn_toggle_instructions.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
         self.btn_toggle_instructions.setCheckable(True)
-        self.btn_toggle_instructions.setChecked(True)
-        self.btn_toggle_instructions.setArrowType(QtCore.Qt.DownArrow)
+        self.btn_toggle_instructions.setChecked(False)
+        self.btn_toggle_instructions.setArrowType(QtCore.Qt.RightArrow)
         self.btn_toggle_instructions.toggled.connect(self._toggle_instructions)
         toggle_row.addWidget(self.btn_toggle_instructions)
         toggle_row.addStretch(1)
@@ -1285,6 +1285,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         hint.setStyleSheet("color: #666;")
         inst_layout.addWidget(hint)
         layout.addWidget(self.instructions_container)
+        self.instructions_container.setVisible(False)
 
         mode_row = QtWidgets.QHBoxLayout()
         lbl_mode = QtWidgets.QLabel("Environment:")
