@@ -19,7 +19,12 @@ from ..datasets import (
     VarRef,
     decode_mime_payloads,
 )
-from ..processing import apply_processing_step, ProcessingManager, list_processing_functions
+from ..processing import (
+    ParameterForm,
+    ProcessingManager,
+    apply_processing_step,
+    list_processing_functions,
+)
 from ..preferences import PreferencesManager
 from ..utils import ask_layout_label, ensure_extension, process_events, sanitize_filename, save_snapshot
 
