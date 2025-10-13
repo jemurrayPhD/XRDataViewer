@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import html
 import importlib
+import importlib.util
 import io
 import json
 import os
@@ -88,6 +89,7 @@ class EmbeddedJupyterManager(QtCore.QObject):
         self._kernelspec_dir: Optional[str] = None
         self._kernel_name = "xrdataviewer"
         self._settings_dir: Optional[str] = None
+        self._launch_env: Optional[Dict[str, str]] = None
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
@@ -197,6 +199,8 @@ class EmbeddedJupyterManager(QtCore.QObject):
             )
             self.message.emit(str(exc))
 
+        self._launch_env = env.copy()
+
         startup_code = textwrap.dedent(
             """
             try:
@@ -260,6 +264,103 @@ class EmbeddedJupyterManager(QtCore.QObject):
 
         self.message.emit("Starting JupyterLab server…")
         return True
+
+    def run_diagnostics(self) -> None:
+        """Collect environment information helpful for debugging imports."""
+
+        self.message.emit("=== Embedded Jupyter diagnostics ===")
+        self.message.emit(f"Python executable: {sys.executable}")
+        self.message.emit(f"sys.prefix: {sys.prefix}")
+        self.message.emit(f"sys.version: {sys.version.splitlines()[0] if sys.version else sys.version}")
+
+        if self._kernelspec_dir:
+            self.message.emit(f"Kernelspec directory: {self._kernelspec_dir}")
+        else:
+            self.message.emit("Kernelspec directory: not provisioned yet")
+
+        env = self._launch_env or {}
+        if env:
+            for key in ("JUPYTER_PATH", "JUPYTER_DATA_DIR", "JUPYTER_DEFAULT_KERNEL_NAME"):
+                if key in env:
+                    self.message.emit(f"{key}={env[key]}")
+
+        try:
+            spec = importlib.util.find_spec("matplotlib")
+            if spec and spec.origin:
+                self.message.emit(f"matplotlib spec located at: {spec.origin}")
+            else:
+                self.message.emit(
+                    "matplotlib spec could not be located in the current interpreter."
+                )
+        except Exception as exc:  # pragma: no cover - diagnostics only
+            self.message.emit(f"matplotlib spec check failed: {exc}")
+
+        diag_script = textwrap.dedent(
+            """
+            import json
+            import sys
+            report = {
+                "executable": sys.executable,
+                "prefix": sys.prefix,
+                "version": sys.version,
+                "matplotlib": None,
+            }
+            try:
+                import matplotlib
+                report["matplotlib"] = {
+                    "version": getattr(matplotlib, "__version__", "unknown"),
+                    "file": getattr(matplotlib, "__file__", "unknown"),
+                }
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                report["matplotlib"] = {"error": str(exc)}
+            print(json.dumps(report))
+            """
+        )
+
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", diag_script],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            payload = result.stdout.strip() or result.stderr.strip()
+            if payload:
+                self.message.emit(f"Kernel import probe output: {payload}")
+            else:
+                self.message.emit(
+                    "Kernel import probe produced no output; inspect terminal logs for details."
+                )
+        except Exception as exc:  # pragma: no cover - diagnostics only
+            self.message.emit(f"Kernel import probe failed: {exc}")
+
+        try:
+            pip_result = subprocess.run(
+                [sys.executable, "-m", "pip", "show", "matplotlib"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if pip_result.returncode == 0:
+                snippet = pip_result.stdout.strip()
+                if snippet:
+                    summary = " | ".join(
+                        line.strip()
+                        for line in snippet.splitlines()
+                        if line.startswith(("Name:", "Version:", "Location:"))
+                    )
+                    self.message.emit(f"pip show matplotlib: {summary}")
+                else:
+                    self.message.emit("pip show matplotlib succeeded with empty output.")
+            else:
+                detail = pip_result.stderr.strip() or pip_result.stdout.strip()
+                self.message.emit(
+                    f"pip show matplotlib failed (code {pip_result.returncode}): {detail}"
+                )
+        except FileNotFoundError:  # pragma: no cover - pip missing
+            self.message.emit("pip is not available in this environment.")
+        except Exception as exc:  # pragma: no cover - diagnostics only
+            self.message.emit(f"pip diagnostics failed: {exc}")
 
     def stop(self):
         self._stop_event.set()
@@ -1208,6 +1309,16 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self._jupyter_nav_widget.setVisible(False)
         layout.addWidget(self._jupyter_nav_widget)
 
+        diag_row = QtWidgets.QHBoxLayout()
+        self.btn_run_diagnostics = QtWidgets.QPushButton("Run environment diagnostics")
+        self.btn_run_diagnostics.setToolTip(
+            "Log interpreter and matplotlib availability details to the action log."
+        )
+        self.btn_run_diagnostics.clicked.connect(self._run_env_diagnostics)
+        diag_row.addWidget(self.btn_run_diagnostics)
+        diag_row.addStretch(1)
+        layout.addLayout(diag_row)
+
         self.stack = QtWidgets.QStackedWidget()
         self._jupyter_view: Optional['QtWebEngineWidgets.QWebEngineView'] = None
         if self._web_engine_available:
@@ -1240,6 +1351,11 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             self._jupyter_manager.urlReady.connect(self._on_jupyter_url_ready)
             self._jupyter_manager.failed.connect(self._on_jupyter_failed)
             self._jupyter_manager.message.connect(self._on_jupyter_message)
+        else:
+            self.btn_run_diagnostics.setEnabled(False)
+            self.btn_run_diagnostics.setToolTip(
+                "Environment diagnostics require the embedded Jupyter launcher."
+            )
         self._jupyter_url: Optional[str] = None
         self._jupyter_js_seen: Set[str] = set()
         self._jupyter_js_warned = False
@@ -1305,6 +1421,15 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
                     self._set_status("Embedded JupyterLab ready.")
                 else:
                     self._set_status("Preparing embedded JupyterLab…")
+
+    def _run_env_diagnostics(self):
+        if not self._jupyter_manager:
+            self._set_status("Environment diagnostics require the embedded Jupyter launcher.")
+            return
+        self._set_status(
+            "Running environment diagnostics… check the log pane for results."
+        )
+        threading.Thread(target=self._jupyter_manager.run_diagnostics, daemon=True).start()
 
     def _set_status(self, message: str):
         if not message:
