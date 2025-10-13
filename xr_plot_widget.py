@@ -580,7 +580,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
             "left": ScientificAxisItem("left"),
         }
         self.plot = self.glw.addPlot(row=0, col=0, axisItems=axis_items)
-        self.plot.invertY(False)
+        self.plot.invertY(True)
         self.plot.setMenuEnabled(False)
         self.plot.setLabel("left", "Y")
         self.plot.setLabel("bottom", "X")

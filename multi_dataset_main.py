@@ -4,11 +4,20 @@
 
 import os
 import json
+import warnings
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 from functools import partial
 
 
+from PySide2 import QtCore, QtWidgets, QtGui
+import pyqtgraph as pg
+try:
+    import pyqtgraph.opengl as gl
+except Exception:  # pragma: no cover - optional dependency
+    gl = None
+
+from xr_plot_widget import CentralPlotWidget, ScientificAxisItem
 # Force pyqtgraph to use the same Qt binding as the rest of the application.
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide2")
 
@@ -37,6 +46,45 @@ def open_dataset(path: Path) -> xr.Dataset:
     if _FORCE_ENGINE:
         return xr.open_dataset(str(path), engine=_FORCE_ENGINE)
     return xr.open_dataset(str(path))
+
+
+def _nan_aware_reducer(func):
+    def wrapped(arr, axis=None):
+        data = np.asarray(arr, float)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            result = func(data, axis=axis)
+        if axis is None:
+            if isinstance(result, np.ndarray) and result.shape == ():
+                return result.item()
+            return result
+        try:
+            axes = axis
+            if axes is None:
+                return result
+            if isinstance(axes, (list, tuple, set)):
+                axes = tuple(int(a) for a in axes)
+            else:
+                axes = (int(axes),)
+            ndim = data.ndim
+            normalized = []
+            for ax in axes:
+                if ax < 0:
+                    normalized.append((ax + ndim) % ndim)
+                else:
+                    normalized.append(ax)
+            mask = np.isnan(data)
+            for ax in sorted(normalized, reverse=True):
+                mask = np.all(mask, axis=ax)
+            if isinstance(result, np.ndarray) and np.any(mask):
+                result = np.array(result, dtype=float, copy=True)
+                result[mask] = np.nan
+        except Exception:
+            pass
+        return result
+
+
+    return wrapped
 
 
 # ---------------------------------------------------------------------------
@@ -329,12 +377,17 @@ class PipelineEditorDialog(QtWidgets.QDialog):
         ]
         self._roi_axis_index: int = 0
         self._roi_reducers = {
-            "mean": ("Mean", lambda arr, axis: np.nanmean(arr, axis=axis)),
-            "median": ("Median", lambda arr, axis: np.nanmedian(arr, axis=axis)),
-            "min": ("Minimum", lambda arr, axis: np.nanmin(arr, axis=axis)),
-            "max": ("Maximum", lambda arr, axis: np.nanmax(arr, axis=axis)),
-            "std": ("Std. dev", lambda arr, axis: np.nanstd(arr, axis=axis)),
-            "ptp": ("Peak-to-peak", lambda arr, axis: np.nanmax(arr, axis=axis) - np.nanmin(arr, axis=axis)),
+            "mean": ("Mean", _nan_aware_reducer(lambda arr, axis=None: np.nanmean(arr, axis=axis))),
+            "median": ("Median", _nan_aware_reducer(lambda arr, axis=None: np.nanmedian(arr, axis=axis))),
+            "min": ("Minimum", _nan_aware_reducer(lambda arr, axis=None: np.nanmin(arr, axis=axis))),
+            "max": ("Maximum", _nan_aware_reducer(lambda arr, axis=None: np.nanmax(arr, axis=axis))),
+            "std": ("Std. dev", _nan_aware_reducer(lambda arr, axis=None: np.nanstd(arr, axis=axis))),
+            "ptp": (
+                "Peak-to-peak",
+                _nan_aware_reducer(
+                    lambda arr, axis=None: np.nanmax(arr, axis=axis) - np.nanmin(arr, axis=axis)
+                ),
+            ),
         }
         self._roi_method_key: str = "mean"
 
@@ -1277,6 +1330,8 @@ class DatasetsPane(QtWidgets.QWidget):
         self.tree.mimeData = self._mimeData  # override to pack VarRef
         lay.addWidget(self.tree, 1)
 
+        self._populate_examples()
+
     def _mimeData(self, _items):
         md = QtCore.QMimeData()
         sel = self.tree.selectedItems()
@@ -1286,22 +1341,32 @@ class DatasetsPane(QtWidgets.QWidget):
                 md.setText(txt)
         return md
 
-    def _open(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Open xarray Dataset", "", "NetCDF / Zarr (*.nc *.zarr);;All files (*)"
-        )
-        if not path:
-            return
-        p = Path(path)
+    def _populate_examples(self):
+        candidates = [
+            Path(__file__).resolve().parent / "example_dataset.nc",
+            Path(__file__).resolve().parent / "example_3d_dataset.nc",
+            Path(__file__).resolve().parent / "example_rect_warp.nc",
+        ]
+        for path in candidates:
+            if path.exists():
+                self._register_dataset(path, quiet=True)
+
+    def _register_dataset(self, path: Path, quiet: bool = False):
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            if Path(item.text(0)) == path:
+                return
+
         try:
-            ds = open_dataset(p)
+            ds = open_dataset(path)
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Open failed", str(e))
+            if not quiet:
+                QtWidgets.QMessageBox.warning(self, "Open failed", str(e))
             return
 
-        root = QtWidgets.QTreeWidgetItem([str(p)])
+        root = QtWidgets.QTreeWidgetItem([str(path)])
         root.setExpanded(True)
-        root.setData(0, QtCore.Qt.UserRole, DataSetRef(p).to_mime())
+        root.setData(0, QtCore.Qt.UserRole, DataSetRef(path).to_mime())
         self.tree.addTopLevelItem(root)
 
         for var in ds.data_vars:
@@ -1316,13 +1381,21 @@ class DatasetsPane(QtWidgets.QWidget):
             else:
                 hint = "(pixel)"
             child = QtWidgets.QTreeWidgetItem([f"{var}  {hint}"])
-            child.setData(0, QtCore.Qt.UserRole, VarRef(p, var, hint).to_mime())
+            child.setData(0, QtCore.Qt.UserRole, VarRef(path, var, hint).to_mime())
             root.addChild(child)
 
         try:
             ds.close()
         except Exception:
             pass
+
+    def _open(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Open xarray Dataset", "", "NetCDF / Zarr (*.nc *.zarr);;All files (*)"
+        )
+        if not path:
+            return
+        self._register_dataset(Path(path))
 
 
 # ---------------------------------------------------------------------------
@@ -2318,6 +2391,2265 @@ class MultiViewGrid(QtWidgets.QWidget):
             w = self.vsplit.widget(i)
             if isinstance(w, QtWidgets.QSplitter):
                 yield w
+
+# ---------------------------------------------------------------------------
+# Sequential view helpers
+# ---------------------------------------------------------------------------
+
+
+class SequentialRoiWindow(QtWidgets.QWidget):
+    axesChanged = QtCore.Signal(tuple)
+    reducerChanged = QtCore.Signal(str)
+    closed = QtCore.Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent, QtCore.Qt.Window)
+        self.setWindowTitle("Sequential ROI Inspector")
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
+        self.setMinimumSize(360, 520)
+        self.resize(420, 600)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        controls = QtWidgets.QHBoxLayout()
+        controls.setSpacing(6)
+
+        controls.addWidget(QtWidgets.QLabel("Reduce over:"))
+        self.cmb_axes = QtWidgets.QComboBox()
+        self.cmb_axes.currentIndexChanged.connect(self._emit_axes_changed)
+        self.cmb_axes.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        controls.addWidget(self.cmb_axes, 1)
+
+        controls.addWidget(QtWidgets.QLabel("Statistic:"))
+        self.cmb_method = QtWidgets.QComboBox()
+        self.cmb_method.currentIndexChanged.connect(self._emit_method_changed)
+        self.cmb_method.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        controls.addWidget(self.cmb_method, 1)
+
+        layout.addLayout(controls)
+
+        self.lbl_hint = QtWidgets.QLabel()
+        self.lbl_hint.setStyleSheet("color: #666;")
+        layout.addWidget(self.lbl_hint)
+
+        profile_axes = {
+            "bottom": ScientificAxisItem("bottom"),
+            "left": ScientificAxisItem("left"),
+        }
+        self.profile_plot = pg.PlotWidget(axisItems=profile_axes)
+        self.profile_plot.setMinimumHeight(140)
+        self.profile_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.profile_plot.setLabel("bottom", "Axis")
+        self.profile_plot.setLabel("left", "Value")
+        self.profile_curve = self.profile_plot.plot([], [], pen=pg.mkPen('#ffaa00', width=2))
+        layout.addWidget(self.profile_plot, 1)
+
+        slice_axes = {
+            "bottom": ScientificAxisItem("bottom"),
+            "left": ScientificAxisItem("left"),
+        }
+        self.slice_plot = pg.PlotWidget(axisItems=slice_axes)
+        self.slice_plot.setMinimumHeight(160)
+        self.slice_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.slice_plot.setLabel("bottom", "Slice coordinate")
+        self.slice_plot.setLabel("left", "ROI statistic")
+        self.slice_curve = self.slice_plot.plot([], [], pen=pg.mkPen('#66bbff', width=2))
+        layout.addWidget(self.slice_plot, 1)
+
+        self._updating = False
+
+    def set_axis_options(
+        self, options: List[Tuple[str, Tuple[int, ...], str, str, Optional[int]]], current_index: int
+    ):
+        self._updating = True
+        self.cmb_axes.clear()
+        for entry in options:
+            if not entry:
+                continue
+            label = entry[0]
+            axes = entry[1] if len(entry) > 1 else ()
+            self.cmb_axes.addItem(label, tuple(int(a) for a in axes))
+        self.cmb_axes.setEnabled(bool(options))
+        if options:
+            self.cmb_axes.setCurrentIndex(max(0, min(current_index, len(options) - 1)))
+        self._updating = False
+
+    def set_reducer_options(self, reducers: Dict[str, Tuple[str, object]], current_key: str):
+        self._updating = True
+        self.cmb_method.clear()
+        for key, (label, _fn) in reducers.items():
+            self.cmb_method.addItem(label, key)
+        idx = max(0, self.cmb_method.findData(current_key))
+        self.cmb_method.setCurrentIndex(idx)
+        self.cmb_method.setEnabled(self.cmb_method.count() > 0)
+        self._updating = False
+
+    def set_hint(self, text: str):
+        self.lbl_hint.setText(text)
+
+    def update_profile(self, xs: List[float], ys: List[float], xlabel: str, ylabel: str, visible: bool):
+        self.profile_plot.setVisible(visible)
+        if not visible:
+            self.profile_curve.setData([], [])
+            return
+        self.profile_plot.setLabel("bottom", xlabel)
+        self.profile_plot.setLabel("left", ylabel)
+        self.profile_curve.setData(xs, ys)
+        self.profile_plot.enableAutoRange()
+
+    def update_slice_curve(self, xs: List[float], ys: List[float], xlabel: str, ylabel: str):
+        self.slice_plot.setLabel("bottom", xlabel)
+        self.slice_plot.setLabel("left", ylabel)
+        self.slice_curve.setData(xs, ys)
+        self.slice_plot.enableAutoRange()
+
+    def _emit_axes_changed(self):
+        if self._updating:
+            return
+        data = self.cmb_axes.currentData()
+        if data is None:
+            return
+        try:
+            axes = tuple(int(a) for a in data)
+        except Exception:
+            axes = tuple()
+        self.axesChanged.emit(axes)
+
+    def _emit_method_changed(self):
+        if self._updating:
+            return
+        key = self.cmb_method.currentData()
+        if key:
+            self.reducerChanged.emit(str(key))
+
+    def closeEvent(self, event: QtGui.QCloseEvent):
+        try:
+            self.closed.emit()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+
+# ---------------------------------------------------------------------------
+# Sequential view: 3D volume visualization helper
+# ---------------------------------------------------------------------------
+
+
+class VolumeAlphaHandle(QtWidgets.QGraphicsEllipseItem):
+    def __init__(self, owner: "VolumeAlphaCurveWidget", x_norm: float, y_norm: float):
+        radius = 5.0
+        super().__init__(-radius, -radius, radius * 2.0, radius * 2.0)
+        self._owner = owner
+        self.x_norm = float(x_norm)
+        self.y_norm = float(y_norm)
+        self.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 255)))
+        pen = QtGui.QPen(QtGui.QColor(20, 20, 20))
+        pen.setWidthF(1.2)
+        self.setPen(pen)
+        self.setZValue(20)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemSendsScenePositionChanges, True)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations, True)
+
+    def itemChange(self, change: QtWidgets.QGraphicsItem.GraphicsItemChange, value):
+        if change == QtWidgets.QGraphicsItem.ItemPositionChange:
+            if isinstance(value, QtCore.QPointF):
+                point = value
+            else:
+                point = QtCore.QPointF(value)
+            return self._owner.clamp_handle_position(self, point)
+        if change == QtWidgets.QGraphicsItem.ItemPositionHasChanged:
+            self._owner.handle_moved(self)
+        return super().itemChange(change, value)
+
+
+class VolumeAlphaCurveWidget(QtWidgets.QWidget):
+    curveChanged = QtCore.Signal(list)
+
+    def __init__(self, parent=None, default_value: float = 0.5):
+        super().__init__(parent)
+        self._scene = QtWidgets.QGraphicsScene(self)
+        self._view = QtWidgets.QGraphicsView(self._scene)
+        self._view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._view.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._view.setRenderHints(
+            QtGui.QPainter.Antialiasing
+            | QtGui.QPainter.SmoothPixmapTransform
+            | QtGui.QPainter.TextAntialiasing
+        )
+        self._view.setDragMode(QtWidgets.QGraphicsView.NoDrag)
+        self._view.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._view.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        )
+        self._view.viewport().installEventFilter(self)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._view)
+
+        self._gradient_item = QtWidgets.QGraphicsPixmapItem()
+        self._gradient_item.setZValue(0)
+        self._scene.addItem(self._gradient_item)
+
+        border_pen = QtGui.QPen(QtGui.QColor(200, 200, 200))
+        border_pen.setWidthF(1.0)
+        self._border_item = self._scene.addRect(QtCore.QRectF(0, 0, 1, 1), border_pen)
+        self._border_item.setZValue(5)
+
+        curve_pen = QtGui.QPen(QtGui.QColor(245, 245, 245))
+        curve_pen.setWidthF(2.0)
+        self._curve_item = self._scene.addPath(QtGui.QPainterPath(), curve_pen)
+        self._curve_item.setZValue(15)
+
+        self._handles: List[VolumeAlphaHandle] = []
+        self._default_positions = [0.0, 0.25, 0.5, 0.75, 1.0]
+        self._default_value = max(0.0, min(1.0, float(default_value)))
+        self._margin_left = 28.0
+        self._margin_right = 16.0
+        self._margin_top = 12.0
+        self._margin_bottom = 26.0
+        self._colormap_name = "viridis"
+        self._updating = False
+
+        self.setMinimumHeight(120)
+        self.setMaximumHeight(220)
+        size_policy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        self.setSizePolicy(size_policy)
+        self._update_scene_geometry()
+        self.reset_curve()
+
+    # ----- geometry helpers -----
+    def showEvent(self, event: QtGui.QShowEvent):
+        super().showEvent(event)
+        QtCore.QTimer.singleShot(0, self._update_scene_geometry)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent):
+        super().resizeEvent(event)
+        self._update_scene_geometry()
+
+    def _effective_rect(self) -> QtCore.QRectF:
+        rect = self._scene.sceneRect()
+        width = max(1.0, rect.width() - self._margin_left - self._margin_right)
+        height = max(1.0, rect.height() - self._margin_top - self._margin_bottom)
+        return QtCore.QRectF(
+            rect.left() + self._margin_left,
+            rect.top() + self._margin_top,
+            width,
+            height,
+        )
+
+    def _update_scene_geometry(self):
+        viewport = self._view.viewport()
+        width = max(1, viewport.width())
+        height = max(1, viewport.height())
+        self._scene.setSceneRect(0, 0, float(width), float(height))
+        eff = self._effective_rect()
+        self._update_gradient_pixmap(int(max(2.0, eff.width())), int(max(2.0, eff.height())))
+        self._gradient_item.setPos(eff.left(), eff.top())
+        self._border_item.setRect(eff)
+        self._position_handles()
+        self._update_curve_path()
+
+    # ----- colormap -----
+    def set_colormap(self, name: str):
+        if not name:
+            name = "viridis"
+        if self._colormap_name == name:
+            return
+        self._colormap_name = name
+        self._update_gradient_pixmap()
+        self._update_curve_path()
+
+    def _update_gradient_pixmap(self, width: Optional[int] = None, height: Optional[int] = None):
+        eff = self._effective_rect()
+        w = int(width or max(2.0, eff.width()))
+        h = int(height or max(2.0, eff.height()))
+        try:
+            cmap = pg.colormap.get(self._colormap_name)
+        except Exception:
+            cmap = pg.colormap.get("viridis")
+        lut = cmap.map(np.linspace(0.0, 1.0, max(2, w)), mode="byte")
+        gradient = np.repeat(lut[np.newaxis, :, :3], max(2, h), axis=0)
+        alpha = np.full((gradient.shape[0], gradient.shape[1], 1), 255, dtype=np.uint8)
+        rgba = np.concatenate((gradient, alpha), axis=2)
+        image = QtGui.QImage(
+            rgba.data, rgba.shape[1], rgba.shape[0], int(rgba.strides[0]), QtGui.QImage.Format_RGBA8888
+        )
+        image = image.copy()
+        self._gradient_item.setPixmap(QtGui.QPixmap.fromImage(image))
+
+    # ----- handle interactions -----
+    def clamp_handle_position(
+        self, handle: VolumeAlphaHandle, value: QtCore.QPointF
+    ) -> QtCore.QPointF:
+        if self._updating:
+            return value
+        eff = self._effective_rect()
+        width = eff.width()
+        height = eff.height()
+        x_norm = 0.0
+        if width > 0:
+            raw_x_norm = (float(value.x()) - eff.left()) / width
+            idx = self._handles.index(handle)
+            min_norm = 0.0 if idx == 0 else self._handles[idx - 1].x_norm + 1e-4
+            max_norm = 1.0 if idx == len(self._handles) - 1 else self._handles[idx + 1].x_norm - 1e-4
+            x_norm = max(min_norm, min(max_norm, raw_x_norm))
+            x_norm = max(0.0, min(1.0, x_norm))
+        x = eff.left() + x_norm * max(width, 1.0)
+        y = float(value.y())
+        if height > 0:
+            y = max(eff.top(), min(eff.bottom(), y))
+        return QtCore.QPointF(x, y)
+
+    def handle_moved(self, handle: VolumeAlphaHandle):
+        if self._updating:
+            return
+        eff = self._effective_rect()
+        width = eff.width()
+        height = eff.height()
+        if width <= 0 or height <= 0:
+            return
+        pos = handle.pos()
+        x_norm = (pos.x() - eff.left()) / width
+        y_norm = (eff.bottom() - pos.y()) / height
+        x_norm = max(0.0, min(1.0, float(x_norm)))
+        y_norm = max(0.0, min(1.0, float(y_norm)))
+        idx = self._handles.index(handle)
+        if idx > 0:
+            x_norm = max(x_norm, self._handles[idx - 1].x_norm + 1e-4)
+        if idx < len(self._handles) - 1:
+            x_norm = min(x_norm, self._handles[idx + 1].x_norm - 1e-4)
+        handle.y_norm = y_norm
+        handle.x_norm = x_norm
+        self._handles.sort(key=lambda item: item.x_norm)
+        self._position_handles()
+        self._update_curve_path()
+        self.curveChanged.emit(self.curve_points())
+
+    def _position_handles(self):
+        eff = self._effective_rect()
+        if eff.height() <= 0 or eff.width() <= 0:
+            return
+        self._updating = True
+        try:
+            for handle in self._handles:
+                x = eff.left() + handle.x_norm * eff.width()
+                y = eff.bottom() - handle.y_norm * eff.height()
+                handle.setPos(QtCore.QPointF(x, y))
+        finally:
+            self._updating = False
+
+    def _update_curve_path(self):
+        if not self._handles:
+            self._curve_item.setPath(QtGui.QPainterPath())
+            return
+        sorted_handles = sorted(self._handles, key=lambda item: item.x_norm)
+        path = QtGui.QPainterPath()
+        first = sorted_handles[0]
+        path.moveTo(first.pos())
+        for handle in sorted_handles[1:]:
+            path.lineTo(handle.pos())
+        self._curve_item.setPath(path)
+
+    # ----- curve helpers -----
+    def curve_points(self) -> List[Tuple[float, float]]:
+        return [(handle.x_norm, handle.y_norm) for handle in sorted(self._handles, key=lambda h: h.x_norm)]
+
+    def set_curve(self, points: List[Tuple[float, float]]):
+        if not points:
+            return
+        for handle in list(self._handles):
+            self._scene.removeItem(handle)
+        self._handles.clear()
+        for x, y in points:
+            self._add_handle(float(x), float(y), emit=False)
+        self._update_curve_path()
+        self.curveChanged.emit(self.curve_points())
+
+    def reset_curve(self):
+        for handle in list(self._handles):
+            self._scene.removeItem(handle)
+        self._handles.clear()
+        for x_norm in self._default_positions:
+            self._add_handle(float(x_norm), float(self._default_value), emit=False)
+        self._update_curve_path()
+        self.curveChanged.emit(self.curve_points())
+
+    def _add_handle(self, x_norm: float, y_norm: float, *, emit: bool = True):
+        x_norm = max(0.0, min(1.0, x_norm))
+        y_norm = max(0.0, min(1.0, y_norm))
+        for existing in self._handles:
+            if abs(existing.x_norm - x_norm) < 1e-4:
+                existing.x_norm = x_norm
+                existing.y_norm = y_norm
+                self._handles.sort(key=lambda item: item.x_norm)
+                self._position_handles()
+                self._update_curve_path()
+                if emit:
+                    self.curveChanged.emit(self.curve_points())
+                return
+        handle = VolumeAlphaHandle(self, x_norm, y_norm)
+        self._scene.addItem(handle)
+        self._handles.append(handle)
+        self._handles.sort(key=lambda item: item.x_norm)
+        self._position_handles()
+        self._update_curve_path()
+        if emit:
+            self.curveChanged.emit(self.curve_points())
+
+    def eventFilter(self, obj, event):
+        if (
+            obj is self._view.viewport()
+            and event.type() == QtCore.QEvent.MouseButtonDblClick
+            and self.isEnabled()
+        ):
+            if isinstance(event, QtGui.QMouseEvent) and event.button() == QtCore.Qt.LeftButton:
+                scene_pos = self._view.mapToScene(event.pos())
+                eff = self._effective_rect()
+                if eff.contains(scene_pos):
+                    width = eff.width() if eff.width() > 0 else 1.0
+                    height = eff.height() if eff.height() > 0 else 1.0
+                    x_norm = (scene_pos.x() - eff.left()) / width
+                    y_norm = (eff.bottom() - scene_pos.y()) / height
+                    self._add_handle(x_norm, y_norm)
+                    return True
+        return super().eventFilter(obj, event)
+
+
+class SequentialVolumeWindow(QtWidgets.QWidget):
+    closed = QtCore.Signal()
+
+    def __init__(self, parent=None):
+        if gl is None:
+            raise RuntimeError("pyqtgraph.opengl is not available")
+        super().__init__(parent, QtCore.Qt.Window)
+        self.setWindowTitle("Sequential Volume Viewer")
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
+        self.resize(680, 520)
+
+        self._data: Optional[np.ndarray] = None
+        self._data_min: float = 0.0
+        self._data_max: float = 1.0
+        self._colormap_name: str = "viridis"
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        cmap_controls = QtWidgets.QHBoxLayout()
+        cmap_controls.setSpacing(6)
+        cmap_controls.addWidget(QtWidgets.QLabel("Colormap:"))
+
+        self.cmb_colormap = QtWidgets.QComboBox()
+        self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        self.cmb_colormap.currentIndexChanged.connect(self._on_colormap_combo_changed)
+        cmap_controls.addWidget(self.cmb_colormap, 0)
+
+        cmap_controls.addStretch(1)
+        layout.addLayout(cmap_controls)
+
+        controls = QtWidgets.QHBoxLayout()
+        controls.setSpacing(6)
+        controls.addWidget(QtWidgets.QLabel("Opacity curves:"))
+
+        self.btn_reset_curve = QtWidgets.QPushButton("Reset curves")
+        self.btn_reset_curve.clicked.connect(self._on_reset_curve)
+        controls.addWidget(self.btn_reset_curve)
+
+        self.btn_reset_view = QtWidgets.QPushButton("Reset view")
+        self.btn_reset_view.setEnabled(False)
+        self.btn_reset_view.clicked.connect(self._on_reset_view)
+        controls.addWidget(self.btn_reset_view)
+
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        curves_row = QtWidgets.QHBoxLayout()
+        curves_row.setSpacing(8)
+        layout.addLayout(curves_row)
+
+        self._curve_keys: Tuple[str, ...] = ("value", "slice", "row", "column")
+        self._axis_labels: Dict[str, str] = {
+            "value": "Value",
+            "slice": "Slice axis",
+            "row": "Row axis",
+            "column": "Column axis",
+        }
+        self._curve_widgets: Dict[str, VolumeAlphaCurveWidget] = {}
+        self._curve_labels: Dict[str, QtWidgets.QLabel] = {}
+
+        for key in self._curve_keys:
+            column_layout = QtWidgets.QVBoxLayout()
+            column_layout.setSpacing(4)
+            label = QtWidgets.QLabel(self._axis_labels[key])
+            label.setAlignment(QtCore.Qt.AlignHCenter)
+            label.setWordWrap(True)
+            column_layout.addWidget(label)
+
+            widget = VolumeAlphaCurveWidget(default_value=0.8 if key == "value" else 1)
+            widget.setMinimumWidth(150)
+            widget.setSizePolicy(
+                QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            )
+            widget.setToolTip(
+                "Drag control points to sculpt opacity, double-click to add a new point."
+            )
+            widget.curveChanged.connect(lambda points, k=key: self._on_alpha_curve_changed(k, points))
+            column_layout.addWidget(widget)
+
+            curves_row.addLayout(column_layout, 1)
+            self._curve_widgets[key] = widget
+            self._curve_labels[key] = label
+
+        self._volume_item: Optional[gl.GLVolumeItem] = None
+        self._volume_scalar: Optional[np.ndarray] = None
+        self._volume_shape: Tuple[int, int, int] = (1, 1, 1)
+        self._curve_points: Dict[str, List[Tuple[float, float]]] = {}
+        self._curve_lut_x: Dict[str, np.ndarray] = {}
+        self._curve_lut_y: Dict[str, np.ndarray] = {}
+        for key, widget in self._curve_widgets.items():
+            points = widget.curve_points()
+            xs = np.array([max(0.0, min(1.0, float(x))) for x, _ in points], dtype=float)
+            ys = np.array([max(0.0, min(1.0, float(y))) for _, y in points], dtype=float)
+            self._curve_points[key] = [(float(x), float(y)) for x, y in zip(xs, ys)]
+            self._curve_lut_x[key] = xs
+            self._curve_lut_y[key] = ys
+        self._alpha_scale_base: float = 101.0
+
+        self._populate_colormap_choices()
+        self._update_alpha_controls()
+
+        self.view = gl.GLViewWidget()
+        self.view.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        )
+        self.view.setMinimumHeight(260)
+        self.view.opts["distance"] = 400
+        self.view.setBackgroundColor(QtGui.QColor(20, 20, 20))
+        layout.addWidget(self.view, 1)
+
+    # ----- public API -----
+    def set_volume(self, data: Optional[np.ndarray]):
+        if data is None or data.size == 0:
+            self._data = None
+            self._remove_volume()
+            self._update_alpha_controls()
+            return
+        arr = np.asarray(data, float)
+        finite = np.isfinite(arr)
+        if not finite.any():
+            arr = np.zeros_like(arr, dtype=float)
+            self._data_min = 0.0
+            self._data_max = 1.0
+        else:
+            min_val = float(np.nanmin(arr))
+            max_val = float(np.nanmax(arr))
+            if min_val == max_val:
+                max_val = min_val + 1.0
+            arr = np.nan_to_num(arr, nan=min_val)
+            self._data_min = min_val
+            self._data_max = max_val
+        self._data = arr.astype(np.float32, copy=False)
+        self._volume_scalar = self._prepare_volume_array(self._data)
+        self._volume_shape = self._volume_scalar.shape if self._volume_scalar is not None else (1, 1, 1)
+        self._update_alpha_controls()
+        self._ensure_volume_item()
+        self._center_volume_item()
+        self._update_volume_visual()
+        self._reset_camera()
+
+    def set_colormap(self, name: Optional[str]):
+        if name:
+            self._colormap_name = str(name)
+        else:
+            self._colormap_name = "viridis"
+        for widget in self._curve_widgets.values():
+            try:
+                widget.set_colormap(self._colormap_name)
+            except Exception:
+                continue
+        self._sync_colormap_combo()
+        self._update_volume_visual()
+
+    def clear_volume(self):
+        self._data = None
+        self._volume_scalar = None
+        self._volume_shape = (1, 1, 1)
+        self._remove_volume()
+        self._update_alpha_controls()
+        self.btn_reset_view.setEnabled(False)
+
+    # ----- helpers -----
+    def _ensure_volume_item(self):
+        if self._volume_item is not None:
+            return
+        data = self._data
+        if data is None:
+            return
+        scalar = self._prepare_volume_array(data)
+        self._volume_scalar = scalar
+        rgba = self._compute_rgba_volume(scalar)
+        self._volume_item = gl.GLVolumeItem(rgba, smooth=False)
+        # Use translucent blending so colors remain readable instead of
+        # saturating to white as layers accumulate with additive blending.
+        self._volume_item.setGLOptions("translucent")
+        self._volume_item.resetTransform()
+        self._center_volume_item()
+        self.view.addItem(self._volume_item)
+        if hasattr(self._volume_item, "update"):
+            try:
+                self._volume_item.update()
+            except Exception:
+                pass
+        self.btn_reset_view.setEnabled(True)
+
+    def _prepare_volume_array(self, data: np.ndarray) -> np.ndarray:
+        if data.ndim != 3:
+            return np.zeros((1, 1, 1), dtype=np.float32)
+        transposed = np.transpose(data, (2, 1, 0))
+        return np.ascontiguousarray(transposed, dtype=np.float32)
+
+    def _compute_rgba_volume(self, scalar: np.ndarray) -> np.ndarray:
+        if scalar.size == 0:
+            return np.zeros(scalar.shape + (4,), dtype=np.ubyte)
+        try:
+            cmap = pg.colormap.get(self._colormap_name)
+        except Exception:
+            cmap = pg.colormap.get("viridis")
+        data_min = float(self._data_min)
+        data_max = float(self._data_max)
+        if not np.isfinite(data_min) or not np.isfinite(data_max) or data_min == data_max:
+            data_min = float(np.nanmin(scalar))
+            data_max = float(np.nanmax(scalar))
+            if not np.isfinite(data_min):
+                data_min = 0.0
+            if not np.isfinite(data_max) or data_max == data_min:
+                data_max = data_min + 1.0
+        scale = data_max - data_min
+        if scale == 0.0:
+            scale = 1.0
+        norm = (scalar - data_min) / scale
+        norm = np.clip(norm, 0.0, 1.0)
+        rgba = cmap.map(norm.reshape(-1), mode="byte").reshape(scalar.shape + (4,))
+
+        alpha_value = self._apply_alpha_scale(self._sample_alpha_curve("value", norm))
+        alpha_total = alpha_value
+        if scalar.ndim >= 3:
+            col_len, row_len, slice_len = scalar.shape
+            if slice_len > 1:
+                slice_positions = np.linspace(0.0, 1.0, slice_len, dtype=float)
+                slice_alpha = self._apply_alpha_scale(
+                    self._sample_alpha_curve("slice", slice_positions)
+                ).reshape(1, 1, slice_len)
+                alpha_total = alpha_total * slice_alpha
+            if row_len > 1:
+                row_positions = np.linspace(0.0, 1.0, row_len, dtype=float)
+                row_alpha = self._apply_alpha_scale(
+                    self._sample_alpha_curve("row", row_positions)
+                ).reshape(1, row_len, 1)
+                alpha_total = alpha_total * row_alpha
+            if col_len > 1:
+                col_positions = np.linspace(0.0, 1.0, col_len, dtype=float)
+                col_alpha = self._apply_alpha_scale(
+                    self._sample_alpha_curve("column", col_positions)
+                ).reshape(col_len, 1, 1)
+                alpha_total = alpha_total * col_alpha
+        alpha = np.clip(alpha_total * 255.0, 0.0, 255.0)
+        rgba = rgba.copy()
+        rgba[..., 3] = alpha.astype(np.uint8)
+        return np.ascontiguousarray(rgba, dtype=np.ubyte)
+
+    def _update_volume_visual(self):
+        if self._volume_item is None or self._volume_scalar is None:
+            return
+        rgba = self._compute_rgba_volume(self._volume_scalar)
+        try:
+            self._volume_item.setData(rgba)
+        except TypeError:
+            # Older pyqtgraph releases expect the array as the first argument.
+            self._volume_item.setData(data=rgba)
+        self._center_volume_item()
+        self.view.update()
+
+    def _center_volume_item(self):
+        if self._volume_item is None or self._volume_scalar is None:
+            return
+        try:
+            self._volume_item.resetTransform()
+        except Exception:
+            pass
+        shape = self._volume_scalar.shape
+        if len(shape) != 3:
+            return
+        offset = [-dim / 2.0 for dim in shape]
+        try:
+            self._volume_item.translate(*offset)
+        except Exception:
+            pass
+
+    def _reset_camera(self):
+        if self._volume_scalar is None or self._volume_scalar.size == 0:
+            return
+        shape = self._volume_scalar.shape
+        max_dim = float(max(shape)) if shape else 1.0
+        distance = max(200.0, max_dim * 2.2)
+        try:
+            self.view.opts["center"] = pg.Vector(0.0, 0.0, 0.0)
+        except Exception:
+            try:
+                self.view.opts["center"] = QtGui.QVector3D(0.0, 0.0, 0.0)
+            except Exception:
+                pass
+        try:
+            self.view.setCameraPosition(distance=distance, elevation=26, azimuth=32)
+        except Exception:
+            self.view.opts["distance"] = distance
+        self.view.update()
+
+    def _populate_colormap_choices(self):
+        candidates = [
+            "gray",
+            "viridis",
+            "plasma",
+            "inferno",
+            "magma",
+            "cividis",
+            "turbo",
+            "thermal",
+            "blues",
+            "reds",
+        ]
+        self.cmb_colormap.blockSignals(True)
+        self.cmb_colormap.clear()
+        for name in candidates:
+            try:
+                pg.colormap.get(name)
+            except Exception:
+                continue
+            self.cmb_colormap.addItem(name.title(), name)
+        if self.cmb_colormap.count() == 0:
+            self.cmb_colormap.addItem("Viridis", "viridis")
+        self.cmb_colormap.blockSignals(False)
+        self._sync_colormap_combo()
+
+    def _sync_colormap_combo(self):
+        if not hasattr(self, "cmb_colormap"):
+            return
+        name = self._colormap_name or "viridis"
+        block = self.cmb_colormap.blockSignals(True)
+        idx = self.cmb_colormap.findData(name)
+        if idx < 0 and self.cmb_colormap.count():
+            idx = 0
+            name = self.cmb_colormap.itemData(0)
+            self._colormap_name = name
+        if idx >= 0:
+            self.cmb_colormap.setCurrentIndex(idx)
+        self.cmb_colormap.blockSignals(block)
+
+    def _on_colormap_combo_changed(self):
+        name = self.cmb_colormap.currentData()
+        if not name:
+            name = "viridis"
+        if name == self._colormap_name:
+            return
+        self.set_colormap(name)
+        if hasattr(self._volume_item, "update"):
+            try:
+                self._volume_item.update()
+            except Exception:
+                pass
+
+    def _remove_volume(self):
+        if self._volume_item is None:
+            return
+        try:
+            self.view.removeItem(self._volume_item)
+        except Exception:
+            pass
+        self._volume_item = None
+
+    def _update_alpha_controls(self):
+        has_data = self._data is not None
+        for widget in self._curve_widgets.values():
+            widget.setEnabled(has_data)
+        self.btn_reset_curve.setEnabled(has_data)
+        self.btn_reset_view.setEnabled(has_data and self._volume_item is not None)
+
+    def set_axis_labels(self, slice_label: str, row_label: str, column_label: str):
+        self._axis_labels.update(
+            {
+                "slice": slice_label or "Slice axis",
+                "row": row_label or "Row axis",
+                "column": column_label or "Column axis",
+                "value": "Value",
+            }
+        )
+        for key, label_widget in self._curve_labels.items():
+            label = self._axis_labels.get(key, key.title())
+            if key == "value":
+                text = label
+            else:
+                pretty = str(label)
+                lower = pretty.lower()
+                if lower.endswith("axis"):
+                    text = pretty
+                else:
+                    text = f"{pretty} axis"
+            label_widget.setText(text)
+
+    def _store_curve(self, key: str, points: List[Tuple[float, float]]):
+        xs = np.array([max(0.0, min(1.0, float(x))) for x, _ in points], dtype=float)
+        ys = np.array([max(0.0, min(1.0, float(y))) for _, y in points], dtype=float)
+        if xs.size == 0 or ys.size == 0:
+            xs = np.array([0.0, 1.0], dtype=float)
+            ys = np.array([0.0, 1.0], dtype=float)
+        order = np.argsort(xs)
+        xs = xs[order]
+        ys = ys[order]
+        normalized_points = [(float(x), float(y)) for x, y in zip(xs, ys)]
+        previous = self._curve_points.get(key)
+        self._curve_points[key] = normalized_points
+        self._curve_lut_x[key] = xs
+        self._curve_lut_y[key] = ys
+        changed = previous is None or len(previous) != len(normalized_points) or any(
+            abs(px - nx) > 1e-6 or abs(py - ny) > 1e-6
+            for (px, py), (nx, ny) in zip(previous or [], normalized_points)
+        )
+        if changed:
+            self._update_volume_visual()
+
+    def _on_alpha_curve_changed(self, key: str, points: List[Tuple[float, float]]):
+        if key not in self._curve_keys:
+            key = "value"
+        if not points:
+            default_value = 0.8
+            widget = self._curve_widgets.get(key)
+            if widget is not None and hasattr(widget, "_default_value"):
+                default_value = float(getattr(widget, "_default_value"))
+            default_value = max(0.0, min(1.0, default_value))
+            points = [(0.0, default_value), (1.0, default_value)]
+        self._store_curve(key, points)
+
+    def _on_reset_curve(self):
+        for widget in self._curve_widgets.values():
+            widget.reset_curve()
+        for key, widget in self._curve_widgets.items():
+            self._store_curve(key, widget.curve_points())
+
+    def _on_reset_view(self):
+        self._center_volume_item()
+        self._reset_camera()
+
+    def _sample_alpha_curve(self, key: str, values: np.ndarray) -> np.ndarray:
+        clipped = np.clip(values, 0.0, 1.0)
+        flat = clipped.reshape(-1)
+        lut_x = self._curve_lut_x.get(key)
+        lut_y = self._curve_lut_y.get(key)
+        if lut_x is None or lut_y is None or lut_x.size < 2:
+            mapped = flat
+        else:
+            mapped = np.interp(flat, lut_x, lut_y)
+        return mapped.reshape(clipped.shape)
+
+    def _apply_alpha_scale(self, alpha_norm: np.ndarray) -> np.ndarray:
+        base = max(2.0, float(self._alpha_scale_base))
+        clamped = np.clip(alpha_norm, 0.0, 1.0)
+        scaled = (np.power(base, clamped) - 1.0) / (base - 1.0)
+        return np.clip(scaled, 0.0, 1.0)
+
+    def closeEvent(self, event: QtGui.QCloseEvent):
+        try:
+            self.closed.emit()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+
+# ---------------------------------------------------------------------------
+# Sequential view: explore 2D slices along an arbitrary axis
+# ---------------------------------------------------------------------------
+
+
+class SequentialView(QtWidgets.QWidget):
+    def __init__(self, processing_manager: Optional[ProcessingManager] = None, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.processing_manager = processing_manager
+
+        self._dataset: Optional[xr.Dataset] = None
+        self._dataset_path: Optional[Path] = None
+        self._current_variable: Optional[str] = None
+        self._current_da: Optional[xr.DataArray] = None
+        self._dims: List[str] = []
+        self._slice_axis: Optional[str] = None
+        self._row_axis: Optional[str] = None
+        self._col_axis: Optional[str] = None
+        self._fixed_indices: Dict[str, int] = {}
+        self._fixed_dim_widgets: Dict[str, QtWidgets.QSpinBox] = {}
+        self._processing_mode: str = "none"
+        self._processing_params: Dict[str, object] = {}
+        self._slice_index: int = 0
+        self._slice_count: int = 0
+        self._axis_coords: Optional[np.ndarray] = None
+        self._current_processed_slice: Optional[np.ndarray] = None
+        self._roi_last_shape: Optional[Tuple[int, int]] = None
+        self._roi_last_bounds: Optional[Tuple[int, int, int, int]] = None
+
+        self._roi_enabled: bool = False
+        self._roi_reducers = {
+            "mean": ("Mean", _nan_aware_reducer(lambda arr, axis=None: np.nanmean(arr, axis=axis))),
+            "median": ("Median", _nan_aware_reducer(lambda arr, axis=None: np.nanmedian(arr, axis=axis))),
+            "min": ("Minimum", _nan_aware_reducer(lambda arr, axis=None: np.nanmin(arr, axis=axis))),
+            "max": ("Maximum", _nan_aware_reducer(lambda arr, axis=None: np.nanmax(arr, axis=axis))),
+            "std": ("Std. dev", _nan_aware_reducer(lambda arr, axis=None: np.nanstd(arr, axis=axis))),
+            "ptp": (
+                "Peak-to-peak",
+                _nan_aware_reducer(
+                    lambda arr, axis=None: np.nanmax(arr, axis=axis) - np.nanmin(arr, axis=axis)
+                ),
+            ),
+        }
+        self._roi_method_key: str = "mean"
+        self._roi_last_slices: Optional[Tuple[slice, slice]] = None
+        self._roi_axis_options: List[Tuple[str, Tuple[int, ...], str, str, Optional[int]]] = []
+        self._roi_axes_selection: Tuple[int, ...] = (0, 1)
+        self._roi_axis_index: int = 0
+        self._current_slice_coords: Dict[str, np.ndarray] = {}
+        self._row_coord_1d: Optional[np.ndarray] = None
+        self._row_coord_2d: Optional[np.ndarray] = None
+        self._col_coord_1d: Optional[np.ndarray] = None
+        self._col_coord_2d: Optional[np.ndarray] = None
+        self._volume_cache: Optional[np.ndarray] = None
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setSpacing(6)
+
+        hint = QtWidgets.QLabel(
+            "Drop a dataset here or use the Load button to explore sequential slices."
+        )
+        hint.setStyleSheet("color: #666;")
+        outer.addWidget(hint)
+
+        top = QtWidgets.QHBoxLayout()
+        self.lbl_dataset = QtWidgets.QLabel("No dataset loaded")
+        self.lbl_dataset.setStyleSheet("color: #555;")
+        top.addWidget(self.lbl_dataset, 1)
+        self.btn_load = QtWidgets.QPushButton("Load dataset…")
+        self.btn_load.clicked.connect(self._load_dataset_dialog)
+        top.addWidget(self.btn_load, 0)
+        outer.addLayout(top)
+
+        var_row = QtWidgets.QHBoxLayout()
+        var_row.addWidget(QtWidgets.QLabel("Variable:"))
+        self.cmb_variable = QtWidgets.QComboBox()
+        self.cmb_variable.setEnabled(False)
+        self.cmb_variable.currentIndexChanged.connect(self._on_variable_changed)
+        var_row.addWidget(self.cmb_variable, 1)
+        outer.addLayout(var_row)
+
+        axis_group = QtWidgets.QGroupBox("Slice configuration")
+        axis_form = QtWidgets.QFormLayout(axis_group)
+        axis_form.setContentsMargins(6, 6, 6, 6)
+        axis_form.setSpacing(6)
+
+        self.cmb_slice_axis = QtWidgets.QComboBox()
+        self.cmb_slice_axis.currentIndexChanged.connect(self._on_axes_changed)
+        axis_form.addRow("Slice axis", self.cmb_slice_axis)
+
+        self.cmb_row_axis = QtWidgets.QComboBox()
+        self.cmb_row_axis.currentIndexChanged.connect(self._on_axes_changed)
+        axis_form.addRow("Rows", self.cmb_row_axis)
+
+        self.cmb_col_axis = QtWidgets.QComboBox()
+        self.cmb_col_axis.currentIndexChanged.connect(self._on_axes_changed)
+        axis_form.addRow("Columns", self.cmb_col_axis)
+
+        self.fixed_dims_container = QtWidgets.QWidget()
+        self.fixed_dims_layout = QtWidgets.QFormLayout(self.fixed_dims_container)
+        self.fixed_dims_layout.setContentsMargins(0, 0, 0, 0)
+        self.fixed_dims_layout.setSpacing(4)
+        axis_form.addRow("Fixed indices", self.fixed_dims_container)
+
+        outer.addWidget(axis_group)
+
+        slider_row = QtWidgets.QHBoxLayout()
+        self.lbl_slice = QtWidgets.QLabel("Slice: –")
+        slider_row.addWidget(self.lbl_slice, 0)
+        self.sld_slice = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.sld_slice.setEnabled(False)
+        self.sld_slice.valueChanged.connect(self._on_slice_changed)
+        slider_row.addWidget(self.sld_slice, 1)
+        self.spin_slice = QtWidgets.QSpinBox()
+        self.spin_slice.setEnabled(False)
+        self.spin_slice.valueChanged.connect(self._on_slice_spin_changed)
+        slider_row.addWidget(self.spin_slice, 0)
+        outer.addLayout(slider_row)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_apply_processing = QtWidgets.QPushButton("Apply processing…")
+        self.btn_apply_processing.setEnabled(False)
+        self.btn_apply_processing.clicked.connect(self._choose_processing)
+        btn_row.addWidget(self.btn_apply_processing)
+
+        self.btn_reset_processing = QtWidgets.QPushButton("Reset processing")
+        self.btn_reset_processing.setEnabled(False)
+        self.btn_reset_processing.clicked.connect(self._reset_processing)
+        btn_row.addWidget(self.btn_reset_processing)
+
+        self.btn_autoscale = QtWidgets.QPushButton("Autoscale colors")
+        self.btn_autoscale.setEnabled(False)
+        self.btn_autoscale.clicked.connect(self._on_autoscale_clicked)
+        btn_row.addWidget(self.btn_autoscale)
+
+        self.btn_autorange = QtWidgets.QPushButton("Auto view")
+        self.btn_autorange.setEnabled(False)
+        self.btn_autorange.clicked.connect(self._on_autorange_clicked)
+        btn_row.addWidget(self.btn_autorange)
+
+        btn_row.addSpacing(12)
+
+        cmap_label = QtWidgets.QLabel("Color map:")
+        cmap_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        btn_row.addWidget(cmap_label, 0)
+
+        self.cmb_colormap = QtWidgets.QComboBox()
+        self.cmb_colormap.setEnabled(False)
+        self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        self.cmb_colormap.currentIndexChanged.connect(self._on_colormap_changed)
+        btn_row.addWidget(self.cmb_colormap, 0)
+        self._populate_colormap_choices()
+
+        btn_row.addStretch(1)
+        outer.addLayout(btn_row)
+
+        self.viewer_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.viewer_split.setChildrenCollapsible(False)
+        self.viewer_split.setHandleWidth(6)
+        outer.addWidget(self.viewer_split, 1)
+
+        self.viewer = CentralPlotWidget(self)
+        self.viewer_split.addWidget(self.viewer)
+        hist = self.viewer.histogram_widget()
+        if hist is not None and self.viewer_split.indexOf(hist) == -1:
+            hist.setSizePolicy(
+                QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+            )
+            hist.setMinimumWidth(140)
+            hist.setMaximumWidth(180)
+            self.viewer_split.addWidget(hist)
+            try:
+                self.viewer_split.setStretchFactor(0, 1)
+                self.viewer_split.setStretchFactor(1, 0)
+            except Exception:
+                pass
+            QtCore.QTimer.singleShot(0, lambda: self.viewer_split.setSizes([600, 150]))
+
+        roi_row = QtWidgets.QHBoxLayout()
+        self.btn_toggle_roi = QtWidgets.QPushButton("Enable ROI")
+        self.btn_toggle_roi.setCheckable(True)
+        self.btn_toggle_roi.setEnabled(False)
+        self.btn_toggle_roi.toggled.connect(self._on_roi_toggled)
+        roi_row.addWidget(self.btn_toggle_roi)
+
+        self.btn_volume_view = QtWidgets.QPushButton("Open volume view…")
+        self.btn_volume_view.setEnabled(False)
+        self.btn_volume_view.clicked.connect(self._open_volume_view)
+        if gl is None:
+            self.btn_volume_view.setToolTip(
+                "3D volume rendering requires the optional pyqtgraph.opengl module"
+            )
+        roi_row.addWidget(self.btn_volume_view)
+
+        self.lbl_roi_status = QtWidgets.QLabel("ROI disabled")
+        self.lbl_roi_status.setStyleSheet("color: #666;")
+        roi_row.addWidget(self.lbl_roi_status, 1)
+        outer.addLayout(roi_row)
+
+        self.roi = pg.RectROI([10, 10], [40, 40], pen=pg.mkPen('#ffaa00', width=2))
+        self.roi.addScaleHandle((1, 1), (0, 0))
+        self.roi.addScaleHandle((0, 0), (1, 1))
+        self.roi.hide()
+        self.roi.sigRegionChanged.connect(self._on_roi_region_changed)
+        try:
+            self.roi.sigRegionChangeFinished.connect(self._on_roi_region_changed)
+        except Exception:
+            pass
+
+        self._roi_window: Optional[SequentialRoiWindow] = None
+        self._volume_window: Optional[SequentialVolumeWindow] = None
+
+    # ---------- dataset helpers ----------
+    def _populate_colormap_choices(self):
+        candidates = [
+            "gray",
+            "viridis",
+            "plasma",
+            "inferno",
+            "magma",
+            "cividis",
+            "turbo",
+            "thermal",
+        ]
+        self.cmb_colormap.blockSignals(True)
+        self.cmb_colormap.clear()
+        for name in candidates:
+            try:
+                pg.colormap.get(name)
+            except Exception:
+                continue
+            self.cmb_colormap.addItem(name.title(), name)
+        if self.cmb_colormap.count() == 0:
+            self.cmb_colormap.addItem("Default", "default")
+        self.cmb_colormap.blockSignals(False)
+        if self.cmb_colormap.count():
+            self.cmb_colormap.setCurrentIndex(0)
+
+    def _on_colormap_changed(self):
+        if not hasattr(self, "viewer"):
+            return
+        self._apply_selected_colormap()
+        self._update_volume_window_colormap()
+
+    def _apply_selected_colormap(self):
+        if not hasattr(self, "viewer"):
+            return
+        name = self.cmb_colormap.currentData()
+        if not name or name == "default":
+            target = "viridis"
+        else:
+            target = str(name)
+        try:
+            cmap = pg.colormap.get(target)
+        except Exception:
+            return
+        try:
+            self.viewer.lut.gradient.setColorMap(cmap)
+        except Exception:
+            return
+        try:
+            self.viewer.lut.rehide_stops()
+        except Exception:
+            pass
+        self._update_volume_window_colormap()
+
+    def set_processing_manager(self, manager: Optional[ProcessingManager]):
+        self.processing_manager = manager
+
+    def dragEnterEvent(self, ev: QtGui.QDragEnterEvent):
+        if ev.mimeData().hasText():
+            ev.acceptProposedAction()
+        else:
+            ev.ignore()
+
+    def dropEvent(self, ev: QtGui.QDropEvent):
+        text = ev.mimeData().text()
+        ref = DataSetRef.from_mime(text)
+        if not ref:
+            ev.ignore()
+            return
+        try:
+            ds = ref.load()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Load failed", str(exc))
+            ev.ignore()
+            return
+        self._set_dataset(ds, ref.path)
+        ev.acceptProposedAction()
+
+    def _load_dataset_dialog(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Open dataset",
+            "",
+            "NetCDF / Zarr (*.nc *.zarr);;All files (*)",
+        )
+        if not path:
+            return
+        p = Path(path)
+        try:
+            ds = open_dataset(p)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Load failed", str(exc))
+            return
+        self._set_dataset(ds, p)
+
+    def _clear_view(self):
+        self._reset_current_state()
+        self._clear_fixed_dim_widgets()
+        self.cmb_variable.blockSignals(True)
+        self.cmb_variable.clear()
+        self.cmb_variable.blockSignals(False)
+        for combo in (self.cmb_slice_axis, self.cmb_row_axis, self.cmb_col_axis):
+            combo.blockSignals(True)
+            combo.clear()
+            combo.blockSignals(False)
+            combo.setEnabled(False)
+        self.cmb_variable.setEnabled(False)
+        self._clear_display()
+
+    def _clear_display(self):
+        if self.roi.scene() is not None:
+            try:
+                self.viewer.plot.removeItem(self.roi)
+            except Exception:
+                pass
+        self.roi.hide()
+        self.btn_toggle_roi.blockSignals(True)
+        self.btn_toggle_roi.setChecked(False)
+        self.btn_toggle_roi.blockSignals(False)
+        self.btn_toggle_roi.setEnabled(False)
+        self.btn_volume_view.setEnabled(False)
+        if self._roi_window is not None:
+            try:
+                self._roi_window.hide()
+                self._roi_window.update_slice_curve([], [], "Slice coordinate", "ROI statistic")
+                self._roi_window.update_profile([], [], "", "", False)
+            except Exception:
+                pass
+        if self._volume_window is not None:
+            try:
+                self._volume_window.clear_volume()
+                self._volume_window.hide()
+            except Exception:
+                pass
+        self.lbl_roi_status.setText("ROI disabled")
+        self._roi_enabled = False
+        self._roi_last_slices = None
+        self._roi_last_bounds = None
+        self._roi_last_shape = None
+        self._cache_slice_coords({})
+        self._roi_axis_options = []
+        self._roi_axes_selection = (0, 1)
+        self._roi_axis_index = 0
+        self._volume_cache = None
+        self.viewer.set_image(np.zeros((1, 1)), autorange=True)
+        self.sld_slice.blockSignals(True)
+        self.spin_slice.blockSignals(True)
+        self.sld_slice.setRange(0, 0)
+        self.spin_slice.setRange(0, 0)
+        self.sld_slice.setValue(0)
+        self.spin_slice.setValue(0)
+        self.sld_slice.blockSignals(False)
+        self.spin_slice.blockSignals(False)
+        self.sld_slice.setEnabled(False)
+        self.spin_slice.setEnabled(False)
+        self.btn_apply_processing.setEnabled(False)
+        self.btn_reset_processing.setEnabled(False)
+        self.btn_autoscale.setEnabled(False)
+        self.btn_autorange.setEnabled(False)
+        self.cmb_colormap.setEnabled(False)
+        self.lbl_slice.setText("Slice: –")
+
+    def _set_dataset(self, ds: xr.Dataset, path: Optional[Path]):
+        if self._dataset is not None and self._dataset is not ds:
+            try:
+                self._dataset.close()
+            except Exception:
+                pass
+        self._dataset = ds
+        self._dataset_path = Path(path) if path else None
+        self.lbl_dataset.setText(self._dataset_path.name if self._dataset_path else "(in-memory dataset)")
+        self.lbl_dataset.setStyleSheet("")
+        self._clear_view()
+        vars_with_dims = [var for var in ds.data_vars if ds[var].ndim >= 3]
+        if not vars_with_dims:
+            self.cmb_variable.addItem("No 3D variables available", None)
+            return
+        self.cmb_variable.blockSignals(True)
+        for var in vars_with_dims:
+            dims = " × ".join(str(d) for d in ds[var].dims)
+            self.cmb_variable.addItem(f"{var}  ({dims})", var)
+        self.cmb_variable.setEnabled(True)
+        self.cmb_variable.setCurrentIndex(0)
+        self.cmb_variable.blockSignals(False)
+        self._on_variable_changed()
+
+    def _reset_current_state(self):
+        self._current_variable = None
+        self._current_da = None
+        self._dims = []
+        self._slice_axis = None
+        self._row_axis = None
+        self._col_axis = None
+        self._fixed_indices = {}
+        self._fixed_dim_widgets = {}
+        self._processing_mode = "none"
+        self._processing_params = {}
+        self._slice_index = 0
+        self._slice_count = 0
+        self._axis_coords = None
+        self._current_processed_slice = None
+        self._roi_last_shape = None
+        self._roi_last_slices = None
+        self._roi_last_bounds = None
+        self._roi_axis_options = []
+        self._roi_axis_index = 0
+        self._roi_axes_selection = (0, 1)
+        self._volume_cache = None
+        self._update_roi_window_options()
+
+    def _clear_fixed_dim_widgets(self):
+        while self.fixed_dims_layout.rowCount():
+            self.fixed_dims_layout.removeRow(0)
+        self._fixed_dim_widgets.clear()
+        self._fixed_indices.clear()
+
+    # ---------- configuration ----------
+    def _on_variable_changed(self):
+        if self._dataset is None:
+            return
+        self._reset_current_state()
+        self._clear_fixed_dim_widgets()
+        index = self.cmb_variable.currentIndex()
+        var = self.cmb_variable.itemData(index)
+        if not var:
+            self._clear_display()
+            return
+        da = self._dataset[var]
+        self._current_variable = var
+        self._current_da = da
+        self._dims = list(da.dims)
+        self._processing_mode = "none"
+        self._processing_params = {}
+        self._slice_index = 0
+        self._slice_count = 0
+        self._axis_coords = None
+        self._current_processed_slice = None
+        self._rebuild_axis_controls()
+        self._update_slice_widgets()
+        self._update_slice_display(autorange=True)
+        self._update_roi_axis_options()
+
+    def _rebuild_axis_controls(self):
+        dims = self._dims
+        combos = (self.cmb_slice_axis, self.cmb_row_axis, self.cmb_col_axis)
+        for combo in combos:
+            combo.blockSignals(True)
+            combo.clear()
+            for dim in dims:
+                combo.addItem(dim, dim)
+            combo.blockSignals(False)
+            combo.setEnabled(bool(dims))
+        if len(dims) >= 3:
+            self.cmb_slice_axis.setCurrentIndex(0)
+            self.cmb_row_axis.setCurrentIndex(1)
+            self.cmb_col_axis.setCurrentIndex(2)
+        elif len(dims) >= 2:
+            self.cmb_slice_axis.setCurrentIndex(0)
+            self.cmb_row_axis.setCurrentIndex(1)
+            self.cmb_col_axis.setCurrentIndex(0)
+        self._ensure_unique_axes()
+        self._rebuild_fixed_indices()
+
+    def _ensure_unique_axes(self):
+        dims = self._dims
+        combos = (self.cmb_slice_axis, self.cmb_row_axis, self.cmb_col_axis)
+        seen: List[str] = []
+        for combo in combos:
+            idx = combo.currentIndex()
+            dim = combo.itemData(idx)
+            if dim is None:
+                continue
+            if dim in seen:
+                for alt in dims:
+                    if alt not in seen:
+                        block = combo.blockSignals(True)
+                        combo.setCurrentIndex(combo.findData(alt))
+                        combo.blockSignals(block)
+                        dim = alt
+                        break
+            seen.append(dim)
+        self._slice_axis = self.cmb_slice_axis.currentData()
+        self._row_axis = self.cmb_row_axis.currentData()
+        self._col_axis = self.cmb_col_axis.currentData()
+        self._update_axis_coords()
+        self._update_volume_window_axis_labels()
+
+    def _update_axis_coords(self):
+        axis = self._slice_axis
+        if self._current_da is None or axis is None:
+            self._axis_coords = None
+            return
+        coord = self._current_da.coords.get(axis)
+        if coord is None:
+            self._axis_coords = None
+            return
+        try:
+            self._axis_coords = np.asarray(coord.values)
+        except Exception:
+            self._axis_coords = None
+
+    def _axis_display_name(self, axis: Optional[str]) -> str:
+        if not axis:
+            return "axis"
+        text = str(axis).replace("_", " ").strip()
+        return text or "axis"
+
+    def _cache_slice_coords(self, coords: Optional[Dict[str, np.ndarray]]):
+        cache = dict(coords or {})
+        self._current_slice_coords = cache
+
+        def _extract(key: str, allowed_ndim: Tuple[int, ...]) -> Optional[np.ndarray]:
+            arr = cache.get(key)
+            if arr is None:
+                return None
+            try:
+                arr = np.asarray(arr, float)
+            except Exception:
+                return None
+            if arr.size == 0:
+                return None
+            if allowed_ndim and arr.ndim not in allowed_ndim:
+                return None
+            return arr
+
+        def _first_valid(keys: Iterable[str], allowed_ndim: Tuple[int, ...]) -> Optional[np.ndarray]:
+            for key in keys:
+                if not key:
+                    continue
+                arr = _extract(key, allowed_ndim)
+                if arr is not None:
+                    return arr
+            return None
+
+        self._row_coord_1d = _first_valid(
+            ("row_values", "y", self._row_axis or ""), (1,)
+        )
+        self._col_coord_1d = _first_valid(
+            ("col_values", "x", self._col_axis or ""), (1,)
+        )
+        self._row_coord_2d = _first_valid(("row_grid", "Y"), (2,))
+        self._col_coord_2d = _first_valid(("col_grid", "X"), (2,))
+
+    def _column_coordinates(self, start: int, stop: int) -> Optional[np.ndarray]:
+        if self._col_coord_1d is not None and self._col_coord_1d.size >= stop:
+            return np.asarray(self._col_coord_1d[start:stop], float)
+        if self._col_coord_2d is not None and self._col_coord_2d.shape[1] >= stop:
+            subset = self._col_coord_2d[:, start:stop]
+            with np.errstate(all="ignore"):
+                vals = np.nanmean(subset, axis=0)
+            return np.asarray(vals, float)
+        return None
+
+    def _row_coordinates(self, start: int, stop: int) -> Optional[np.ndarray]:
+        if self._row_coord_1d is not None and self._row_coord_1d.size >= stop:
+            return np.asarray(self._row_coord_1d[start:stop], float)
+        if self._row_coord_2d is not None and self._row_coord_2d.shape[0] >= stop:
+            subset = self._row_coord_2d[start:stop, :]
+            with np.errstate(all="ignore"):
+                vals = np.nanmean(subset, axis=1)
+            return np.asarray(vals, float)
+        return None
+
+    def _roi_profile_coordinates(self, profile_axis: int, length: int) -> List[float]:
+        if length <= 0:
+            return []
+        bounds = self._roi_last_bounds or self._roi_bounds_from_geometry()
+        if bounds is None:
+            start = 0
+        else:
+            y0, y1, x0, x1 = bounds
+            start = x0 if profile_axis == 1 else y0
+        stop = start + length
+        coords = (
+            self._column_coordinates(start, stop)
+            if profile_axis == 1
+            else self._row_coordinates(start, stop)
+        )
+        if coords is None or coords.size != length:
+            coords = np.arange(start, start + length, dtype=float)
+        return [float(v) if np.isfinite(v) else np.nan for v in np.asarray(coords, float)]
+
+    def _rebuild_fixed_indices(self):
+        self._clear_fixed_dim_widgets()
+        if self._current_da is None:
+            return
+        for dim in self._current_da.dims:
+            if dim in (self._slice_axis, self._row_axis, self._col_axis):
+                continue
+            size = int(self._current_da.sizes.get(dim, 1))
+            spin = QtWidgets.QSpinBox()
+            spin.setRange(0, max(0, size - 1))
+            spin.setValue(0)
+            spin.valueChanged.connect(partial(self._on_fixed_index_changed, dim))
+            self.fixed_dims_layout.addRow(dim, spin)
+            self._fixed_dim_widgets[dim] = spin
+            self._fixed_indices[dim] = 0
+
+    def _on_axes_changed(self):
+        if not self._dims:
+            return
+        self._ensure_unique_axes()
+        self._invalidate_volume_cache()
+        self._slice_index = 0
+        self._rebuild_fixed_indices()
+        self._update_slice_widgets()
+        self._update_slice_display(autorange=True)
+        self._update_roi_axis_options()
+
+    def _on_fixed_index_changed(self, dim: str, value: int):
+        self._fixed_indices[dim] = int(value)
+        self._invalidate_volume_cache()
+        self._update_slice_display()
+
+    def _update_slice_widgets(self):
+        axis = self._slice_axis
+        if not axis or self._current_da is None:
+            self._clear_display()
+            return
+        size = int(self._current_da.sizes.get(axis, 0))
+        self._slice_count = size
+        self._slice_index = min(self._slice_index, max(0, size - 1))
+        self.sld_slice.blockSignals(True)
+        self.spin_slice.blockSignals(True)
+        self.sld_slice.setRange(0, max(0, size - 1))
+        self.spin_slice.setRange(0, max(0, size - 1))
+        self.sld_slice.setValue(self._slice_index)
+        self.spin_slice.setValue(self._slice_index)
+        self.sld_slice.blockSignals(False)
+        self.spin_slice.blockSignals(False)
+        enabled = size > 0
+        self.sld_slice.setEnabled(enabled)
+        self.spin_slice.setEnabled(enabled)
+        self.btn_apply_processing.setEnabled(enabled)
+        self.btn_reset_processing.setEnabled(enabled)
+        self.btn_autoscale.setEnabled(enabled)
+        self.btn_autorange.setEnabled(enabled)
+        self.btn_toggle_roi.setEnabled(enabled)
+        self._update_volume_button_state()
+        self._update_slice_label()
+
+    def _update_slice_label(self):
+        if not self._slice_axis:
+            self.lbl_slice.setText("Slice: –")
+            return
+        coord_text = ""
+        coords = self._axis_coords
+        if coords is not None and 0 <= self._slice_index < coords.size:
+            coord = coords[self._slice_index]
+            coord_text = f" ({coord})"
+        self.lbl_slice.setText(f"Slice: {self._slice_axis} = {self._slice_index}{coord_text}")
+
+    def _update_volume_button_state(self):
+        enabled = (
+            gl is not None
+            and self._current_da is not None
+            and self._slice_axis is not None
+            and self._row_axis is not None
+            and self._col_axis is not None
+            and self._slice_count > 0
+        )
+        self.btn_volume_view.setEnabled(enabled)
+
+    # ---------- slice navigation ----------
+    def _on_slice_changed(self, value: int):
+        self._slice_index = int(value)
+        block = self.spin_slice.blockSignals(True)
+        self.spin_slice.setValue(self._slice_index)
+        self.spin_slice.blockSignals(block)
+        self._update_slice_label()
+        self._update_slice_display()
+
+    def _on_slice_spin_changed(self, value: int):
+        self._slice_index = int(value)
+        block = self.sld_slice.blockSignals(True)
+        self.sld_slice.setValue(self._slice_index)
+        self.sld_slice.blockSignals(block)
+        self._update_slice_label()
+        self._update_slice_display()
+
+    def _gather_selection(self, slice_index: Optional[int] = None) -> Dict[str, int]:
+        idx = dict(self._fixed_indices)
+        axis = self._slice_axis
+        if axis:
+            idx[axis] = int(self._slice_index if slice_index is None else slice_index)
+        return idx
+
+    def _extract_slice(self, slice_index: Optional[int] = None) -> Tuple[Optional[np.ndarray], Dict[str, np.ndarray]]:
+        if self._current_da is None or self._row_axis is None or self._col_axis is None:
+            return None, {}
+        if self._slice_axis is None:
+            return None, {}
+        select = self._gather_selection(slice_index)
+        try:
+            slice_da = self._current_da.isel(select)
+        except Exception:
+            return None, {}
+        for dim in (self._row_axis, self._col_axis):
+            if dim not in slice_da.dims:
+                return None, {}
+        try:
+            slice_da = slice_da.transpose(self._row_axis, self._col_axis)
+        except Exception:
+            return None, {}
+        data = np.asarray(slice_da.values, float)
+        coords = guess_phys_coords(slice_da)
+        try:
+            row_coord = slice_da.coords.get(self._row_axis)
+            if row_coord is not None:
+                values = np.asarray(row_coord.values)
+                if values.ndim == 1:
+                    coords["row_values"] = np.asarray(values, float)
+                elif values.ndim >= 2:
+                    coords["row_grid"] = np.asarray(values, float)
+        except Exception:
+            pass
+        try:
+            col_coord = slice_da.coords.get(self._col_axis)
+            if col_coord is not None:
+                values = np.asarray(col_coord.values)
+                if values.ndim == 1:
+                    coords["col_values"] = np.asarray(values, float)
+                elif values.ndim >= 2:
+                    coords["col_grid"] = np.asarray(values, float)
+        except Exception:
+            pass
+        return data, coords
+
+    def _apply_processing(self, data: np.ndarray) -> np.ndarray:
+        mode = self._processing_mode or "none"
+        params = dict(self._processing_params or {})
+        processed = np.asarray(data, float)
+        if mode.startswith("pipeline:"):
+            if not self.processing_manager:
+                raise RuntimeError("No processing manager is available for pipelines.")
+            name = mode.split(":", 1)[1]
+            pipeline = self.processing_manager.get_pipeline(name)
+            if pipeline is None:
+                raise RuntimeError(f"Pipeline '{name}' is not available.")
+            processed = pipeline.apply(processed)
+        elif mode != "none":
+            processed = apply_processing_step(mode, processed, params)
+        return np.asarray(processed, float)
+
+    def _update_slice_display(self, *, autorange: bool = False):
+        data, coords = self._extract_slice()
+        if data is None:
+            self._current_processed_slice = None
+            self._cache_slice_coords({})
+            self.viewer.set_image(np.zeros((1, 1)), autorange=True)
+            self._roi_last_shape = None
+            if self._roi_enabled:
+                self._update_roi_curve()
+            self._refresh_volume_window()
+            return
+        try:
+            processed = self._apply_processing(data)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Processing failed", str(exc))
+            self._processing_mode = "none"
+            self._processing_params = {}
+            processed = np.asarray(data, float)
+        self._current_processed_slice = np.asarray(processed, float)
+        self._cache_slice_coords(coords)
+        shape = self._current_processed_slice.shape
+        if self._roi_enabled and shape != self._roi_last_shape:
+            self._reset_roi_to_image(shape)
+        self._roi_last_shape = shape
+        if "X" in coords and "Y" in coords:
+            self.viewer.set_warped(coords["X"], coords["Y"], processed, autorange=autorange)
+        elif "x" in coords and "y" in coords:
+            self.viewer.set_rectilinear(coords["x"], coords["y"], processed, autorange=autorange)
+        else:
+            self.viewer.set_image(processed, autorange=autorange)
+        self.cmb_colormap.setEnabled(True)
+        self._apply_selected_colormap()
+        if autorange:
+            try:
+                self.viewer.autoscale_levels()
+            except Exception:
+                pass
+            try:
+                self.viewer.auto_view_range()
+            except Exception:
+                pass
+        self._update_slice_label()
+        if self._roi_enabled:
+            self._update_roi_slice_reference()
+            self._update_roi_curve()
+        self._refresh_volume_window()
+
+    def _on_autoscale_clicked(self):
+        self.viewer.autoscale_levels()
+
+    def _on_autorange_clicked(self):
+        self.viewer.auto_view_range()
+
+    # ---------- processing ----------
+    def _choose_processing(self):
+        dialog = ProcessingSelectionDialog(self.processing_manager, self)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        mode, params = dialog.selected_processing()
+        self._processing_mode = mode
+        self._processing_params = dict(params)
+        self._invalidate_volume_cache()
+        self._update_slice_display()
+
+    def _reset_processing(self):
+        self._processing_mode = "none"
+        self._processing_params = {}
+        self._invalidate_volume_cache()
+        self._update_slice_display(autorange=True)
+
+    # ---------- volume viewer ----------
+    def _invalidate_volume_cache(self):
+        self._volume_cache = None
+
+    def _ensure_volume_window(self) -> SequentialVolumeWindow:
+        if gl is None:
+            raise RuntimeError("pyqtgraph.opengl is not available")
+        window = self._volume_window
+        if window is None:
+            window = SequentialVolumeWindow(self)
+            window.closed.connect(self._on_volume_window_closed)
+            self._volume_window = window
+        return window
+
+    def _on_volume_window_closed(self):
+        self._volume_window = None
+
+    def _open_volume_view(self):
+        if gl is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Volume rendering unavailable",
+                "3D volume rendering requires the optional pyqtgraph.opengl package.",
+            )
+            return
+        volume = self._collect_volume_data()
+        if volume is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Volume unavailable",
+                "Unable to assemble a 3D volume with the current axis and index selection.",
+            )
+            return
+        try:
+            window = self._ensure_volume_window()
+        except RuntimeError as exc:
+            QtWidgets.QMessageBox.warning(self, "Volume rendering error", str(exc))
+            return
+        slice_label = self._axis_display_name(self._slice_axis)
+        row_label = self._axis_display_name(self._row_axis)
+        col_label = self._axis_display_name(self._col_axis)
+        window.set_axis_labels(slice_label, row_label, col_label)
+        window.set_volume(volume)
+        cmap_name = self.cmb_colormap.currentData() or "viridis"
+        window.set_colormap(cmap_name)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _collect_volume_data(self) -> Optional[np.ndarray]:
+        if self._volume_cache is not None:
+            return self._volume_cache
+        if (
+            self._current_da is None
+            or self._slice_axis is None
+            or self._row_axis is None
+            or self._col_axis is None
+        ):
+            return None
+        for axis in (self._slice_axis, self._row_axis, self._col_axis):
+            if axis not in self._current_da.dims:
+                return None
+        select: Dict[str, int] = {}
+        for dim in self._current_da.dims:
+            if dim in (self._slice_axis, self._row_axis, self._col_axis):
+                continue
+            select[dim] = int(self._fixed_indices.get(dim, 0))
+        try:
+            subset = self._current_da.isel(select)
+        except Exception:
+            return None
+        try:
+            subset = subset.transpose(self._slice_axis, self._row_axis, self._col_axis)
+        except Exception:
+            return None
+        data = np.asarray(subset.values, float)
+        if data.ndim != 3:
+            return None
+        frames: List[np.ndarray] = []
+        for idx in range(data.shape[0]):
+            frame = np.asarray(data[idx], float)
+            try:
+                processed = self._apply_processing(frame)
+            except Exception:
+                processed = frame
+            frames.append(np.asarray(processed, float))
+        try:
+            volume = np.stack(frames, axis=0)
+        except Exception:
+            return None
+        self._volume_cache = volume
+        return volume
+
+    def _refresh_volume_window(self):
+        if self._volume_window is None or not self._volume_window.isVisible():
+            return
+        volume = self._collect_volume_data()
+        if volume is None:
+            self._volume_window.clear_volume()
+            return
+        self._volume_window.set_volume(volume)
+        cmap_name = self.cmb_colormap.currentData() or "viridis"
+        self._volume_window.set_colormap(cmap_name)
+
+    def _update_volume_window_colormap(self):
+        if self._volume_window is None or not self._volume_window.isVisible():
+            return
+        cmap_name = self.cmb_colormap.currentData() or "viridis"
+        self._volume_window.set_colormap(cmap_name)
+
+    def _update_volume_window_axis_labels(self):
+        if self._volume_window is None:
+            return
+        try:
+            slice_label = self._axis_display_name(self._slice_axis)
+            row_label = self._axis_display_name(self._row_axis)
+            col_label = self._axis_display_name(self._col_axis)
+            self._volume_window.set_axis_labels(slice_label, row_label, col_label)
+        except Exception:
+            pass
+
+    # ---------- ROI controls ----------
+    def _ensure_roi_window(self) -> SequentialRoiWindow:
+        window = self._roi_window
+        if window is None:
+            window = SequentialRoiWindow(self)
+            window.axesChanged.connect(self._on_roi_axes_changed_from_window)
+            window.reducerChanged.connect(self._set_roi_method)
+            window.closed.connect(self._on_roi_window_closed)
+            self._roi_window = window
+        self._update_roi_window_options()
+        return window
+
+    def _on_roi_window_closed(self):
+        if self._roi_enabled:
+            self.btn_toggle_roi.blockSignals(True)
+            self.btn_toggle_roi.setChecked(False)
+            self.btn_toggle_roi.blockSignals(False)
+            self._on_roi_toggled(False)
+
+    def _update_roi_axis_options(self):
+        options: List[Tuple[str, Tuple[int, ...], str, str, Optional[int]]] = []
+        if self._row_axis and self._col_axis:
+            row_label = self._axis_display_name(self._row_axis)
+            col_label = self._axis_display_name(self._col_axis)
+            slice_label = self._axis_display_name(self._slice_axis)
+            options.append(
+                (
+                    f"Reduce {row_label} & {col_label} → curve along {slice_label}",
+                    (0, 1),
+                    f"{row_label} & {col_label}",
+                    slice_label,
+                    None,
+                )
+            )
+            options.append(
+                (
+                    f"Reduce {row_label} → profile across {col_label}",
+                    (0,),
+                    row_label,
+                    col_label,
+                    1,
+                )
+            )
+            options.append(
+                (
+                    f"Reduce {col_label} → profile across {row_label}",
+                    (1,),
+                    col_label,
+                    row_label,
+                    0,
+                )
+            )
+        self._roi_axis_options = options
+        if not options:
+            self._roi_axis_index = 0
+            self._roi_axes_selection = (0, 1)
+        else:
+            self._roi_axis_index = max(0, min(self._roi_axis_index, len(options) - 1))
+            self._roi_axes_selection = tuple(options[self._roi_axis_index][1])
+        self._update_roi_window_options()
+
+    def _on_roi_axes_changed_from_window(self, axes: Tuple[int, ...]):
+        axes = tuple(int(a) for a in axes) if axes else (0, 1)
+        matched = False
+        for idx, option in enumerate(self._roi_axis_options):
+            if tuple(option[1]) == axes:
+                self._roi_axis_index = idx
+                matched = True
+                break
+        if not matched and self._roi_axis_options:
+            self._roi_axis_index = 0
+            axes = tuple(self._roi_axis_options[0][1])
+        self._roi_axes_selection = axes if axes else (0, 1)
+        self._update_roi_window_hint()
+        if self._roi_enabled:
+            self._update_roi_curve()
+
+    def _current_roi_option(self) -> Optional[Tuple[str, Tuple[int, ...], str, str, Optional[int]]]:
+        if not self._roi_axis_options:
+            return None
+        idx = max(0, min(self._roi_axis_index, len(self._roi_axis_options) - 1))
+        return self._roi_axis_options[idx]
+
+    def _update_roi_window_options(self):
+        if self._roi_window is None:
+            return
+        self._roi_window.set_axis_options(self._roi_axis_options, self._roi_axis_index)
+        self._roi_window.set_reducer_options(self._roi_reducers, self._roi_method_key)
+        self._update_roi_window_hint()
+
+    def _update_roi_window_hint(self):
+        if self._roi_window is None:
+            return
+        option = self._current_roi_option()
+        if option is None:
+            self._roi_window.set_hint("")
+            return
+        axes = option[1] if len(option) > 1 else ()
+        collapsed = option[2] if len(option) > 2 else "region"
+        remaining = option[3] if len(option) > 3 else ""
+        axes = tuple(int(a) for a in axes)
+        if set(axes) == {0, 1}:
+            slice_label = remaining or self._axis_display_name(self._slice_axis)
+            hint = f"Collapsing {collapsed} to track statistics along {slice_label}."
+        elif axes == (0,):
+            target = remaining or self._axis_display_name(self._col_axis)
+            hint = f"Collapsing {collapsed} to profile across {target} for the active slice."
+        elif axes == (1,):
+            target = remaining or self._axis_display_name(self._row_axis)
+            hint = f"Collapsing {collapsed} to profile across {target} for the active slice."
+        else:
+            hint = ""
+        self._roi_window.set_hint(hint)
+
+    def _current_roi_array(self) -> Optional[np.ndarray]:
+        if self._current_processed_slice is None:
+            return None
+        return self._roi_extract_region(self._current_processed_slice)
+
+    def _on_roi_toggled(self, checked: bool):
+        checked = bool(checked)
+        view = getattr(self.viewer, "plot", None)
+        if checked and self._current_processed_slice is not None:
+            if view is not None and self.roi.scene() is None:
+                view.addItem(self.roi)
+            self.roi.show()
+            self._roi_enabled = True
+            self.lbl_roi_status.setText(self._describe_roi())
+            self._reset_roi_to_image(self._current_processed_slice.shape)
+            self._update_roi_slice_reference()
+            self._update_roi_axis_options()
+            window = self._ensure_roi_window()
+            window.show()
+            window.raise_()
+            self._update_roi_curve()
+        else:
+            if view is not None and self.roi.scene() is not None:
+                try:
+                    view.removeItem(self.roi)
+                except Exception:
+                    pass
+            self.roi.hide()
+            self._roi_enabled = False
+            self._roi_last_slices = None
+            self._roi_last_bounds = None
+            self._roi_last_shape = None
+            if self._roi_window is not None:
+                try:
+                    self._roi_window.hide()
+                    self._roi_window.update_slice_curve([], [], "Slice coordinate", "ROI statistic")
+                    self._roi_window.update_profile([], [], "", "", False)
+                except Exception:
+                    pass
+            self.lbl_roi_status.setText("ROI disabled")
+
+    def _reset_roi_to_image(self, shape: Optional[Tuple[int, int]] = None):
+        if not self._roi_enabled:
+            return
+        self._roi_last_bounds = None
+        if shape is None:
+            if self._current_processed_slice is None:
+                return
+            shape = self._current_processed_slice.shape
+        if not shape or len(shape) < 2:
+            return
+        height, width = int(shape[0]), int(shape[1])
+        if height <= 0 or width <= 0:
+            return
+        rect_w = max(2, width // 2)
+        rect_h = max(2, height // 2)
+        pos_x = max(0, (width - rect_w) // 2)
+        pos_y = max(0, (height - rect_h) // 2)
+        try:
+            self.roi.blockSignals(True)
+            self.roi.setPos((pos_x, pos_y))
+            self.roi.setSize((rect_w, rect_h))
+        finally:
+            try:
+                self.roi.blockSignals(False)
+                local_value = other.value_at(x, y) if hasattr(other, "value_at") else None
+            except Exception:
+                local_value = None
+            try:
+                other.show_crosshair(x, y, value=local_value, mirrored=True)
+            except Exception:
+                pass
+        self._update_roi_slice_reference()
+
+    def _on_roi_region_changed(self, *_args):
+        if not self._roi_enabled:
+            return
+        self._update_roi_slice_reference()
+        self._update_roi_curve()
+
+    def _update_roi_slice_reference(self):
+        if not self._roi_enabled or self._current_processed_slice is None:
+            self._roi_last_slices = None
+            self._roi_last_bounds = None
+            return
+        img_item = getattr(self.viewer, "img_item", None)
+        if img_item is None:
+            self._roi_last_slices = None
+            self._roi_last_bounds = None
+            return
+        slices = None
+        try:
+            try:
+                _, slc = self.roi.getArraySlice(
+                    self._current_processed_slice,
+                    img_item,
+                    returnSlice=True,
+                )
+            except TypeError:
+                _, slc = self.roi.getArraySlice(self._current_processed_slice, img_item)
+            if isinstance(slc, tuple):
+                slices = slc
+        except Exception:
+            slices = None
+
+        if (
+            isinstance(slices, tuple)
+            and len(slices) >= 2
+            and all(isinstance(s, slice) for s in slices[:2])
+        ):
+            sy, sx = slices[0], slices[1]
+            self._roi_last_slices = (sy, sx)
+            self._roi_last_bounds = self._normalize_roi_bounds(sy, sx)
+        else:
+            self._roi_last_slices = None
+            self._roi_last_bounds = self._roi_bounds_from_geometry()
+
+    def _normalize_roi_bounds(self, sy: slice, sx: slice) -> Optional[Tuple[int, int, int, int]]:
+        if self._current_processed_slice is None:
+            return None
+        height, width = self._current_processed_slice.shape[:2]
+
+        def _bounds(sl: slice, limit: int) -> Tuple[int, int]:
+            start = float(sl.start) if sl.start is not None else 0.0
+            stop = float(sl.stop) if sl.stop is not None else float(limit)
+            step = sl.step
+            if step is not None and step < 0:
+                start, stop = stop, start
+            a = int(np.floor(start))
+            b = int(np.ceil(stop))
+            a = max(0, min(limit, a))
+            b = max(a, min(limit, b))
+            return a, b
+
+        y0, y1 = _bounds(sy, height)
+        x0, x1 = _bounds(sx, width)
+        if y1 <= y0 or x1 <= x0:
+            return None
+        return (y0, y1, x0, x1)
+
+    def _roi_bounds_from_geometry(self) -> Optional[Tuple[int, int, int, int]]:
+        if self._current_processed_slice is None:
+            return None
+        img_item = getattr(self.viewer, "img_item", None)
+        if img_item is None:
+            return None
+        try:
+            rect = self.roi.boundingRect()
+            top_left_scene = self.roi.mapToScene(rect.topLeft())
+            bottom_right_scene = self.roi.mapToScene(rect.bottomRight())
+            top_left_item = img_item.mapFromScene(top_left_scene)
+            bottom_right_item = img_item.mapFromScene(bottom_right_scene)
+        except Exception:
+            return None
+
+        xs = [float(top_left_item.x()), float(bottom_right_item.x())]
+        ys = [float(top_left_item.y()), float(bottom_right_item.y())]
+        x0 = int(np.floor(min(xs)))
+        x1 = int(np.ceil(max(xs)))
+        y0 = int(np.floor(min(ys)))
+        y1 = int(np.ceil(max(ys)))
+        height, width = self._current_processed_slice.shape[:2]
+        x0 = max(0, min(width, x0))
+        x1 = max(x0, min(width, x1))
+        y0 = max(0, min(height, y0))
+        y1 = max(y0, min(height, y1))
+        if y1 <= y0 or x1 <= x0:
+            return None
+        return (y0, y1, x0, x1)
+
+    def _roi_extract_region(self, data: np.ndarray) -> Optional[np.ndarray]:
+        arr = np.asarray(data, float)
+        bounds = self._roi_last_bounds
+        if bounds is None:
+            bounds = self._roi_bounds_from_geometry()
+            if bounds is None:
+                return None
+            self._roi_last_bounds = bounds
+        if arr.ndim < 2:
+            return arr
+        height, width = arr.shape[:2]
+        y0, y1, x0, x1 = bounds
+        y0 = max(0, min(height, y0))
+        y1 = max(y0, min(height, y1))
+        x0 = max(0, min(width, x0))
+        x1 = max(x0, min(width, x1))
+        if y1 <= y0 or x1 <= x0:
+            return None
+        region = arr[y0:y1, x0:x1]
+        if region.size == 0:
+            return None
+        return np.asarray(region, float)
+
+    def _compute_roi_value(self, data: np.ndarray) -> float:
+        reducer_entry = self._roi_reducers.get(self._roi_method_key)
+        if reducer_entry is None:
+            return float("nan")
+        _, reducer = reducer_entry
+        roi_data = self._roi_extract_region(data)
+        if roi_data is None:
+            roi_data = np.asarray(data, float)
+        axes = tuple(int(a) for a in self._roi_axes_selection) or (0, 1)
+        axes = tuple(sorted(set(axes)))
+        with np.errstate(all="ignore"):
+            if not axes:
+                result = reducer(roi_data, axis=None)
+            else:
+                axis_param = axes[0] if len(axes) == 1 else axes
+                result = reducer(roi_data, axis=axis_param)
+            while isinstance(result, np.ndarray) and result.ndim > 0:
+                if result.ndim == 1:
+                    result = reducer(result, axis=0)
+                else:
+                    result = reducer(result, axis=tuple(range(result.ndim)))
+        try:
+            return float(np.asarray(result).item())
+        except Exception:
+            try:
+                return float(result)
+            except Exception:
+                return float("nan")
+
+    def _update_roi_curve(self):
+        if self._roi_window is not None and not self._roi_window.isVisible():
+            self._roi_window.update_slice_curve([], [], "Slice coordinate", "ROI statistic")
+            self._roi_window.update_profile([], [], "", "", False)
+        if not self._roi_enabled or self._current_da is None:
+            if self._roi_window is not None:
+                self._roi_window.update_slice_curve([], [], "Slice coordinate", "ROI statistic")
+                self._roi_window.update_profile([], [], "", "", False)
+            return
+        count = max(0, self._slice_count)
+        if count == 0:
+            if self._roi_window is not None:
+                self._roi_window.update_slice_curve([], [], "Slice coordinate", "ROI statistic")
+                self._roi_window.update_profile([], [], "", "", False)
+            return
+        self._update_roi_slice_reference()
+        values: List[float] = []
+        xs: List[float] = []
+        coords = self._axis_coords
+        for idx in range(count):
+            data, _ = self._extract_slice(slice_index=idx)
+            if data is None:
+                values.append(np.nan)
+            else:
+                try:
+                    processed = self._apply_processing(data)
+                except Exception:
+                    processed = np.asarray(data, float)
+                values.append(self._compute_roi_value(processed))
+            if coords is not None and idx < coords.size:
+                xs.append(float(coords[idx]))
+            else:
+                xs.append(float(idx))
+        name = self._roi_reducers.get(self._roi_method_key, ("ROI statistic",))[0]
+        axis_label = self._axis_display_name(self._slice_axis)
+        if self._roi_window is not None:
+            self._roi_window.update_slice_curve(xs, values, axis_label, name)
+            self._update_roi_profile_plot()
+        self.lbl_roi_status.setText(self._describe_roi())
+
+    def _update_roi_profile_plot(self):
+        if self._roi_window is None or not self._roi_enabled:
+            return
+        option = self._current_roi_option()
+        if option is None:
+            self._roi_window.update_profile([], [], "", "", False)
+            return
+        axes = option[1] if len(option) > 1 else ()
+        remaining = option[3] if len(option) > 3 else ""
+        profile_axis = option[4] if len(option) > 4 else None
+        axes = tuple(int(a) for a in axes)
+        if set(axes) == {0, 1} or profile_axis is None:
+            self._roi_window.update_profile([], [], "", "", False)
+            return
+        data = self._current_roi_array()
+        reducer_entry = self._roi_reducers.get(self._roi_method_key)
+        if data is None or reducer_entry is None:
+            self._roi_window.update_profile([], [], "", "", False)
+            return
+        _, reducer = reducer_entry
+        axis = axes[0] if axes else 0
+        with np.errstate(all="ignore"):
+            profile = reducer(data, axis=axis)
+        try:
+            prof_arr = np.asarray(profile, float)
+        except Exception:
+            self._roi_window.update_profile([], [], "", "", False)
+            return
+        if prof_arr.ndim > 1:
+            prof_arr = np.asarray(prof_arr).ravel()
+        xs = list(range(int(prof_arr.size)))
+        ys = [float(val) if np.isfinite(val) else np.nan for val in prof_arr]
+        coords = self._roi_profile_coordinates(int(profile_axis), len(xs))
+        if len(coords) == len(xs):
+            xs = coords
+        xlabel = remaining or (
+            self._axis_display_name(self._col_axis) if profile_axis == 1 else self._axis_display_name(self._row_axis)
+        )
+        ylabel = self._roi_reducers.get(self._roi_method_key, ("Value",))[0]
+        self._roi_window.update_profile(xs, ys, xlabel, ylabel, True)
+
+    def _describe_roi(self) -> str:
+        name = self._roi_reducers.get(self._roi_method_key, ("statistic",))[0]
+        option = self._current_roi_option()
+        collapsed = option[2] if option else "region"
+        axis = option[3] if option and len(option) > 3 else self._axis_display_name(self._slice_axis)
+        axis = axis or self._axis_display_name(self._slice_axis)
+        return f"ROI {name.lower()} of {collapsed} across {axis}"
+
+    def _set_roi_method(self, key: str):
+        if key not in self._roi_reducers or key == self._roi_method_key:
+            return
+        self._roi_method_key = key
+        self._update_roi_window_options()
+        if self._roi_enabled:
+            self._update_roi_curve()
+        self.lbl_roi_status.setText(self._describe_roi())
 
 # ---------------------------------------------------------------------------
 # Sequential view: explore 2D slices along an arbitrary axis
