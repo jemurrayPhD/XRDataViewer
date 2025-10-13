@@ -89,6 +89,7 @@ class EmbeddedJupyterManager(QtCore.QObject):
         self._kernelspec_dir: Optional[str] = None
         self._kernel_name = "xrdataviewer"
         self._settings_dir: Optional[str] = None
+        self._ipython_dir: Optional[str] = None
         self._launch_env: Optional[Dict[str, str]] = None
 
     def is_running(self) -> bool:
@@ -201,24 +202,32 @@ class EmbeddedJupyterManager(QtCore.QObject):
 
         self._launch_env = env.copy()
 
-        startup_code = textwrap.dedent(
-            """
-            try:
-                import xrdataviewer_bridge  # noqa: F401
-                xrdataviewer_bridge.enable_auto_sync()
-            except Exception:
-                pass
-            """
-        )
+        self._ipython_dir = None
         try:
-            fd, script_path = tempfile.mkstemp(prefix="xrdataviewer_startup_", suffix=".py")
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(startup_code)
-            env["IPYTHONSTARTUP"] = script_path
-            self._startup_script = script_path
+            ipython_dir = Path(tempfile.mkdtemp(prefix="xrdataviewer_ipython_"))
+            profile_dir = ipython_dir / "profile_default" / "startup"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            startup_path = profile_dir / "00-xrdataviewer-autosync.py"
+            startup_path.write_text(
+                textwrap.dedent(
+                    """
+                    try:
+                        import xrdataviewer_bridge  # noqa: F401
+                        xrdataviewer_bridge.enable_auto_sync()
+                    except Exception:
+                        pass
+                    """
+                ),
+                encoding="utf-8",
+            )
+            env["IPYTHONDIR"] = str(ipython_dir)
+            self._ipython_dir = str(ipython_dir)
+            self.message.emit("Configured embedded kernels to auto-sync with XRDataViewer by default.")
         except Exception as exc:
-            self._startup_script = None
-            warnings.warn(f"Unable to configure XRDataViewer auto-sync startup script: {exc}")
+            if self._ipython_dir:
+                shutil.rmtree(self._ipython_dir, ignore_errors=True)
+                self._ipython_dir = None
+            warnings.warn(f"Unable to configure XRDataViewer auto-sync startup profile: {exc}")
 
         try:
             self._process = subprocess.Popen(
@@ -243,6 +252,9 @@ class EmbeddedJupyterManager(QtCore.QObject):
             if self._settings_dir:
                 shutil.rmtree(self._settings_dir, ignore_errors=True)
                 self._settings_dir = None
+            if self._ipython_dir:
+                shutil.rmtree(self._ipython_dir, ignore_errors=True)
+                self._ipython_dir = None
             self.failed.emit(f"Failed to start JupyterLab: {exc}")
             return False
 
@@ -400,6 +412,9 @@ class EmbeddedJupyterManager(QtCore.QObject):
         if self._settings_dir:
             shutil.rmtree(self._settings_dir, ignore_errors=True)
             self._settings_dir = None
+        if self._ipython_dir:
+            shutil.rmtree(self._ipython_dir, ignore_errors=True)
+            self._ipython_dir = None
 
     def url(self) -> Optional[str]:
         return self._url
@@ -495,6 +510,9 @@ class EmbeddedJupyterManager(QtCore.QObject):
         if self._settings_dir:
             shutil.rmtree(self._settings_dir, ignore_errors=True)
             self._settings_dir = None
+        if self._ipython_dir:
+            shutil.rmtree(self._ipython_dir, ignore_errors=True)
+            self._ipython_dir = None
 
     def __del__(self):
         try:
