@@ -153,6 +153,7 @@ class EmbeddedJupyterManager(QtCore.QObject):
             with open(kernels_dir / "kernel.json", "w", encoding="utf-8") as handle:
                 json.dump(kernel_spec, handle)
             env["JUPYTER_PATH"] = self._kernelspec_dir
+            env["JUPYTER_DATA_DIR"] = self._kernelspec_dir
             self.message.emit(
                 "Provisioned dedicated kernel for embedded JupyterLab using the current Python environment."
             )
