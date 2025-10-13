@@ -20,7 +20,7 @@ from ..datasets import (
 )
 from ..processing import ProcessingManager
 from ..preferences import PreferencesManager
-from ..utils import _ask_layout_label, _ensure_extension, _sanitize_filename, _save_snapshot
+from ..utils import ask_layout_label, ensure_extension, process_events, sanitize_filename, save_snapshot
 
 
 class OverlayLayer(QtCore.QObject):
@@ -757,8 +757,8 @@ class OverlayView(QtWidgets.QWidget):
         if not path:
             return
         suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
-        target = _ensure_extension(path, suffix)
-        if not _save_snapshot(self.glw, target):
+        target = ensure_extension(path, suffix)
+        if not save_snapshot(self.glw, target):
             QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to save the composite image.")
             return
         self._store_export_dir(str(Path(target).parent))
@@ -787,24 +787,24 @@ class OverlayView(QtWidgets.QWidget):
             for idx, layer in enumerate(self.layers, start=1):
                 for other in self.layers:
                     other.set_visible(other is layer)
-                _process_events()
-                name = _sanitize_filename(layer.title) or f"layer_{idx}"
+                process_events()
+                name = sanitize_filename(layer.title) or f"layer_{idx}"
                 target = base / f"{name}_{idx:02d}.png"
-                if _save_snapshot(self.glw, target):
+                if save_snapshot(self.glw, target):
                     count += 1
         finally:
             for layer, state in original_states:
                 layer.set_visible(state)
-            _process_events()
+            process_events()
             self.auto_view_range()
         if count == 0:
             QtWidgets.QMessageBox.warning(self, "Export failed", "No layers were exported.")
             return
-            QtWidgets.QMessageBox.information(
-                self,
-                "Export complete",
-                f"Saved {count} layer image(s) to {base}",
-            )
+        QtWidgets.QMessageBox.information(
+            self,
+            "Export complete",
+            f"Saved {count} layer image(s) to {base}",
+        )
         log_action(f"Exported {count} overlay layers to {base}")
 
     def _export_full_layout(self):
@@ -823,12 +823,12 @@ class OverlayView(QtWidgets.QWidget):
         )
         if not path:
             return
-        ok, label = _ask_layout_label(self, "Layout label", self._default_layout_label())
+        ok, label = ask_layout_label(self, "Layout label", self._default_layout_label())
         if not ok:
             return
         suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
-        target = _ensure_extension(path, suffix)
-        if not _save_snapshot(self, target, label):
+        target = ensure_extension(path, suffix)
+        if not save_snapshot(self, target, label):
             QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to save the layout image.")
             return
         self._store_export_dir(str(Path(target).parent))

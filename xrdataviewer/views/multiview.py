@@ -26,7 +26,7 @@ from ..datasets import (
 )
 from ..processing import ProcessingManager, ProcessingSelectionDialog
 from ..preferences import PreferencesManager
-from ..utils import _ask_layout_label, _ensure_extension, _sanitize_filename, _save_snapshot, open_dataset
+from ..utils import ask_layout_label, ensure_extension, sanitize_filename, save_snapshot, open_dataset
 
 
 class ViewerFrame(QtWidgets.QFrame):
@@ -969,7 +969,7 @@ class MultiViewGrid(QtWidgets.QWidget):
             )
             return
         frame = frames[0]
-        suggestion = _sanitize_filename(frame.lbl.text()) + ".png"
+        suggestion = sanitize_filename(frame.lbl.text()) + ".png"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save plot",
@@ -979,8 +979,8 @@ class MultiViewGrid(QtWidgets.QWidget):
         if not path:
             return
         suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
-        target = _ensure_extension(path, suffix)
-        if not _save_snapshot(frame, target):
+        target = ensure_extension(path, suffix)
+        if not save_snapshot(frame, target):
             QtWidgets.QMessageBox.warning(self, "Save failed", "Unable to write the selected file.")
             return
         log_action(f"Saved MultiView plot to {target}")
@@ -1006,9 +1006,9 @@ class MultiViewGrid(QtWidgets.QWidget):
         count = 0
         for idx, frame in enumerate(frames, start=1):
             label = frame.lbl.text() or f"plot_{idx}"
-            name = _sanitize_filename(label) or f"plot_{idx}"
+            name = sanitize_filename(label) or f"plot_{idx}"
             target = base / f"{name}_{idx:02d}.png"
-            if _save_snapshot(frame, target):
+            if save_snapshot(frame, target):
                 count += 1
         if count == 0:
             QtWidgets.QMessageBox.warning(self, "Export failed", "No plots were exported.")
@@ -1036,12 +1036,12 @@ class MultiViewGrid(QtWidgets.QWidget):
         )
         if not path:
             return
-        ok, label = _ask_layout_label(self, "Layout label", self._default_layout_label())
+        ok, label = ask_layout_label(self, "Layout label", self._default_layout_label())
         if not ok:
             return
         suffix = ".jpg" if path.lower().endswith((".jpg", ".jpeg")) else ".png"
-        target = _ensure_extension(path, suffix)
-        if not _save_snapshot(self, target, label):
+        target = ensure_extension(path, suffix)
+        if not save_snapshot(self, target, label):
             QtWidgets.QMessageBox.warning(
                 self,
                 "Save failed",
