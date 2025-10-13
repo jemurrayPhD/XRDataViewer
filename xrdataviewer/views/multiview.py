@@ -10,7 +10,6 @@ import xarray as xr
 from PySide2 import QtCore, QtGui, QtWidgets
 
 from app_logging import log_action
-from data_processing import apply_processing_step
 from xr_coords import guess_phys_coords
 from xr_plot_widget import CentralPlotWidget, PlotAnnotationConfig, apply_plotitem_annotation, plotitem_annotation_state
 
@@ -24,7 +23,7 @@ from ..datasets import (
     MemoryVarRef,
     VarRef,
 )
-from ..processing import ProcessingManager, ProcessingSelectionDialog
+from ..processing import apply_processing_step, ProcessingManager, ProcessingSelectionDialog
 from ..preferences import PreferencesManager
 from ..utils import ask_layout_label, ensure_extension, sanitize_filename, save_snapshot, open_dataset
 

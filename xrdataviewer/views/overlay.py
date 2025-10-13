@@ -18,7 +18,7 @@ from ..datasets import (
     MemoryVarRef,
     VarRef,
 )
-from ..processing import ProcessingManager
+from ..processing import apply_processing_step, ProcessingManager
 from ..preferences import PreferencesManager
 from ..utils import ask_layout_label, ensure_extension, process_events, sanitize_filename, save_snapshot
 

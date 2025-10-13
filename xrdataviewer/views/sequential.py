@@ -26,7 +26,7 @@ from xr_plot_widget import CentralPlotWidget, PlotAnnotationConfig, ScientificAx
 from ..annotations import PlotAnnotationDialog
 from ..datasets import DataSetRef, HighDimVarRef, MemoryDatasetRef
 from ..preferences import PreferencesManager
-from ..processing import ProcessingManager, ProcessingSelectionDialog
+from ..processing import apply_processing_step, ProcessingManager, ProcessingSelectionDialog
 from ..utils import (
     ask_layout_label,
     ensure_extension,
