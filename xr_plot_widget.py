@@ -599,6 +599,8 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._last_rect = None
         self._line_x: Optional[np.ndarray] = None
         self._line_y: Optional[np.ndarray] = None
+        self._line_plot_x: Optional[np.ndarray] = None
+        self._line_plot_y: Optional[np.ndarray] = None
         self._mode: str = "image"
         self._line_style = LineStyleConfig()
 
@@ -810,6 +812,20 @@ class CentralPlotWidget(QtWidgets.QWidget):
             pass
 
     def auto_view_range(self):
+        if self._mode == "line":
+            xs = self._line_plot_x if self._line_plot_x is not None else self._line_x
+            ys = self._line_plot_y if self._line_plot_y is not None else self._line_y
+            if xs is None or ys is None or xs.size == 0:
+                return
+            rect = self._line_data_rect(xs, ys)
+            if rect is None:
+                return
+            try:
+                self.plot.vb.setXRange(rect.left(), rect.right(), padding=0.05)
+                self.plot.vb.setYRange(rect.top(), rect.bottom(), padding=0.05)
+            except Exception:
+                pass
+            return
         try:
             rect = self.img_item.mapRectToParent(self.img_item.boundingRect())
         except Exception:
@@ -1030,9 +1046,27 @@ class CentralPlotWidget(QtWidgets.QWidget):
             self._line_item.setData(x_plot, y_plot, pen=pen, **kwargs, **symbol_kwargs)
             self._line_item.setVisible(True)
             self.img_item.setVisible(False)
+            if symbol_kwargs.get("symbol"):
+                try:
+                    self._line_item.setSymbol(symbol_kwargs.get("symbol"))
+                    if marker_brush is not None:
+                        self._line_item.setSymbolBrush(marker_brush)
+                    if marker_pen is not None:
+                        self._line_item.setSymbolPen(marker_pen)
+                    if marker_size is not None:
+                        self._line_item.setSymbolSize(marker_size)
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._line_item.setSymbol(None)
+                except Exception:
+                    pass
         except Exception:
             pass
 
+        self._line_plot_x = np.array(x_plot, copy=True)
+        self._line_plot_y = np.array(y_plot, copy=True)
         container = self.histogram_widget()
         if container is not None:
             container.setVisible(False)
@@ -1041,11 +1075,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
         except Exception:
             pass
         if autorange:
-            try:
-                self.plot.enableAutoRange(x=True, y=True)
-                self.plot.autoRange()
-            except Exception:
-                pass
+            self.auto_view_range()
 
     def _step_edges(self, xs: np.ndarray) -> np.ndarray:
         xs = np.asarray(xs, float)
@@ -1069,6 +1099,38 @@ class CentralPlotWidget(QtWidgets.QWidget):
         edges[:-1] = xs
         edges[-1] = xs[-1]
         return edges
+
+    def _line_data_rect(self, xs: np.ndarray, ys: np.ndarray) -> Optional[QtCore.QRectF]:
+        xs = np.asarray(xs, float).reshape(-1)
+        ys = np.asarray(ys, float).reshape(-1)
+        if xs.size == 0 or ys.size == 0:
+            return None
+        if ys.size != xs.size:
+            m = min(xs.size, ys.size)
+            xs = xs[:m]
+            ys = ys[:m]
+        mask = np.isfinite(xs) & np.isfinite(ys)
+        if not mask.any():
+            return None
+        x_vals = xs[mask]
+        y_vals = ys[mask]
+        x0 = float(np.nanmin(x_vals))
+        x1 = float(np.nanmax(x_vals))
+        y0 = float(np.nanmin(y_vals))
+        y1 = float(np.nanmax(y_vals))
+        if not np.isfinite(x0) or not np.isfinite(x1):
+            x0, x1 = 0.0, float(xs.size - 1 if xs.size > 1 else 1.0)
+        if not np.isfinite(y0) or not np.isfinite(y1):
+            y0, y1 = 0.0, 1.0
+        if x0 == x1:
+            pad = 0.5 if xs.size <= 1 else max(1e-6, abs(x0) * 0.01)
+            x0 -= pad
+            x1 += pad
+        if y0 == y1:
+            pad = 0.5 if ys.size <= 1 else max(1e-6, abs(y0) * 0.05)
+            y0 -= pad
+            y1 += pad
+        return QtCore.QRectF(x0, y0, x1 - x0, y1 - y0)
 
     # ---------- sample grid overlay on main plot ----------
     def show_sample_grid(self, show: bool, *, x1=None, y1=None, X=None, Y=None, step: int = 10):

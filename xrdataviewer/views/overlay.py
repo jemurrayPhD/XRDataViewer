@@ -9,9 +9,15 @@ import pyqtgraph as pg
 from PySide2 import QtCore, QtGui, QtWidgets
 
 from app_logging import log_action
-from xr_plot_widget import PlotAnnotationConfig, apply_plotitem_annotation, plotitem_annotation_state
+from xr_plot_widget import (
+    LineStyleConfig,
+    PlotAnnotationConfig,
+    apply_plotitem_annotation,
+    clone_line_style,
+    plotitem_annotation_state,
+)
 
-from ..annotations import PlotAnnotationDialog
+from ..annotations import LineStyleDialog, PlotAnnotationDialog
 from ..datasets import (
     MemoryDatasetRegistry,
     MemorySliceRef,
@@ -29,42 +35,131 @@ from ..preferences import PreferencesManager
 from ..utils import ask_layout_label, ensure_extension, process_events, sanitize_filename, save_snapshot
 
 
+def _compute_line_rect(xs: np.ndarray, ys: np.ndarray) -> QtCore.QRectF:
+    xs = np.asarray(xs, float).reshape(-1)
+    ys = np.asarray(ys, float).reshape(-1)
+    mask = np.isfinite(xs) & np.isfinite(ys)
+    if not mask.any():
+        return QtCore.QRectF(0.0, 0.0, 1.0, 1.0)
+    x_vals = xs[mask]
+    y_vals = ys[mask]
+    x0 = float(np.nanmin(x_vals))
+    x1 = float(np.nanmax(x_vals))
+    y0 = float(np.nanmin(y_vals))
+    y1 = float(np.nanmax(y_vals))
+    if not np.isfinite(x0) or not np.isfinite(x1):
+        x0, x1 = 0.0, float(xs.size - 1 if xs.size > 1 else 1.0)
+    if not np.isfinite(y0) or not np.isfinite(y1):
+        y0, y1 = 0.0, 1.0
+    if x0 == x1:
+        pad = 0.5 if x_vals.size <= 1 else max(1e-6, abs(x0) * 0.01)
+        x0 -= pad
+        x1 += pad
+    if y0 == y1:
+        pad = 0.5 if y_vals.size <= 1 else max(1e-6, abs(y0) * 0.05)
+        y0 -= pad
+        y1 += pad
+    return QtCore.QRectF(x0, y0, x1 - x0, y1 - y0)
+
+
 class OverlayLayer(QtCore.QObject):
-    def __init__(self, view: "OverlayView", title: str, data: np.ndarray, rect: QtCore.QRectF | None):
+    def __init__(
+        self,
+        view: "OverlayView",
+        title: str,
+        data: np.ndarray,
+        rect: QtCore.QRectF | None,
+        *,
+        kind: str = "image",
+        x_values: Optional[np.ndarray] = None,
+        line_style: Optional[LineStyleConfig] = None,
+    ):
         super().__init__(view)
         self.view = view
         self.title = title
-        self.base_data = np.asarray(data, float)
-        self.processed_data = np.array(self.base_data, copy=True)
+        self.kind = kind if kind in {"image", "line"} else "image"
         self.rect = rect
-        self.image_item = pg.ImageItem()
-        self.image_item.setImage(self.processed_data, autoLevels=False)
-        if rect is not None:
-            try:
-                self.image_item.setRect(rect)
-            except Exception:
-                pass
-        self.image_item.setOpacity(1.0)
-        self.image_item.setVisible(True)
-        self._levels = self._compute_levels(self.processed_data)
-        try:
-            self.image_item.setLevels(self._levels)
-        except Exception:
-            pass
         self.colormap_name = "viridis"
         self.visible = True
         self.opacity = 1.0
         self.current_processing = "none"
         self.processing_params: dict = {}
         self.widget: Optional["OverlayLayerWidget"] = None
-        self.set_colormap(self.colormap_name)
-        self.legend_proxy = pg.PlotDataItem([0], [0])
-        try:
-            self.legend_proxy.setPen(pg.mkPen((220, 220, 220)))
-        except Exception:
-            pass
+        self.legend_proxy: pg.PlotDataItem
+        self.image_item: Optional[pg.ImageItem]
+        self.graphics_item: pg.GraphicsObject
+        self._levels: Tuple[float, float]
+        self._line_style = clone_line_style(line_style)
+        self._line_x = np.array([], dtype=float)
+
+        if self.is_line_layer():
+            self.base_data = np.asarray(data, float).reshape(-1)
+            self.processed_data = np.array(self.base_data, copy=True)
+            self._line_x = self._normalise_line_x(x_values, self.processed_data.size)
+            self.opacity = self._line_style.normalized_opacity()
+            self.graphics_item = pg.PlotDataItem()
+            try:
+                self.graphics_item.setName(self.title)
+            except Exception:
+                pass
+            self.graphics_item.setVisible(True)
+            self.image_item = None
+            self.legend_proxy = self.graphics_item
+            self._levels = (0.0, 1.0)
+            self._update_line_item(autorange=False)
+        else:
+            self.base_data = np.asarray(data, float)
+            self.processed_data = np.array(self.base_data, copy=True)
+            self.graphics_item = pg.ImageItem()
+            self.image_item = self.graphics_item
+            self.graphics_item.setImage(self.processed_data, autoLevels=False)
+            if rect is not None:
+                try:
+                    self.graphics_item.setRect(rect)
+                except Exception:
+                    pass
+            self.graphics_item.setOpacity(1.0)
+            self.graphics_item.setVisible(True)
+            self._levels = self._compute_levels(self.processed_data)
+            try:
+                self.graphics_item.setLevels(self._levels)
+            except Exception:
+                pass
+            self.legend_proxy = pg.PlotDataItem([0], [0])
+            try:
+                self.legend_proxy.setPen(pg.mkPen((220, 220, 220)))
+            except Exception:
+                pass
+            self.set_colormap(self.colormap_name)
 
     # ---------- helpers ----------
+    def is_line_layer(self) -> bool:
+        return self.kind == "line"
+
+    def supports_colormap(self) -> bool:
+        return not self.is_line_layer()
+
+    def supports_levels(self) -> bool:
+        return not self.is_line_layer()
+
+    def line_style_config(self) -> LineStyleConfig:
+        return clone_line_style(self._line_style)
+
+    def set_line_style(self, style: LineStyleConfig):
+        if not self.is_line_layer():
+            return
+        self._line_style = clone_line_style(style)
+        self.opacity = self._line_style.normalized_opacity()
+        self._update_line_item(autorange=False)
+        if self.widget:
+            self.widget.update_opacity_label(self.opacity)
+            try:
+                block = self.widget.sld_opacity.blockSignals(True)
+                self.widget.sld_opacity.setValue(int(round(self.opacity * 100)))
+                self.widget.sld_opacity.blockSignals(block)
+            except Exception:
+                pass
+
     def _compute_levels(self, data: np.ndarray) -> Tuple[float, float]:
         data = np.asarray(data, float)
         finite = np.isfinite(data)
@@ -92,27 +187,33 @@ class OverlayLayer(QtCore.QObject):
     def set_visible(self, on: bool):
         self.visible = bool(on)
         try:
-            self.image_item.setVisible(self.visible)
+            self.graphics_item.setVisible(self.visible)
         except Exception:
             pass
 
     def set_opacity(self, alpha: float):
         alpha = float(np.clip(alpha, 0.0, 1.0))
         self.opacity = alpha
-        try:
-            self.image_item.setOpacity(alpha)
-        except Exception:
-            pass
+        if self.is_line_layer():
+            self._line_style.opacity = alpha
+            self._update_line_item(autorange=False)
+        else:
+            try:
+                self.graphics_item.setOpacity(alpha)
+            except Exception:
+                pass
         if self.widget:
             self.widget.update_opacity_label(alpha)
 
     def set_colormap(self, name: str):
         self.colormap_name = name or "viridis"
+        if not self.supports_colormap():
+            return
         try:
             cmap = pg.colormap.get(self.colormap_name)
             if hasattr(cmap, "getLookupTable"):
                 lut = cmap.getLookupTable(0.0, 1.0, 256)
-                self.image_item.setLookupTable(lut)
+                self.graphics_item.setLookupTable(lut)
         except Exception:
             pass
 
@@ -122,14 +223,18 @@ class OverlayLayer(QtCore.QObject):
         if hi <= lo:
             hi = lo + max(abs(lo) * 1e-6, 1e-6)
         self._levels = (float(lo), float(hi))
+        if not self.supports_levels():
+            return
         try:
-            self.image_item.setLevels(self._levels)
+            self.graphics_item.setLevels(self._levels)
         except Exception:
             pass
         if update_widget and self.widget:
             self.widget.update_level_spins(self._levels[0], self._levels[1])
 
     def auto_levels(self):
+        if not self.supports_levels():
+            return
         lo, hi = self._compute_levels(self.processed_data)
         self.set_levels(lo, hi, update_widget=True)
 
@@ -166,21 +271,172 @@ class OverlayLayer(QtCore.QObject):
 
         self.current_processing = mode
         self.processing_params = dict(params)
-        self.processed_data = np.asarray(data, float)
-        try:
-            self.image_item.setImage(self.processed_data, autoLevels=False)
-        except Exception:
-            pass
-        self.auto_levels()
+        if self.is_line_layer():
+            self.processed_data = np.asarray(data, float).reshape(-1)
+            self._update_line_item(autorange=False)
+        else:
+            self.processed_data = np.asarray(data, float)
+            try:
+                self.graphics_item.setImage(self.processed_data, autoLevels=False)
+            except Exception:
+                pass
+            self.auto_levels()
 
     def get_display_rect(self):
+        if self.is_line_layer():
+            return self.rect
         rect = self.rect
-        if rect is None:
+        if rect is None and isinstance(self.graphics_item, pg.ImageItem):
             try:
-                rect = self.image_item.mapRectToParent(self.image_item.boundingRect())
+                rect = self.graphics_item.mapRectToParent(self.graphics_item.boundingRect())
             except Exception:
                 rect = None
         return rect
+
+    # ---------- line helpers ----------
+    def _normalise_line_x(self, values: Optional[np.ndarray], length: int) -> np.ndarray:
+        if length <= 0:
+            return np.array([], dtype=float)
+        if values is None:
+            return np.linspace(0.0, float(max(length - 1, 1)), length, dtype=float) if length > 1 else np.zeros(1)
+        arr = np.asarray(values, float).reshape(-1)
+        if arr.size == length:
+            return arr.astype(float, copy=False)
+        if arr.size == 0:
+            return np.linspace(0.0, float(max(length - 1, 1)), length, dtype=float) if length > 1 else np.zeros(1)
+        start = float(arr[0])
+        end = float(arr[-1]) if arr.size > 1 else start + 1.0
+        if not np.isfinite(start) or not np.isfinite(end):
+            start, end = 0.0, float(length - 1 if length > 1 else 1.0)
+        if start == end:
+            end = start + 1.0
+        return np.linspace(start, end, length, dtype=float)
+
+    def _resample_line_axis(self, xs: np.ndarray, length: int) -> np.ndarray:
+        xs = np.asarray(xs, float).reshape(-1)
+        if length <= 0:
+            return np.array([], dtype=float)
+        if xs.size == length:
+            return xs
+        if xs.size == 0:
+            return np.linspace(0.0, float(max(length - 1, 1)), length, dtype=float) if length > 1 else np.zeros(1)
+        start = float(xs[0])
+        end = float(xs[-1]) if xs.size > 1 else start + 1.0
+        if not np.isfinite(start) or not np.isfinite(end):
+            start, end = 0.0, float(length - 1 if length > 1 else 1.0)
+        if start == end:
+            end = start + 1.0
+        return np.linspace(start, end, length, dtype=float)
+
+    def _update_line_item(self, autorange: bool):
+        if not self.is_line_layer():
+            return
+        ys = np.asarray(self.processed_data, float).reshape(-1)
+        if ys.size != self._line_x.size:
+            self._line_x = self._resample_line_axis(self._line_x, ys.size)
+        xs = np.asarray(self._line_x, float)
+        style = self._line_style or LineStyleConfig()
+        y_plot = ys
+        x_plot = xs
+        step_mode = style.curve_mode == "step"
+        if style.curve_mode == "smooth" and ys.size >= 3:
+            try:
+                window = style.smooth_window(ys.size)
+                y_plot = pg.functions.smooth(ys, window=window)
+            except Exception:
+                y_plot = ys
+        color = style.effective_color()
+        color.setAlphaF(style.normalized_opacity())
+        width = max(0.1, float(style.width))
+        pen = pg.mkPen(color, width=width)
+        try:
+            pen_style = {
+                "solid": QtCore.Qt.SolidLine,
+                "dashed": QtCore.Qt.DashLine,
+                "dotted": QtCore.Qt.DotLine,
+                "dashdot": QtCore.Qt.DashDotLine,
+            }.get(style.pen_style, QtCore.Qt.SolidLine)
+            pen.setStyle(pen_style)
+        except Exception:
+            pass
+
+        kwargs: Dict[str, object] = {}
+        if step_mode:
+            kwargs["stepMode"] = True
+            x_plot = self._step_edges(xs)
+
+        marker_brush: Optional[QtGui.QBrush] = None
+        marker_pen: Optional[QtGui.QPen] = None
+        marker_size: Optional[int] = None
+        symbol = None
+        if style.markers and not step_mode:
+            key = str(style.marker_style).strip().lower()
+            symbol_map = {
+                "o": "o",
+                "circle": "o",
+                "●": "o",
+                "•": "o",
+                "s": "s",
+                "square": "s",
+                "□": "s",
+                "t": "t",
+                "triangle": "t",
+                "triangleup": "t",
+                "^": "t",
+                "d": "d",
+                "diamond": "d",
+                "+": "+",
+                "plus": "+",
+                "x": "x",
+                "cross": "x",
+            }
+            symbol = symbol_map.get(key, "o")
+            marker_color = QtGui.QColor(color)
+            marker_pen = QtGui.QPen(marker_color)
+            marker_pen.setWidthF(max(1.0, width * 0.75))
+            marker_brush = QtGui.QBrush(marker_color)
+            marker_size = max(1, int(style.marker_size))
+        try:
+            if symbol:
+                self.graphics_item.setData(
+                    x_plot,
+                    y_plot,
+                    pen=pen,
+                    symbol=symbol,
+                    symbolBrush=marker_brush,
+                    symbolPen=marker_pen,
+                    symbolSize=marker_size,
+                    **kwargs,
+                )
+            else:
+                self.graphics_item.setData(x_plot, y_plot, pen=pen, symbol=None, **kwargs)
+        except Exception:
+            pass
+        try:
+            self.graphics_item.setVisible(self.visible)
+        except Exception:
+            pass
+        self.rect = _compute_line_rect(x_plot, y_plot)
+
+    def _step_edges(self, xs: np.ndarray) -> np.ndarray:
+        xs = np.asarray(xs, float)
+        n = xs.size
+        if n == 0:
+            return xs
+        if n == 1:
+            x0 = float(xs[0])
+            return np.array([x0 - 0.5, x0 + 0.5], dtype=float)
+        diffs = np.diff(xs)
+        if np.all(diffs > 0):
+            edges = np.empty(n + 1, dtype=float)
+            edges[1:-1] = xs[:-1] + diffs / 2.0
+            edges[0] = xs[0] - diffs[0] / 2.0
+            edges[-1] = xs[-1] + diffs[-1] / 2.0
+            return edges
+        edges = np.empty(n + 1, dtype=float)
+        edges[:-1] = xs
+        edges[-1] = xs[-1]
+        return edges
 
 class OverlayLayerWidget(QtWidgets.QGroupBox):
     def __init__(self, view: "OverlayView", layer: OverlayLayer):
@@ -199,10 +455,16 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
 
         # Visibility / remove
         header = QtWidgets.QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(6)
         self.chk_visible = QtWidgets.QCheckBox("Visible")
         self.chk_visible.setChecked(True)
         self.chk_visible.toggled.connect(self._on_visibility)
         header.addWidget(self.chk_visible)
+        self.btn_style = QtWidgets.QToolButton()
+        self.btn_style.setText("Style…")
+        self.btn_style.clicked.connect(self._on_style)
+        header.addWidget(self.btn_style)
         header.addStretch(1)
         self.btn_remove = QtWidgets.QToolButton()
         self.btn_remove.setText("✕")
@@ -212,7 +474,10 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         lay.addLayout(header)
 
         # Colormap selection
-        cmap_row = QtWidgets.QHBoxLayout()
+        self._colormap_row = QtWidgets.QWidget()
+        cmap_row = QtWidgets.QHBoxLayout(self._colormap_row)
+        cmap_row.setContentsMargins(0, 0, 0, 0)
+        cmap_row.setSpacing(6)
         cmap_row.addWidget(QtWidgets.QLabel("Colormap:"))
         self.cmb_colormap = QtWidgets.QComboBox()
         self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -226,10 +491,13 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
             self.cmb_colormap.addItem(name)
         self.cmb_colormap.currentTextChanged.connect(self._on_colormap)
         cmap_row.addWidget(self.cmb_colormap, 1)
-        lay.addLayout(cmap_row)
+        lay.addWidget(self._colormap_row)
 
         # Levels controls
-        lvl_row = QtWidgets.QHBoxLayout()
+        self._levels_row = QtWidgets.QWidget()
+        lvl_row = QtWidgets.QHBoxLayout(self._levels_row)
+        lvl_row.setContentsMargins(0, 0, 0, 0)
+        lvl_row.setSpacing(6)
         lvl_row.addWidget(QtWidgets.QLabel("Levels:"))
         self.spin_min = QtWidgets.QDoubleSpinBox()
         self.spin_min.setDecimals(6)
@@ -245,7 +513,7 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.btn_autoscale = QtWidgets.QPushButton("Auto")
         self.btn_autoscale.clicked.connect(self._on_autoscale)
         lvl_row.addWidget(self.btn_autoscale)
-        lay.addLayout(lvl_row)
+        lay.addWidget(self._levels_row)
 
         # Opacity slider
         opacity_row = QtWidgets.QHBoxLayout()
@@ -318,11 +586,25 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self._ready = False
         self.setTitle(self.layer.title)
         self.chk_visible.setChecked(self.layer.visible)
-        self._set_colormap_selection(self.layer.colormap_name)
-        lo, hi = getattr(self.layer, "_levels", (0.0, 1.0))
-        self.update_level_spins(lo, hi)
+        is_line = self.layer.is_line_layer()
+        self.btn_style.setVisible(is_line)
+        supports_cmap = self.layer.supports_colormap()
+        self._colormap_row.setVisible(supports_cmap)
+        self.cmb_colormap.setEnabled(supports_cmap)
+        supports_levels = self.layer.supports_levels()
+        self._levels_row.setVisible(supports_levels)
+        self.spin_min.setEnabled(supports_levels)
+        self.spin_max.setEnabled(supports_levels)
+        self.btn_autoscale.setEnabled(supports_levels)
+        if supports_cmap:
+            self._set_colormap_selection(self.layer.colormap_name)
+        if supports_levels:
+            lo, hi = getattr(self.layer, "_levels", (0.0, 1.0))
+            self.update_level_spins(lo, hi)
         self.update_opacity_label(self.layer.opacity)
+        block = self.sld_opacity.blockSignals(True)
         self.sld_opacity.setValue(int(round(self.layer.opacity * 100)))
+        self.sld_opacity.blockSignals(block)
         current_mode = self.layer.current_processing or "none"
         self._refresh_processing_options()
         self._select_processing_mode(current_mode)
@@ -337,6 +619,8 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self._apply_processing()
 
     def _set_colormap_selection(self, name: str):
+        if not self.layer.supports_colormap():
+            return
         idx = self.cmb_colormap.findText(name, QtCore.Qt.MatchFixedString)
         if idx < 0:
             idx = self.cmb_colormap.findText("viridis", QtCore.Qt.MatchFixedString)
@@ -346,6 +630,8 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
             self.cmb_colormap.blockSignals(block)
 
     def update_level_spins(self, lo: float, hi: float):
+        if not self.layer.supports_levels():
+            return
         block = self.spin_min.blockSignals(True)
         self.spin_min.setValue(float(lo))
         self.spin_min.blockSignals(block)
@@ -453,12 +739,12 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.view.remove_layer(self.layer)
 
     def _on_colormap(self, name: str):
-        if not self._ready:
+        if not self._ready or not self.layer.supports_colormap():
             return
         self.layer.set_colormap(name)
 
     def _on_levels_changed(self):
-        if not self._ready:
+        if not self._ready or not self.layer.supports_levels():
             return
         lo = self.spin_min.value()
         hi = self.spin_max.value()
@@ -470,11 +756,29 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.layer.set_levels(lo, hi, update_widget=False)
 
     def _on_autoscale(self):
+        if not self.layer.supports_levels():
+            return
         self.layer.auto_levels()
 
     def _on_opacity(self, value: int):
         alpha = float(value) / 100.0
         self.layer.set_opacity(alpha)
+
+    def _on_style(self):
+        if not self.layer.is_line_layer():
+            return
+        dialog = LineStyleDialog(self, initial=self.layer.line_style_config())
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        style = dialog.line_style()
+        if style is None:
+            return
+        self.layer.set_line_style(style)
+        block = self.sld_opacity.blockSignals(True)
+        self.sld_opacity.setValue(int(round(self.layer.opacity * 100)))
+        self.sld_opacity.blockSignals(block)
+        self.update_opacity_label(self.layer.opacity)
+        self.view.auto_view_range()
 
     def _on_processing_mode_changed(self):
         data = self._current_processing_data()
@@ -655,9 +959,33 @@ class OverlayView(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Load failed", str(e))
             return False
 
-        data, rect = self._prepare_image(da, coords)
-        layer = OverlayLayer(self, label, data, rect)
-        self.plot.addItem(layer.image_item)
+        prepared = self._prepare_layer(da, coords)
+        if prepared is None:
+            return False
+        if prepared.get("type") == "line":
+            style = LineStyleConfig()
+            try:
+                style.color = QtGui.QColor(pg.intColor(len(self.layers)))
+            except Exception:
+                pass
+            layer = OverlayLayer(
+                self,
+                label,
+                prepared.get("y", np.array([], dtype=float)),
+                prepared.get("rect"),
+                kind="line",
+                x_values=prepared.get("x"),
+                line_style=style,
+            )
+        else:
+            layer = OverlayLayer(
+                self,
+                label,
+                prepared.get("data"),
+                prepared.get("rect"),
+                kind="image",
+            )
+        self.plot.addItem(layer.graphics_item)
         widget = OverlayLayerWidget(self, layer)
         widget.set_processing_manager(self.processing_manager)
         layer.set_widget(widget)
@@ -678,7 +1006,7 @@ class OverlayView(QtWidgets.QWidget):
         if layer in self.layers:
             self.layers.remove(layer)
         try:
-            self.plot.removeItem(layer.image_item)
+            self.plot.removeItem(layer.graphics_item)
         except Exception:
             pass
         if layer.widget:
@@ -945,53 +1273,66 @@ class OverlayView(QtWidgets.QWidget):
             pass
 
     # ---------- data prep ----------
-    def _prepare_image(self, da, coords):
-        Z = np.asarray(da.values, float)
+    def _prepare_layer(self, da, coords):
+        coords = coords or {}
+        values = getattr(da, "values", da)
+        Z = np.asarray(values, float)
         if Z.ndim == 0:
-            Z = Z.reshape(1, 1)
+            data = np.asarray(Z, float).reshape(1, 1)
             rect = self._rect_to_qrectf(0.0, 1.0, 0.0, 1.0)
-            return Z, rect
+            return {"type": "image", "data": data, "rect": rect}
         if Z.ndim == 1:
-            x_coord = coords.get("x") or coords.get("X")
-            y_coord = coords.get("y") or coords.get("Y")
-
-            if x_coord is None and y_coord is not None:
-                data = Z.reshape(Z.shape[0], 1)
-                y_vals = np.asarray(y_coord, float)
-                if y_vals.ndim and y_vals.size:
-                    y0, y1 = float(y_vals[0]), float(y_vals[-1])
-                else:
-                    y0, y1 = 0.0, float(data.shape[0])
-                x0, x1 = 0.0, 1.0
-            else:
-                data = Z.reshape(1, Z.shape[0])
-                if x_coord is not None:
-                    x_vals = np.asarray(x_coord, float)
-                    if x_vals.ndim and x_vals.size:
-                        x0, x1 = float(x_vals[0]), float(x_vals[-1])
-                    else:
-                        x0, x1 = 0.0, float(data.shape[1])
-                else:
-                    x0, x1 = 0.0, float(data.shape[1])
-
-                if y_coord is not None:
-                    y_vals = np.asarray(y_coord, float)
-                    if y_vals.ndim and y_vals.size:
-                        y0, y1 = float(y_vals[0]), float(y_vals[-1])
-                    else:
-                        y0, y1 = 0.0, 1.0
-                else:
-                    y0, y1 = 0.0, 1.0
-
-            rect = self._rect_to_qrectf(x0, x1, y0, y1)
-            return np.asarray(data, float), rect
+            y_vals = np.asarray(Z, float).reshape(-1)
+            x_vals = self._line_axis_from_coords(coords, y_vals.size)
+            rect = _compute_line_rect(x_vals, y_vals)
+            return {"type": "line", "x": x_vals, "y": y_vals, "rect": rect}
         if "X" in coords and "Y" in coords:
-            return self._resample_warped(coords["X"], coords["Y"], Z)
+            data, rect = self._resample_warped(coords["X"], coords["Y"], Z)
+            return {"type": "image", "data": data, "rect": rect}
         if "x" in coords and "y" in coords:
-            return self._resample_rectilinear(coords["x"], coords["y"], Z)
-        Ny, Nx = Z.shape
+            data, rect = self._resample_rectilinear(coords["x"], coords["y"], Z)
+            return {"type": "image", "data": data, "rect": rect}
+        data = np.asarray(Z, float)
+        Ny, Nx = data.shape
         rect = self._rect_to_qrectf(0.0, float(Nx), 0.0, float(Ny))
-        return np.asarray(Z, float), rect
+        return {"type": "image", "data": data, "rect": rect}
+
+    def _line_axis_from_coords(self, coords: Dict[str, object], length: int) -> np.ndarray:
+        if length <= 0:
+            return np.array([], dtype=float)
+        if not isinstance(coords, dict):
+            coords = {}
+        candidates = (
+            "line_values",
+            "line",
+            "values",
+            "x",
+            "X",
+            "index",
+            "indices",
+            "sample",
+            "samples",
+            "y",
+            "Y",
+            "row_values",
+            "col_values",
+        )
+        for key in candidates:
+            if key not in coords:
+                continue
+            raw = coords.get(key)
+            try:
+                arr = np.asarray(getattr(raw, "values", raw), float)
+            except Exception:
+                continue
+            if arr.ndim == 0:
+                continue
+            arr = arr.reshape(-1)
+            if arr.size == length:
+                return arr.astype(float, copy=False)
+        if length == 1:
+            return np.zeros(1)
+        return np.linspace(0.0, float(length - 1), length, dtype=float)
 
     def _rect_to_qrectf(self, x0, x1, y0, y1):
         from PySide2.QtCore import QRectF

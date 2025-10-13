@@ -180,6 +180,10 @@ class PlotAnnotationDialog(QtWidgets.QDialog):
     def annotation_config(self) -> Optional[PlotAnnotationConfig]:
         return self._result
 
+    def _update_legend_controls(self, enabled: bool):
+        self.cmb_legend_position.setEnabled(enabled)
+        self.edit_legend_entries.setEnabled(enabled)
+
     def accept(self):
         font = self.font_combo.currentFont()
         config = PlotAnnotationConfig(
@@ -333,7 +337,3 @@ class LineStyleDialog(QtWidgets.QDialog):
         )
         self._result = config
         super().accept()
-
-    def _update_legend_controls(self, enabled: bool):
-        self.cmb_legend_position.setEnabled(enabled)
-        self.edit_legend_entries.setEnabled(enabled)
