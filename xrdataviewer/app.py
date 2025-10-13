@@ -47,7 +47,7 @@ class MainWindow(QtWidgets.QMainWindow):
         left_splitter.setStretchFactor(1, 1)
         main.addWidget(left_splitter)
 
-        QtCore.QTimer.singleShot(0, lambda: left_splitter.setSizes([1, 1]))
+        QtCore.QTimer.singleShot(0, lambda: left_splitter.setSizes([700, 400]))
 
         self.tabs = QtWidgets.QTabWidget()
         main.addWidget(self.tabs)

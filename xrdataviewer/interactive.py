@@ -1263,11 +1263,28 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
                 "<br><br>External notebooks can <code>import xrdataviewer_bridge</code> and call "
                 "<code>enable_auto_sync()</code> to keep their namespace in sync, or use the provided register helpers."
             )
+        toggle_row = QtWidgets.QHBoxLayout()
+        self.btn_toggle_instructions = QtWidgets.QToolButton()
+        self.btn_toggle_instructions.setText("Interactive environment instructions")
+        self.btn_toggle_instructions.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.btn_toggle_instructions.setCheckable(True)
+        self.btn_toggle_instructions.setChecked(True)
+        self.btn_toggle_instructions.setArrowType(QtCore.Qt.DownArrow)
+        self.btn_toggle_instructions.toggled.connect(self._toggle_instructions)
+        toggle_row.addWidget(self.btn_toggle_instructions)
+        toggle_row.addStretch(1)
+        layout.addLayout(toggle_row)
+
+        self.instructions_container = QtWidgets.QFrame()
+        inst_layout = QtWidgets.QVBoxLayout(self.instructions_container)
+        inst_layout.setContentsMargins(0, 0, 0, 0)
+        inst_layout.setSpacing(4)
         hint = QtWidgets.QLabel(hint_text)
         hint.setTextFormat(QtCore.Qt.RichText)
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666;")
-        layout.addWidget(hint)
+        inst_layout.addWidget(hint)
+        layout.addWidget(self.instructions_container)
 
         mode_row = QtWidgets.QHBoxLayout()
         lbl_mode = QtWidgets.QLabel("Environment:")
@@ -1327,16 +1344,6 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self._jupyter_nav_widget.setVisible(False)
         layout.addWidget(self._jupyter_nav_widget)
 
-        diag_row = QtWidgets.QHBoxLayout()
-        self.btn_run_diagnostics = QtWidgets.QPushButton("Run environment diagnostics")
-        self.btn_run_diagnostics.setToolTip(
-            "Log interpreter and matplotlib availability details to the action log."
-        )
-        self.btn_run_diagnostics.clicked.connect(self._run_env_diagnostics)
-        diag_row.addWidget(self.btn_run_diagnostics)
-        diag_row.addStretch(1)
-        layout.addLayout(diag_row)
-
         self.stack = QtWidgets.QStackedWidget()
         self._jupyter_view: Optional['QtWebEngineWidgets.QWebEngineView'] = None
         if self._web_engine_available:
@@ -1370,11 +1377,6 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             self._jupyter_manager.failed.connect(self._on_jupyter_failed)
             self._jupyter_manager.message.connect(log_action)
             self._jupyter_manager.message.connect(self._on_jupyter_message)
-        else:
-            self.btn_run_diagnostics.setEnabled(False)
-            self.btn_run_diagnostics.setToolTip(
-                "Environment diagnostics require the embedded Jupyter launcher."
-            )
         self._jupyter_url: Optional[str] = None
         self._jupyter_js_seen: Set[str] = set()
         self._jupyter_js_warned = False
@@ -1441,14 +1443,10 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
                 else:
                     self._set_status("Preparing embedded JupyterLab…")
 
-    def _run_env_diagnostics(self):
-        if not self._jupyter_manager:
-            self._set_status("Environment diagnostics require the embedded Jupyter launcher.")
-            return
-        self._set_status(
-            "Running environment diagnostics… check the log pane for results."
-        )
-        threading.Thread(target=self._jupyter_manager.run_diagnostics, daemon=True).start()
+    def _toggle_instructions(self, checked: bool) -> None:
+        self.instructions_container.setVisible(checked)
+        arrow = QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow
+        self.btn_toggle_instructions.setArrowType(arrow)
 
     def _set_status(self, message: str):
         if not message:
