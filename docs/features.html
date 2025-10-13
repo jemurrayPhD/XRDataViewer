@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>XRDataViewer Feature Guide</title>
+  <style>
+    body { font-family: "Segoe UI", Roboto, sans-serif; margin: 0; background: #fbfbfd; color: #1f2933; }
+    header { background: #223247; color: #fff; padding: 2.25rem 3rem; }
+    header h1 { margin: 0; font-size: 2.1rem; }
+    header p { margin: 0.4rem 0 0; max-width: 55rem; }
+    nav { background: #1b2533; padding: 0.7rem 3rem; }
+    nav a { color: #aee0ff; margin-right: 1.2rem; text-decoration: none; font-weight: 600; }
+    main { padding: 2.5rem 3rem 4rem; max-width: 76rem; }
+    section { margin-bottom: 3rem; background: #fff; border-radius: 12px; box-shadow: 0 12px 30px rgba(15, 23, 42, 0.1); padding: 2.1rem 2.6rem; }
+    section h2 { margin-top: 0; color: #223247; }
+    h3 { color: #324863; margin-top: 1.8rem; }
+    ul, ol { line-height: 1.65; }
+    table { border-collapse: collapse; width: 100%; margin-top: 1.2rem; }
+    th, td { border: 1px solid #d8e2ec; padding: 0.65rem 0.8rem; text-align: left; }
+    th { background: #f0f4f8; }
+    .feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.5rem; margin-top: 1.5rem; }
+    .card { background: #f7f9fc; border-radius: 10px; border: 1px solid #e1e7ef; padding: 1.2rem 1.4rem; }
+    footer { padding: 2rem 3rem; text-align: center; color: #607d8b; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>XRDataViewer Feature Reference</h1>
+    <p>
+      This guide covers the end-user capabilities exposed by each pane, how to perform common tasks, and where
+      preferences, exports, and logging tie into the workflow.
+    </p>
+  </header>
+  <nav>
+    <a href="index.html">Overview</a>
+    <a href="#datasets">Datasets pane</a>
+    <a href="#processing">Processing dock</a>
+    <a href="#multiview">MultiView tab</a>
+    <a href="#sequential">Sequential view</a>
+    <a href="#overlay">Overlay tab</a>
+    <a href="#volume">Volume viewer</a>
+    <a href="#interactive">Interactive processing</a>
+    <a href="#logging">Logging &amp; preferences</a>
+  </nav>
+  <main>
+    <section id="datasets">
+      <h2>Datasets pane</h2>
+      <div class="feature-grid">
+        <div class="card">
+          <h3>Unified library</h3>
+          <p>Single tab lists 1D, 2D, and higher-dimensional datasets. Drag selections directly into any workspace.</p>
+        </div>
+        <div class="card">
+          <h3>Loading options</h3>
+          <ul>
+            <li><strong>Load NetCDF</strong> &mdash; opens a file dialog and loads the selected dataset immediately.</li>
+            <li><strong>Load JSON</strong> &mdash; placeholder hook that will convert JSON into xarray datasets in the future.</li>
+            <li><strong>Load from Database</strong> &mdash; placeholder dialog for constructing a query payload.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Slicing workspace</h3>
+          <p>Use the Slice Data tab to define slice axes, ranges, and aggregation. Generated slices appear under “Sliced datasets”.</p>
+        </div>
+        <div class="card">
+          <h3>Interactive registrations</h3>
+          <p>Datasets and data arrays produced in the interactive tab appear automatically in the library.</p>
+        </div>
+      </div>
+      <h3>Tips</h3>
+      <ul>
+        <li>Use Ctrl+click or drag selection to queue multiple variables for a single drop.</li>
+        <li>Right-click an entry to access context actions like “Plot data…” or metadata inspection.</li>
+      </ul>
+    </section>
+
+    <section id="processing">
+      <h2>Processing dock</h2>
+      <p>
+        The processing dock focuses on managing saved pipelines and launching the pipeline builder dialog.
+        Pipelines can be applied to any view that supports processing.
+      </p>
+      <ol>
+        <li>Use <strong>New pipeline…</strong> to open the builder dialog.</li>
+        <li>Select functions, configure parameters, and reorder them to compose a workflow.</li>
+        <li>Save the pipeline for reuse; it becomes available across all views and the batch-processing menus.</li>
+        <li>Apply a saved pipeline directly to selected views or tiles.</li>
+      </ol>
+      <h3>Individual functions</h3>
+      <p>
+        Single-step functions remain available in the processing chooser dialogs embedded in the view toolbars.</p>
+    </section>
+
+    <section id="multiview">
+      <h2>MultiView tab</h2>
+      <p>The MultiView grid displays multiple 1D or 2D plots simultaneously with synchronized tools.</p>
+      <table>
+        <thead>
+          <tr><th>Capability</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Tile selection</td><td>Click or Ctrl+drag to select multiple frames. “Select all plots” toggles every tile at once.</td></tr>
+          <tr><td>Processing</td><td>Use “Apply processing” to run a function or pipeline across the current selection.</td></tr>
+          <tr><td>Variable picker</td><td>Each tile has a variable drop-down when a dataset exposes multiple variables.</td></tr>
+          <tr><td>Line styling</td><td>1D plots expose a “Line style…” action supporting markers, smoothing, pen patterns, opacity, and width.</td></tr>
+          <tr><td>Crosshairs</td><td>Enable per-tile crosshairs to read coordinates and mirrored values.</td></tr>
+          <tr><td>Pan/zoom lock</td><td>Synchronize view ranges between selected tiles.</td></tr>
+          <tr><td>Annotations</td><td>Set titles, axis labels, color bar captions, legends, and backgrounds for one or all tiles.</td></tr>
+          <tr><td>Exports</td><td>Right-click or use toolbar options to export individual frames or full layouts with optional labels.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="sequential">
+      <h2>Sequential view</h2>
+      <p>
+        Designed for n-dimensional datasets, Sequential View extracts 2D slices along a selected axis and allows
+        frame-by-frame inspection, ROI reductions, and batch exports.
+      </p>
+      <ul>
+        <li><strong>Slice configuration</strong> &mdash; choose slice, row, and column axes; specify fixed indices; auto-rescale updates the histogram and image view.</li>
+        <li><strong>ROI analysis</strong> &mdash; enable ROI to open a dedicated inspector window for 1D or 2D reductions with custom statistics.</li>
+        <li><strong>Annotations</strong> &mdash; use Python f-strings referencing <code>{slice_idx}</code> and <code>{slice_val}</code> for dynamic labels.</li>
+        <li><strong>Exports</strong> &mdash; save individual slices, stitched grids, image series, or AVI/MP4 videos (via OpenCV).</li>
+      </ul>
+    </section>
+
+    <section id="overlay">
+      <h2>Overlay tab</h2>
+      <p>The overlay workspace composites multiple layers of the same extent with independent processing and color maps.</p>
+      <ul>
+        <li>Add one or many variables from the datasets pane; each becomes an overlay layer.</li>
+        <li>Adjust layer visibility, opacity, processing function, color map, and scaling.</li>
+        <li>Use annotations to label the composite view and export snapshots or full layouts.</li>
+      </ul>
+    </section>
+
+    <section id="volume">
+      <h2>Volume viewer</h2>
+      <p>
+        The 3D volume viewer (accessible from Sequential View) renders semi-transparent volumes with interactive opacity curves.
+      </p>
+      <ul>
+        <li>Four independent curves control opacity by data value, slice index, row index, and column index.</li>
+        <li>Curves initialize with value opacity at 0.75 and axis curves at 1.0; drag handles or double-click to add control points.</li>
+        <li>Adjust color maps, reset camera view, and export snapshots or labeled layout pages.</li>
+      </ul>
+    </section>
+
+    <section id="interactive">
+      <h2>Interactive processing tab</h2>
+      <p>
+        Provides two environments for exploratory analysis that integrate with the main application.
+      </p>
+      <h3>Embedded JupyterLab</h3>
+      <ul>
+        <li>Launches a local server at <code>http://127.0.0.1:8888/lab</code> using the GUI's Python interpreter.</li>
+        <li>Automatically mirrors any <code>xarray</code> objects defined in the notebook namespace into the datasets pane.</li>
+        <li>Embedded browser exposes back/forward/reload controls and logs compatibility warnings.</li>
+      </ul>
+      <h3>Python console</h3>
+      <ul>
+        <li>Styled console with searchable history, module import helper, and preview plot widget.</li>
+        <li>Supports <code>RegisterDataset</code> and <code>RegisterDataArray</code> to push results manually.</li>
+      </ul>
+    </section>
+
+    <section id="logging">
+      <h2>Logging, preferences, and exports</h2>
+      <ul>
+        <li><strong>Action log</strong> &mdash; dockable panel records dataset loads, processing actions, interactive registrations, and exports. Toggle visibility via the arrow beside its title.</li>
+        <li><strong>Preferences</strong> &mdash; access from the menu to configure default save locations, color map choices, and variable-specific styles. Save and load JSON profiles.</li>
+        <li><strong>Export helpers</strong> &mdash; all views share filename sanitization, layout labeling prompts, and snapshot rendering utilities from <code>xrdataviewer.utils</code>.</li>
+      </ul>
+    </section>
+  </main>
+  <footer>
+    Generated documentation for XRDataViewer &mdash; last updated <!--DATE_PLACEHOLDER-->.
+  </footer>
+</body>
+</html>
