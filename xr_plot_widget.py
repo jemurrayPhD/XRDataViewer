@@ -985,12 +985,13 @@ class CentralPlotWidget(QtWidgets.QWidget):
         kwargs: Dict[str, object] = {}
         if step_mode:
             kwargs["stepMode"] = True
+            x_plot = self._step_edges(xs)
 
         symbol = None
         marker_pen: Optional[QtGui.QPen] = None
         marker_brush: Optional[QtGui.QBrush] = None
         marker_size: Optional[int] = None
-        if style.markers:
+        if style.markers and not step_mode:
             symbol_map = {
                 "o": "o",
                 "s": "s",
@@ -1043,6 +1044,29 @@ class CentralPlotWidget(QtWidgets.QWidget):
                 self.plot.enableAutoRange(x=True, y=True)
             except Exception:
                 pass
+
+    def _step_edges(self, xs: np.ndarray) -> np.ndarray:
+        xs = np.asarray(xs, float)
+        n = xs.size
+        if n == 0:
+            return xs
+        if n == 1:
+            x0 = float(xs[0])
+            return np.array([x0 - 0.5, x0 + 0.5], dtype=float)
+
+        diffs = np.diff(xs)
+        if np.all(diffs > 0):
+            edges = np.empty(n + 1, dtype=float)
+            edges[1:-1] = xs[:-1] + diffs / 2.0
+            edges[0] = xs[0] - diffs[0] / 2.0
+            edges[-1] = xs[-1] + diffs[-1] / 2.0
+            return edges
+
+        # Fallback for unsorted or repeated x values: pad with duplicates.
+        edges = np.empty(n + 1, dtype=float)
+        edges[:-1] = xs
+        edges[-1] = xs[-1]
+        return edges
 
     # ---------- sample grid overlay on main plot ----------
     def show_sample_grid(self, show: bool, *, x1=None, y1=None, X=None, Y=None, step: int = 10):
