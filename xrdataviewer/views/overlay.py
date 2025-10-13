@@ -58,6 +58,11 @@ class OverlayLayer(QtCore.QObject):
         self.processing_params: dict = {}
         self.widget: Optional["OverlayLayerWidget"] = None
         self.set_colormap(self.colormap_name)
+        self.legend_proxy = pg.PlotDataItem([0], [0])
+        try:
+            self.legend_proxy.setPen(pg.mkPen((220, 220, 220)))
+        except Exception:
+            pass
 
     # ---------- helpers ----------
     def _compute_levels(self, data: np.ndarray) -> Tuple[float, float]:
@@ -127,6 +132,9 @@ class OverlayLayer(QtCore.QObject):
     def auto_levels(self):
         lo, hi = self._compute_levels(self.processed_data)
         self.set_levels(lo, hi, update_widget=True)
+
+    def legend_item(self):
+        return self.legend_proxy
 
     def apply_processing(self, mode: str, params: dict):
         data = np.asarray(self.base_data, float)
@@ -528,6 +536,7 @@ class OverlayView(QtWidgets.QWidget):
         self.processing_manager: Optional[ProcessingManager] = processing_manager
         self.preferences: Optional[PreferencesManager] = None
         self._annotation_config: Optional[PlotAnnotationConfig] = None
+        self._legend_item: Optional[pg.LegendItem] = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -654,6 +663,7 @@ class OverlayView(QtWidgets.QWidget):
         layer.set_widget(widget)
         self.layers.append(layer)
         self._insert_layer_widget(widget)
+        self._apply_legend_config(self._annotation_config)
         return True
 
     # ---------- layer management ----------
@@ -678,6 +688,7 @@ class OverlayView(QtWidgets.QWidget):
             w.deleteLater()
         self._update_hint()
         self.auto_view_range()
+        self._apply_legend_config(self._annotation_config)
 
     def clear_layers(self):
         for layer in list(self.layers):
@@ -700,6 +711,7 @@ class OverlayView(QtWidgets.QWidget):
             config,
             background_widget=self.glw,
         )
+        self._apply_legend_config(config)
 
     def set_preferences(self, preferences: Optional[PreferencesManager]):
         if self.preferences is preferences:
@@ -883,6 +895,54 @@ class OverlayView(QtWidgets.QWidget):
 
     def _update_hint(self):
         self.lbl_hint.setVisible(not self.layers)
+
+    def _ensure_legend_item(self) -> pg.LegendItem:
+        if self._legend_item is None:
+            legend = pg.LegendItem(offset=(10, 10))
+            legend.setParentItem(self.plot.graphicsItem())
+            self._legend_item = legend
+        return self._legend_item
+
+    def _apply_legend_config(self, config: Optional[PlotAnnotationConfig]):
+        if config is None or not config.legend_visible or not self.layers:
+            if self._legend_item is not None:
+                try:
+                    self._legend_item.hide()
+                except Exception:
+                    pass
+            return
+        legend = self._ensure_legend_item()
+        try:
+            legend.clear()
+        except Exception:
+            pass
+        entries = list(config.legend_entries or [])
+        if not entries:
+            entries = [layer.title for layer in self.layers]
+        for idx, layer in enumerate(self.layers):
+            label = entries[idx] if idx < len(entries) else layer.title
+            item = layer.legend_item()
+            try:
+                legend.addItem(item, label)
+            except Exception:
+                proxy = pg.PlotDataItem([0], [0])
+                proxy.setPen(pg.mkPen((200, 200, 200)))
+                legend.addItem(proxy, label)
+        anchor_map = {
+            "top-left": ((0, 0), (0, 0)),
+            "top-right": ((1, 0), (1, 0)),
+            "bottom-left": ((0, 1), (0, 1)),
+            "bottom-right": ((1, 1), (1, 1)),
+        }
+        pos = anchor_map.get(config.legend_position, anchor_map["top-right"])
+        try:
+            legend.anchor(pos[0], pos[1])
+        except Exception:
+            pass
+        try:
+            legend.show()
+        except Exception:
+            pass
 
     # ---------- data prep ----------
     def _prepare_image(self, da, coords):

@@ -4,7 +4,7 @@ import math
 import html
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from PySide2 import QtCore, QtWidgets, QtGui
@@ -29,6 +29,9 @@ class PlotAnnotationConfig:
     colorbar_size: int = 12
     background: QtGui.QColor = field(default_factory=lambda: QtGui.QColor("#1b1b1b"))
     apply_to_all: bool = False
+    legend_visible: bool = False
+    legend_entries: List[str] = field(default_factory=list)
+    legend_position: str = "top-right"
 
 
 _LATEX_SYMBOLS = {
@@ -272,6 +275,17 @@ def plotitem_annotation_state(
             config.font_family = title_font.family()
     except Exception:
         pass
+    legend_config = getattr(plot, "_legend_config", None)
+    if isinstance(legend_config, dict):
+        config.legend_visible = bool(legend_config.get("visible"))
+        entries = legend_config.get("entries")
+        if isinstance(entries, (list, tuple)):
+            config.legend_entries = [str(e) for e in entries]
+        else:
+            config.legend_entries = []
+        position = legend_config.get("position")
+        if isinstance(position, str):
+            config.legend_position = position
     return config
 
 
@@ -282,6 +296,7 @@ def apply_plotitem_annotation(
     context: Optional[Dict[str, Any]] = None,
     colorbar_label: Optional[QtWidgets.QLabel] = None,
     background_widget: Optional[QtWidgets.QWidget] = None,
+    legend_handler: Optional[Callable[[PlotAnnotationConfig], None]] = None,
 ):
     sources = getattr(plot, "_annotation_sources", {})
     if not isinstance(sources, dict):
@@ -295,6 +310,15 @@ def apply_plotitem_annotation(
         }
     )
     setattr(plot, "_annotation_sources", sources)
+    setattr(
+        plot,
+        "_legend_config",
+        {
+            "visible": bool(config.legend_visible),
+            "entries": list(config.legend_entries or []),
+            "position": str(config.legend_position or "top-right"),
+        },
+    )
 
     title_html = latex_to_html(config.title, context)
     xlabel_html = latex_to_html(config.xlabel, context)
@@ -358,7 +382,10 @@ def apply_plotitem_annotation(
         try:
             plot.setBackground(background)
         except Exception:
-            pass
+            try:
+                plot.getViewWidget().setBackground(background)
+            except Exception:
+                pass
 
     if background_widget is not None:
         try:
@@ -366,6 +393,10 @@ def apply_plotitem_annotation(
                 background_widget.setBackground(background)
             elif hasattr(background_widget, "setBackgroundBrush"):
                 background_widget.setBackgroundBrush(background)
+            elif hasattr(background_widget, "setBackgroundBrush"):
+                background_widget.setBackgroundBrush(background)
+            elif hasattr(background_widget, "setBackgroundColor"):
+                background_widget.setBackgroundColor(background)
             else:
                 raise AttributeError
         except Exception:
@@ -375,6 +406,12 @@ def apply_plotitem_annotation(
                 background_widget.setPalette(palette)
             except Exception:
                 background_widget.setStyleSheet(f"background-color: {background.name()};")
+
+    if callable(legend_handler):
+        try:
+            legend_handler(config)
+        except Exception:
+            pass
 
 
 
@@ -480,6 +517,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
     sigViewChanged = QtCore.Signal(tuple, tuple)
     sigLocalCrosshairToggled = QtCore.Signal(bool)
     sigCursorMoved = QtCore.Signal(object, float, float, object, bool, str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.glw = pg.GraphicsLayoutWidget()
@@ -494,6 +532,9 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self.plot.setLabel("bottom", "X")
         self.img_item = pg.ImageItem()
         self.plot.addItem(self.img_item)
+        self._line_item = pg.PlotDataItem()
+        self._line_item.setVisible(False)
+        self.plot.addItem(self._line_item)
         self.lut = MyHistogramLUT()
         self.lut.setImageItem(self.img_item)
 
@@ -502,6 +543,12 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._block_view_emit = False
         self._last_data = None
         self._last_rect = None
+        self._line_x: Optional[np.ndarray] = None
+        self._line_y: Optional[np.ndarray] = None
+        self._mode: str = "image"
+
+        self._legend_item: Optional[pg.LegendItem] = None
+        self._legend_sources: List[Tuple[pg.GraphicsObject, str]] = []
 
         self._histogram_menu_getter = None
         self._histogram_menu_setter = None
@@ -588,6 +635,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
             context=context,
             colorbar_label=self._colorbar_label_widget,
             background_widget=self.glw,
+            legend_handler=self._apply_legend,
         )
         self._background_color = _ensure_qcolor(config.background)
 
@@ -597,6 +645,66 @@ class CentralPlotWidget(QtWidgets.QWidget):
         html_text = latex_to_html(text, context)
         self._colorbar_label_widget.setText(html_text)
         self._colorbar_label_widget.setVisible(bool(html_text))
+
+    def set_legend_sources(self, items: Sequence[Tuple[object, str]]):
+        processed: List[Tuple[object, str]] = []
+        for obj, label in items:
+            if obj is None:
+                continue
+            processed.append((obj, str(label)))
+        self._legend_sources = processed
+
+    def _ensure_legend(self) -> pg.LegendItem:
+        if self._legend_item is None:
+            legend = pg.LegendItem(offset=(10, 10))
+            legend.setParentItem(self.plot.graphicsItem())
+            self._legend_item = legend
+        return self._legend_item
+
+    def _apply_legend(self, config: PlotAnnotationConfig):
+        if not config.legend_visible or not self._legend_sources:
+            if self._legend_item is not None:
+                try:
+                    self._legend_item.hide()
+                except Exception:
+                    pass
+            return
+        legend = self._ensure_legend()
+        try:
+            legend.clear()
+        except Exception:
+            pass
+        entries = list(config.legend_entries or [])
+        if not entries:
+            entries = [label for _, label in self._legend_sources]
+        for idx, (item, default_label) in enumerate(self._legend_sources):
+            label = entries[idx] if idx < len(entries) else default_label
+            try:
+                if hasattr(item, "setName"):
+                    item.setName(label)
+            except Exception:
+                pass
+            try:
+                legend.addItem(item, label)
+            except Exception:
+                proxy = pg.PlotDataItem([0], [0])
+                proxy.setPen(pg.mkPen((200, 200, 200)))
+                legend.addItem(proxy, label)
+        anchor_map = {
+            "top-left": ((0, 0), (0, 0)),
+            "top-right": ((1, 0), (1, 0)),
+            "bottom-left": ((0, 1), (0, 1)),
+            "bottom-right": ((1, 1), (1, 1)),
+        }
+        pos = anchor_map.get(config.legend_position, anchor_map["top-right"])
+        try:
+            legend.anchor(pos[0], pos[1])
+        except Exception:
+            pass
+        try:
+            legend.show()
+        except Exception:
+            pass
 
     # ---------- public API ----------
     def set_labels(self, xlabel: str = "X", ylabel: str = "Y"):
@@ -708,27 +816,95 @@ class CentralPlotWidget(QtWidgets.QWidget):
             pass
 
     # ---------- data display ----------
+    def image_item(self) -> pg.ImageItem:
+        return self.img_item
+
+    def line_item(self) -> pg.PlotDataItem:
+        return self._line_item
+
     def set_image(self, Z: np.ndarray, autorange: bool = True, rect=None):
         Z = np.asarray(Z, float, order="C")
         self.img_item.setImage(Z, autoLevels=autorange)
         try:
             from PySide2.QtCore import QRectF
             if rect is None:
-                Ny, Nx = Z.shape; rect = QRectF(0.0, 0.0, float(Nx), float(Ny))
+                Ny, Nx = Z.shape
+                rect = QRectF(0.0, 0.0, float(Nx), float(Ny))
             self.img_item.setRect(rect)
-        except Exception: pass
+        except Exception:
+            rect = None
         self._last_data = np.asarray(Z, float)
         try:
             self._last_rect = rect
         except Exception:
             self._last_rect = None
-        if autorange: self.plot.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
+        self._line_x = None
+        self._line_y = None
+        self._mode = "image"
+        try:
+            self.img_item.setVisible(True)
+            self._line_item.setVisible(False)
+        except Exception:
+            pass
+        container = self.histogram_widget()
+        if container is not None:
+            container.setVisible(True)
+        try:
+            self.lut.setVisible(True)
+        except Exception:
+            pass
+        if autorange:
+            try:
+                self.plot.enableAutoRange(x=True, y=True)
+            except Exception:
+                pass
 
     def set_rectilinear(self, x1: np.ndarray, y1: np.ndarray, Z: np.ndarray, autorange: bool = True):
-        Zu, xr = self._resample_rectilinear(x1, y1, Z, return_rect=True); self.set_image(Zu, autorange, rect=xr)
+        Zu, xr = self._resample_rectilinear(x1, y1, Z, return_rect=True)
+        self.set_image(Zu, autorange, rect=xr)
 
     def set_warped(self, X: np.ndarray, Y: np.ndarray, Z: np.ndarray, autorange: bool = True):
-        Zu, xr = self._resample_warped(X, Y, Z, return_rect=True); self.set_image(Zu, autorange, rect=xr)
+        Zu, xr = self._resample_warped(X, Y, Z, return_rect=True)
+        self.set_image(Zu, autorange, rect=xr)
+
+    def set_line(self, x: np.ndarray, y: np.ndarray, autorange: bool = True):
+        xs = np.asarray(x, float)
+        ys = np.asarray(y, float)
+        if xs.ndim != 1:
+            xs = xs.ravel()
+        if ys.ndim != 1:
+            ys = ys.ravel()
+        if xs.size == 0 and ys.size:
+            xs = np.arange(ys.size, dtype=float)
+        if ys.size != xs.size:
+            if ys.size == 0:
+                xs = np.array([], dtype=float)
+            else:
+                xs = np.linspace(0.0, float(ys.size - 1), ys.size)
+        self._line_x = xs.astype(float, copy=False)
+        self._line_y = ys.astype(float, copy=False)
+        pen = pg.mkPen((200, 230, 255), width=2)
+        self._line_item.setData(self._line_x, self._line_y, pen=pen)
+        self._last_data = np.array(self._line_y, copy=True)
+        self._last_rect = None
+        self._mode = "line"
+        try:
+            self._line_item.setVisible(True)
+            self.img_item.setVisible(False)
+        except Exception:
+            pass
+        container = self.histogram_widget()
+        if container is not None:
+            container.setVisible(False)
+        try:
+            self.lut.setVisible(False)
+        except Exception:
+            pass
+        if autorange:
+            try:
+                self.plot.enableAutoRange(x=True, y=True)
+            except Exception:
+                pass
 
     # ---------- sample grid overlay on main plot ----------
     def show_sample_grid(self, show: bool, *, x1=None, y1=None, X=None, Y=None, step: int = 10):
@@ -820,13 +996,34 @@ class CentralPlotWidget(QtWidgets.QWidget):
         return f"x={fmt(x)}\ny={fmt(y)}\nvalue={fmt(value)}"
 
     def _value_at(self, x: float, y: float):
+        if self._mode == "line":
+            xs = self._line_x
+            ys = self._line_y
+            if xs is None or ys is None or xs.size == 0:
+                return None
+            try:
+                diffs = np.abs(xs - float(x))
+            except Exception:
+                return None
+            try:
+                idx = int(np.nanargmin(diffs))
+            except Exception:
+                idx = 0
+            idx = max(0, min(idx, ys.size - 1))
+            try:
+                return float(ys[idx])
+            except Exception:
+                return ys[idx]
+
         data = self._last_data
         rect = self._last_rect
         if data is None or rect is None:
             return None
         try:
-            x0 = float(rect.left()); y0 = float(rect.top())
-            w = float(rect.width()); h = float(rect.height())
+            x0 = float(rect.left())
+            y0 = float(rect.top())
+            w = float(rect.width())
+            h = float(rect.height())
         except Exception:
             return None
         if w == 0 or h == 0:

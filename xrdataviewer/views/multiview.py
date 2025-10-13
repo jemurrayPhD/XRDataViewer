@@ -47,6 +47,8 @@ class ViewerFrame(QtWidgets.QFrame):
         self._raw_data: Optional[np.ndarray] = None
         self._processed_data: Optional[np.ndarray] = None
         self._coords: Dict[str, np.ndarray] = {}
+        self._line_x: Optional[np.ndarray] = None
+        self._line_label: str = ""
         self._display_mode: str = "image"
         self._current_processing: str = "none"
         self._processing_params: Dict[str, object] = {}
@@ -204,16 +206,33 @@ class ViewerFrame(QtWidgets.QFrame):
                 da = dataset[var]
             except Exception:
                 continue
-            if getattr(da, "ndim", 0) != 2:
+            ndim = getattr(da, "ndim", 0)
+            if ndim not in (1, 2):
                 continue
             self._available_variables.append(var)
-            dims = []
+            dims: List[str] = []
             try:
-                dims = [f"{dim}[{getattr(da, 'sizes', {}).get(dim, '?')}]" for dim in da.dims[:2]]
+                if ndim == 1:
+                    dim = da.dims[0] if getattr(da, "dims", None) else "axis"
+                    sizes = getattr(da, "sizes", {})
+                    size = sizes.get(dim) if isinstance(sizes, dict) else None
+                    if size is None:
+                        shape = getattr(da, "shape", ())
+                        if shape:
+                            size = shape[0]
+                    if size is None:
+                        size = "?"
+                    dims = [f"{dim}[{size}]"]
+                else:
+                    dims = [
+                        f"{dim}[{getattr(da, 'sizes', {}).get(dim, '?')}]"
+                        for dim in da.dims[:2]
+                    ]
             except Exception:
                 dims = []
             if dims:
-                self._variable_hints[var] = " (" + " × ".join(dims) + ")"
+                joiner = " × " if len(dims) > 1 else ", "
+                self._variable_hints[var] = " (" + joiner.join(dims) + ")"
 
         self._available_variables.sort()
         self._current_variable = None
@@ -221,7 +240,10 @@ class ViewerFrame(QtWidgets.QFrame):
         self._clear_display()
         if not self._available_variables:
             self._set_header_text(None)
-            self._set_header_text(None, custom=f"{self._dataset_display_name()} — No 2D variables")
+            self._set_header_text(
+                None,
+                custom=f"{self._dataset_display_name()} — No 1D/2D variables",
+            )
             return
 
         self._set_header_text(None)
@@ -274,7 +296,8 @@ class ViewerFrame(QtWidgets.QFrame):
             da = self._dataset[var_name]
         except Exception:
             return False
-        if getattr(da, "ndim", 0) != 2:
+        ndim = getattr(da, "ndim", 0)
+        if ndim not in (1, 2):
             return False
         coords = guess_phys_coords(da)
         self.set_data(da, coords)
@@ -283,12 +306,38 @@ class ViewerFrame(QtWidgets.QFrame):
         return True
 
     def set_data(self, da, coords):
-        Z = np.asarray(getattr(da, "values", da), float)
-        self._raw_data = np.asarray(Z, float)
-        self._processed_data = np.asarray(Z, float)
+        values = np.asarray(getattr(da, "values", da), float)
+        self._raw_data = np.asarray(values, float)
+        self._processed_data = np.asarray(values, float)
         self._coords = {}
+        self._line_x = None
+        self._line_label = ""
         coords = dict(coords or {})
-        if "X" in coords and "Y" in coords:
+        if values.ndim == 1:
+            self._display_mode = "line"
+            axis = da.dims[0] if getattr(da, "ndim", 0) else "index"
+            self._line_label = axis or "index"
+            x_data = None
+            for key in ("x", "X", axis):
+                arr = coords.get(key)
+                if arr is not None:
+                    try:
+                        x_data = np.asarray(arr, float)
+                        break
+                    except Exception:
+                        x_data = None
+            if x_data is None:
+                try:
+                    coord = da.coords.get(axis)
+                    if coord is not None:
+                        x_data = np.asarray(coord.values, float)
+                except Exception:
+                    x_data = None
+            if x_data is None:
+                x_data = np.arange(values.size, dtype=float)
+            self._coords["line_x"] = np.asarray(x_data, float)
+            self._line_x = self._coords["line_x"]
+        elif "X" in coords and "Y" in coords:
             self._display_mode = "warped"
             self._coords["X"] = np.asarray(coords["X"], float)
             self._coords["Y"] = np.asarray(coords["Y"], float)
@@ -301,10 +350,11 @@ class ViewerFrame(QtWidgets.QFrame):
         self._current_processing = "none"
         self._processing_params = {}
         self._display_data(self._processed_data, autorange=True)
-        try:
-            self.viewer.img_item.setVisible(True)
-        except Exception:
-            pass
+        if self._display_mode != "line":
+            try:
+                self.viewer.img_item.setVisible(True)
+            except Exception:
+                pass
         self._apply_preferences()
 
     def set_preferences(self, preferences: Optional[PreferencesManager]):
@@ -329,6 +379,8 @@ class ViewerFrame(QtWidgets.QFrame):
     def _apply_preferences(self):
         prefs = self.preferences
         if prefs is None:
+            return
+        if self._display_mode == "line":
             return
         cmap_name = prefs.preferred_colormap(self._current_variable)
         if cmap_name:
@@ -395,16 +447,26 @@ class ViewerFrame(QtWidgets.QFrame):
         self._display_data(self._processed_data, autorange=True)
 
     def _display_data(self, data: np.ndarray, *, autorange: bool = False):
+        if self._display_mode == "line":
+            x = self._line_x if self._line_x is not None else np.arange(data.size, dtype=float)
+            self.viewer.set_line(x, data, autorange=autorange)
+            y_label = self._current_variable or "Value"
+            x_label = self._line_label or "Index"
+            try:
+                self.viewer.set_labels(x_label, y_label)
+            except Exception:
+                pass
+            self.viewer.set_legend_sources([(self.viewer.line_item(), y_label)])
+            return
+
         if self._display_mode == "warped" and "X" in self._coords and "Y" in self._coords:
             self.viewer.set_warped(self._coords["X"], self._coords["Y"], data, autorange=autorange)
         elif self._display_mode == "rectilinear" and "x" in self._coords and "y" in self._coords:
             self.viewer.set_rectilinear(self._coords["x"], self._coords["y"], data, autorange=autorange)
         else:
             self.viewer.set_image(data, autorange=autorange)
-        try:
-            self.viewer.img_item.setVisible(True)
-        except Exception:
-            pass
+        label = self._current_variable or "Image"
+        self.viewer.set_legend_sources([(self.viewer.image_item(), label)])
 
     def set_histogram_visible(self, on: bool):
         self._hist_master_enabled = bool(on)

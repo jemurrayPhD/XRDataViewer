@@ -134,6 +134,30 @@ class PlotAnnotationDialog(QtWidgets.QDialog):
         grid.setColumnStretch(2, 1)
         layout.addWidget(aesthetics)
 
+        legend_box = QtWidgets.QGroupBox("Legend")
+        legend_layout = QtWidgets.QGridLayout(legend_box)
+        legend_layout.setContentsMargins(8, 8, 8, 8)
+        legend_layout.setSpacing(6)
+        self.chk_legend = QtWidgets.QCheckBox("Show legend")
+        self.chk_legend.setChecked(bool(initial.legend_visible) if initial else False)
+        legend_layout.addWidget(self.chk_legend, 0, 0, 1, 2)
+        legend_layout.addWidget(QtWidgets.QLabel("Position"), 1, 0)
+        self.cmb_legend_position = QtWidgets.QComboBox()
+        self.cmb_legend_position.addItems(["top-right", "top-left", "bottom-right", "bottom-left"])
+        pos = (initial.legend_position if initial else "top-right") or "top-right"
+        idx = self.cmb_legend_position.findText(pos)
+        self.cmb_legend_position.setCurrentIndex(max(0, idx))
+        legend_layout.addWidget(self.cmb_legend_position, 1, 1)
+        legend_layout.addWidget(QtWidgets.QLabel("Entries (one per line)"), 2, 0, 1, 2)
+        self.edit_legend_entries = QtWidgets.QPlainTextEdit()
+        entries = "\n".join(initial.legend_entries) if initial and initial.legend_entries else ""
+        self.edit_legend_entries.setPlainText(entries)
+        self.edit_legend_entries.setPlaceholderText("Layer A\nLayer B")
+        legend_layout.addWidget(self.edit_legend_entries, 3, 0, 1, 2)
+        self.chk_legend.toggled.connect(self._update_legend_controls)
+        self._update_legend_controls(self.chk_legend.isChecked())
+        layout.addWidget(legend_box)
+
         if allow_apply_all:
             self.chk_apply_all = QtWidgets.QCheckBox("Apply to all plots in this tab")
             self.chk_apply_all.setChecked(bool(initial.apply_to_all) if initial else False)
@@ -170,6 +194,13 @@ class PlotAnnotationDialog(QtWidgets.QDialog):
             colorbar_size=self.spin_colorbar.value(),
             background=self.btn_color.color(),
             apply_to_all=self.chk_apply_all.isChecked(),
+            legend_visible=self.chk_legend.isChecked(),
+            legend_entries=[line.strip() for line in self.edit_legend_entries.toPlainText().splitlines() if line.strip()],
+            legend_position=self.cmb_legend_position.currentText(),
         )
         self._result = config
         super().accept()
+
+    def _update_legend_controls(self, enabled: bool):
+        self.cmb_legend_position.setEnabled(enabled)
+        self.edit_legend_entries.setEnabled(enabled)
