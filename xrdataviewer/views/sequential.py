@@ -24,7 +24,7 @@ from xr_coords import guess_phys_coords
 from xr_plot_widget import CentralPlotWidget, PlotAnnotationConfig, ScientificAxisItem
 
 from ..annotations import PlotAnnotationDialog
-from ..datasets import DataSetRef, HighDimVarRef, MemoryDatasetRef
+from ..datasets import DataSetRef, HighDimVarRef, MemoryDatasetRef, VarRef
 from ..preferences import PreferencesManager
 from ..processing import apply_processing_step, ProcessingManager, ProcessingSelectionDialog
 from ..utils import (
@@ -32,6 +32,7 @@ from ..utils import (
     ensure_extension,
     image_with_label,
     nan_aware_reducer,
+    open_dataset,
     process_events,
     qimage_to_array,
     sanitize_filename,
@@ -202,6 +203,8 @@ class SequentialView(QtWidgets.QWidget):
         self._slice_count: int = 0
         self._axis_coords: Optional[np.ndarray] = None
         self._current_processed_slice: Optional[np.ndarray] = None
+        self._line_mode: bool = False
+        self._current_line_coords: Optional[np.ndarray] = None
         self._roi_last_shape: Optional[Tuple[int, int]] = None
         self._roi_last_bounds: Optional[Tuple[int, int, int, int]] = None
 
@@ -502,6 +505,21 @@ class SequentialView(QtWidgets.QWidget):
             ev.acceptProposedAction()
             return
 
+        var_ref = VarRef.from_mime(text)
+        if var_ref:
+            try:
+                dataset = open_dataset(var_ref.path)
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(self, "Load failed", str(exc))
+                ev.ignore()
+                return
+            self._set_dataset(dataset, var_ref.path, label=var_ref.path.name)
+            index = self.cmb_variable.findData(var_ref.var)
+            if index >= 0:
+                self.cmb_variable.setCurrentIndex(index)
+            ev.acceptProposedAction()
+            return
+
         mem_ref = MemoryDatasetRef.from_mime(text)
         if mem_ref:
             try:
@@ -628,9 +646,9 @@ class SequentialView(QtWidgets.QWidget):
             self.lbl_dataset.setText("(in-memory dataset)")
         self.lbl_dataset.setStyleSheet("")
         self._clear_view()
-        vars_with_dims = [var for var in ds.data_vars if ds[var].ndim >= 3]
+        vars_with_dims = [var for var in ds.data_vars if getattr(ds[var], "ndim", 0) >= 2]
         if not vars_with_dims:
-            self.cmb_variable.addItem("No 3D variables available", None)
+            self.cmb_variable.addItem("No 2D or higher variables available", None)
             return
         self.cmb_variable.blockSignals(True)
         for var in vars_with_dims:
@@ -656,6 +674,8 @@ class SequentialView(QtWidgets.QWidget):
         self._slice_count = 0
         self._axis_coords = None
         self._current_processed_slice = None
+        self._line_mode = False
+        self._current_line_coords = None
         self._roi_last_shape = None
         self._roi_last_slices = None
         self._roi_last_bounds = None
@@ -701,21 +721,39 @@ class SequentialView(QtWidgets.QWidget):
 
     def _rebuild_axis_controls(self):
         dims = self._dims
-        combos = (self.cmb_slice_axis, self.cmb_row_axis, self.cmb_col_axis)
-        for combo in combos:
-            combo.blockSignals(True)
-            combo.clear()
-            for dim in dims:
-                combo.addItem(dim, dim)
-            combo.blockSignals(False)
-            combo.setEnabled(bool(dims))
+        self.cmb_slice_axis.blockSignals(True)
+        self.cmb_slice_axis.clear()
+        for dim in dims:
+            self.cmb_slice_axis.addItem(dim, dim)
+        self.cmb_slice_axis.blockSignals(False)
+        self.cmb_slice_axis.setEnabled(bool(dims))
+
+        self.cmb_row_axis.blockSignals(True)
+        self.cmb_row_axis.clear()
+        for dim in dims:
+            self.cmb_row_axis.addItem(dim, dim)
+        self.cmb_row_axis.blockSignals(False)
+        self.cmb_row_axis.setEnabled(bool(dims))
+
+        self.cmb_col_axis.blockSignals(True)
+        self.cmb_col_axis.clear()
+        self.cmb_col_axis.addItem("1D profile (no column axis)", None)
+        for dim in dims:
+            self.cmb_col_axis.addItem(dim, dim)
+        self.cmb_col_axis.blockSignals(False)
+        self.cmb_col_axis.setEnabled(bool(dims))
+
+        if dims:
+            self.cmb_slice_axis.setCurrentIndex(0)
+            if len(dims) >= 2:
+                self.cmb_row_axis.setCurrentIndex(1)
+            else:
+                self.cmb_row_axis.setCurrentIndex(0)
         if len(dims) >= 3:
-            self.cmb_slice_axis.setCurrentIndex(0)
-            self.cmb_row_axis.setCurrentIndex(1)
-            self.cmb_col_axis.setCurrentIndex(2)
+            idx = self.cmb_col_axis.findData(dims[2])
+            if idx >= 0:
+                self.cmb_col_axis.setCurrentIndex(idx)
         elif len(dims) >= 2:
-            self.cmb_slice_axis.setCurrentIndex(0)
-            self.cmb_row_axis.setCurrentIndex(1)
             self.cmb_col_axis.setCurrentIndex(0)
         self._ensure_unique_axes()
         self._rebuild_fixed_indices()
@@ -725,6 +763,8 @@ class SequentialView(QtWidgets.QWidget):
         combos = (self.cmb_slice_axis, self.cmb_row_axis, self.cmb_col_axis)
         seen: List[str] = []
         for combo in combos:
+            if combo.count() == 0:
+                continue
             idx = combo.currentIndex()
             dim = combo.itemData(idx)
             if dim is None:
@@ -741,6 +781,9 @@ class SequentialView(QtWidgets.QWidget):
         self._slice_axis = self.cmb_slice_axis.currentData()
         self._row_axis = self.cmb_row_axis.currentData()
         self._col_axis = self.cmb_col_axis.currentData()
+        self._line_mode = self._col_axis is None
+        if self._line_mode and self._roi_enabled:
+            self._on_roi_toggled(False)
         self._update_axis_coords()
         self._update_volume_window_axis_labels()
 
@@ -799,6 +842,9 @@ class SequentialView(QtWidgets.QWidget):
         )
         self._row_coord_2d = _first_valid(("row_grid", "Y"), (2,))
         self._col_coord_2d = _first_valid(("col_grid", "X"), (2,))
+        self._current_line_coords = _extract("line_values", (1,))
+        if self._current_line_coords is None and self._row_axis:
+            self._current_line_coords = _extract(self._row_axis, (1,))
 
     def _column_coordinates(self, start: int, stop: int) -> Optional[np.ndarray]:
         if self._col_coord_1d is not None and self._col_coord_1d.size >= stop:
@@ -892,11 +938,13 @@ class SequentialView(QtWidgets.QWidget):
         self.spin_slice.setEnabled(enabled)
         self.btn_apply_processing.setEnabled(enabled)
         self.btn_reset_processing.setEnabled(enabled)
-        self.btn_autoscale.setEnabled(enabled)
+        self.btn_autoscale.setEnabled(enabled and not self._line_mode)
         self.btn_autorange.setEnabled(enabled)
-        self.btn_toggle_roi.setEnabled(enabled)
+        self.btn_toggle_roi.setEnabled(enabled and not self._line_mode)
         self._update_volume_button_state()
         self._update_slice_label()
+        if self._line_mode:
+            self.cmb_colormap.setEnabled(False)
 
     def _update_slice_label(self):
         if not self._slice_axis:
@@ -945,15 +993,33 @@ class SequentialView(QtWidgets.QWidget):
         return idx
 
     def _extract_slice(self, slice_index: Optional[int] = None) -> Tuple[Optional[np.ndarray], Dict[str, np.ndarray]]:
-        if self._current_da is None or self._row_axis is None or self._col_axis is None:
-            return None, {}
-        if self._slice_axis is None:
+        if self._current_da is None or self._row_axis is None:
             return None, {}
         select = self._gather_selection(slice_index)
         try:
             slice_da = self._current_da.isel(select)
         except Exception:
             return None, {}
+        if self._slice_axis is None:
+            return None, {}
+        if self._col_axis is None:
+            if self._row_axis not in slice_da.dims:
+                return None, {}
+            try:
+                slice_da = slice_da.transpose(self._row_axis)
+            except Exception:
+                pass
+            data = np.asarray(slice_da.values, float).reshape(-1)
+            coords = guess_phys_coords(slice_da)
+            try:
+                coord = slice_da.coords.get(self._row_axis)
+                if coord is not None:
+                    values = np.asarray(coord.values)
+                    if values.ndim == 1:
+                        coords["line_values"] = np.asarray(values, float)
+            except Exception:
+                pass
+            return data, coords
         for dim in (self._row_axis, self._col_axis):
             if dim not in slice_da.dims:
                 return None, {}
@@ -1006,10 +1072,14 @@ class SequentialView(QtWidgets.QWidget):
         if data is None:
             self._current_processed_slice = None
             self._cache_slice_coords({})
-            self.viewer.set_image(np.zeros((1, 1)), autorange=True)
+            if self._line_mode:
+                self.viewer.set_line(np.array([], dtype=float), np.array([], dtype=float), autorange=True)
+            else:
+                self.viewer.set_image(np.zeros((1, 1)), autorange=True)
             self._roi_last_shape = None
             if self._roi_enabled:
                 self._update_roi_curve()
+            self.cmb_colormap.setEnabled(False)
             self._refresh_volume_window()
             return
         try:
@@ -1025,15 +1095,22 @@ class SequentialView(QtWidgets.QWidget):
         if self._roi_enabled and shape != self._roi_last_shape:
             self._reset_roi_to_image(shape)
         self._roi_last_shape = shape
-        if "X" in coords and "Y" in coords:
-            self.viewer.set_warped(coords["X"], coords["Y"], processed, autorange=autorange)
-        elif "x" in coords and "y" in coords:
-            self.viewer.set_rectilinear(coords["x"], coords["y"], processed, autorange=autorange)
+        if self._line_mode or np.ndim(self._current_processed_slice) <= 1:
+            xs = self._current_line_coords
+            if xs is None or xs.size != self._current_processed_slice.size:
+                xs = np.arange(self._current_processed_slice.size, dtype=float)
+            self.viewer.set_line(xs, self._current_processed_slice, autorange=autorange)
+            self.cmb_colormap.setEnabled(False)
         else:
-            self.viewer.set_image(processed, autorange=autorange)
-        self.cmb_colormap.setEnabled(True)
-        self._apply_preference_colormap()
-        self._apply_selected_colormap()
+            if "X" in coords and "Y" in coords:
+                self.viewer.set_warped(coords["X"], coords["Y"], processed, autorange=autorange)
+            elif "x" in coords and "y" in coords:
+                self.viewer.set_rectilinear(coords["x"], coords["y"], processed, autorange=autorange)
+            else:
+                self.viewer.set_image(processed, autorange=autorange)
+            self.cmb_colormap.setEnabled(True)
+            self._apply_preference_colormap()
+            self._apply_selected_colormap()
         if autorange:
             try:
                 self.viewer.autoscale_levels()
@@ -1044,7 +1121,7 @@ class SequentialView(QtWidgets.QWidget):
             except Exception:
                 pass
         self._update_slice_label()
-        if self._roi_enabled:
+        if self._roi_enabled and not self._line_mode:
             self._update_roi_slice_reference()
             self._update_roi_curve()
         self._refresh_volume_window()

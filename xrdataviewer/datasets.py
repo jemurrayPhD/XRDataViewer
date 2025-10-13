@@ -735,6 +735,7 @@ class SliceDataTab(QtWidgets.QWidget):
         self._current_da: Optional[xr.DataArray] = None
         self._current_dims: List[str] = []
         self._dim_controls: Dict[str, DimSliceControl] = {}
+        self._output_mode: str = "2d"
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
@@ -764,20 +765,34 @@ class SliceDataTab(QtWidgets.QWidget):
         var_row.addWidget(self.cmb_variable, 1)
         outer.addLayout(var_row)
 
-        axis_group = QtWidgets.QGroupBox("Output plane")
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.addWidget(QtWidgets.QLabel("Slice output:"))
+        self.cmb_output_mode = QtWidgets.QComboBox()
+        self.cmb_output_mode.addItem("2D slices (images)", "2d")
+        self.cmb_output_mode.addItem("1D slices (profiles)", "1d")
+        self.cmb_output_mode.currentIndexChanged.connect(self._on_output_mode_changed)
+        self.cmb_output_mode.setEnabled(False)
+        mode_row.addWidget(self.cmb_output_mode, 1)
+        mode_row.addStretch(1)
+        outer.addLayout(mode_row)
+
+        axis_group = QtWidgets.QGroupBox("Slice configuration")
+        self.axis_group = axis_group
         axis_form = QtWidgets.QFormLayout(axis_group)
         axis_form.setContentsMargins(6, 6, 6, 6)
         axis_form.setSpacing(6)
 
+        self.lbl_row_dim = QtWidgets.QLabel("Rows")
         self.cmb_row_dim = QtWidgets.QComboBox()
         self.cmb_row_dim.setEnabled(False)
         self.cmb_row_dim.currentIndexChanged.connect(self._on_axes_changed)
-        axis_form.addRow("Rows", self.cmb_row_dim)
+        axis_form.addRow(self.lbl_row_dim, self.cmb_row_dim)
 
+        self.lbl_col_dim = QtWidgets.QLabel("Columns")
         self.cmb_col_dim = QtWidgets.QComboBox()
         self.cmb_col_dim.setEnabled(False)
         self.cmb_col_dim.currentIndexChanged.connect(self._on_axes_changed)
-        axis_form.addRow("Columns", self.cmb_col_dim)
+        axis_form.addRow(self.lbl_col_dim, self.cmb_col_dim)
 
         self.extra_dims_widget = QtWidgets.QWidget()
         self.extra_dims_layout = QtWidgets.QFormLayout(self.extra_dims_widget)
@@ -846,7 +861,7 @@ class SliceDataTab(QtWidgets.QWidget):
         count = 0
         for var in self._dataset.data_vars:
             da = self._dataset[var]
-            if getattr(da, "ndim", 0) <= 2:
+            if getattr(da, "ndim", 0) < 2:
                 continue
             dims = getattr(da, "dims", ())
             shape = " × ".join(str(getattr(da, "sizes", {}).get(dim, "?")) for dim in dims)
@@ -854,10 +869,11 @@ class SliceDataTab(QtWidgets.QWidget):
             count += 1
         self.cmb_variable.blockSignals(False)
         self.cmb_variable.setEnabled(count > 0)
+        self.cmb_output_mode.setEnabled(count > 0)
         self.btn_generate.setEnabled(False)
         if count == 0:
             self._clear_current_variable()
-            self.lbl_status.setText("Dataset does not contain variables with more than two dimensions.")
+            self.lbl_status.setText("Dataset does not contain variables with at least two dimensions.")
         else:
             self.lbl_status.setText("Select a variable and configure the slicing parameters.")
 
@@ -865,6 +881,7 @@ class SliceDataTab(QtWidgets.QWidget):
         self._current_var = None
         self._current_da = None
         self._current_dims = []
+        self._set_output_mode("2d", force=True)
         self.cmb_row_dim.blockSignals(True)
         self.cmb_row_dim.clear()
         self.cmb_row_dim.blockSignals(False)
@@ -873,6 +890,8 @@ class SliceDataTab(QtWidgets.QWidget):
         self.cmb_col_dim.clear()
         self.cmb_col_dim.blockSignals(False)
         self.cmb_col_dim.setEnabled(False)
+        self.cmb_output_mode.setEnabled(False)
+        self.axis_group.setEnabled(False)
         self._reset_extra_dim_controls([])
 
     def _reset_extra_dim_controls(self, dims: List[str]):
@@ -925,12 +944,52 @@ class SliceDataTab(QtWidgets.QWidget):
             self.cmb_col_dim.addItem(label, dim)
         self.cmb_row_dim.blockSignals(False)
         self.cmb_col_dim.blockSignals(False)
-        self.cmb_row_dim.setEnabled(bool(dims))
-        self.cmb_col_dim.setEnabled(len(dims) >= 2)
+        has_dims = bool(dims)
         if dims:
             self.cmb_row_dim.setCurrentIndex(0)
         if len(dims) >= 2:
             self.cmb_col_dim.setCurrentIndex(1)
+        default_mode = "2d" if len(dims) >= 3 else "1d"
+        self.axis_group.setEnabled(has_dims)
+        self.cmb_output_mode.setEnabled(has_dims)
+        self._set_output_mode(default_mode)
+
+    def _set_output_mode(self, mode: str, *, force: bool = False):
+        if mode not in {"1d", "2d"}:
+            return
+        if not force and mode == self._output_mode:
+            self._apply_output_mode()
+            return
+        self._output_mode = mode
+        idx = self.cmb_output_mode.findData(mode)
+        if idx >= 0:
+            block = self.cmb_output_mode.blockSignals(True)
+            self.cmb_output_mode.setCurrentIndex(idx)
+            self.cmb_output_mode.blockSignals(block)
+        self._apply_output_mode()
+
+    def _on_output_mode_changed(self, _index: int):
+        mode = self.cmb_output_mode.currentData()
+        if not mode:
+            return
+        self._set_output_mode(str(mode))
+
+    def _apply_output_mode(self):
+        mode = self._output_mode
+        dims = list(self._current_dims)
+        has_dims = bool(dims)
+        self.axis_group.setEnabled(has_dims)
+        self.cmb_row_dim.setEnabled(has_dims)
+        if mode == "1d":
+            self.lbl_row_dim.setText("Profile axis")
+            self.lbl_col_dim.setVisible(False)
+            self.cmb_col_dim.setVisible(False)
+            self.cmb_col_dim.setEnabled(False)
+        else:
+            self.lbl_row_dim.setText("Rows")
+            self.lbl_col_dim.setVisible(True)
+            self.cmb_col_dim.setVisible(True)
+            self.cmb_col_dim.setEnabled(len(dims) >= 2)
         self._update_extra_dim_controls()
 
     def _on_axes_changed(self, _index: int):
@@ -938,14 +997,48 @@ class SliceDataTab(QtWidgets.QWidget):
 
     def _update_extra_dim_controls(self):
         row_dim = self.cmb_row_dim.currentData()
-        col_dim = self.cmb_col_dim.currentData()
-        dims = [dim for dim in self._current_dims if dim not in {row_dim, col_dim}]
+        col_dim = self.cmb_col_dim.currentData() if self._output_mode == "2d" else None
+        excluded = {dim for dim in (row_dim, col_dim) if dim}
+        dims = [dim for dim in self._current_dims if dim not in excluded]
         self._reset_extra_dim_controls(dims)
 
     def _generate_slices(self):
         if self._dataset is None or self._current_da is None or self._current_var is None:
             QtWidgets.QMessageBox.warning(self, "Generate slices", "Load a dataset and select a variable first.")
             return
+        if self._output_mode == "1d":
+            data_vars = self._build_1d_slices()
+        else:
+            data_vars = self._build_2d_slices()
+        if not data_vars:
+            return
+
+        try:
+            slice_dataset = xr.Dataset(data_vars)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Generate slices", f"Failed to build dataset: {exc}")
+            return
+
+        default_label = f"{self._current_var}_slices"
+        label, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Name sliced dataset",
+            "Dataset name:",
+            QtWidgets.QLineEdit.Normal,
+            default_label,
+        )
+        if not ok or not label.strip():
+            return
+        label = label.strip()
+        self.library.register_sliced_dataset(label, slice_dataset)
+        self.lbl_status.setText(
+            f"Registered {len(data_vars)} slice(s) as '{label}' in the Sliced Data tab."
+        )
+        log_action(
+            f"Generated {len(data_vars)} slice(s) from '{self._current_var}' into dataset '{label}'"
+        )
+
+    def _build_2d_slices(self) -> Optional[Dict[str, xr.DataArray]]:
         row_dim = self.cmb_row_dim.currentData()
         col_dim = self.cmb_col_dim.currentData()
         if not row_dim or not col_dim or row_dim == col_dim:
@@ -954,7 +1047,7 @@ class SliceDataTab(QtWidgets.QWidget):
                 "Generate slices",
                 "Please choose two different dimensions for rows and columns.",
             )
-            return
+            return None
         slice_dims = []
         for dim, control in self._dim_controls.items():
             indices = control.indices()
@@ -964,7 +1057,7 @@ class SliceDataTab(QtWidgets.QWidget):
                     "Generate slices",
                     f"No indices selected for dimension {dim}.",
                 )
-                return
+                return None
             slice_dims.append((dim, indices))
 
         data_vars: Dict[str, xr.DataArray] = {}
@@ -977,7 +1070,6 @@ class SliceDataTab(QtWidgets.QWidget):
                 if extra_coords:
                     arr = arr.drop_vars(extra_coords)
             except Exception:
-                # If drop_vars fails (older xarray), fall back to resetting coords
                 try:
                     arr = arr.reset_coords(drop=True)
                 except Exception:
@@ -1009,34 +1101,89 @@ class SliceDataTab(QtWidgets.QWidget):
                 suffix = "_" + "_".join(suffix_parts) if suffix_parts else ""
                 name = f"{self._current_var}{suffix}"
                 data_vars[name] = arr
+
         if not data_vars:
             QtWidgets.QMessageBox.information(self, "Generate slices", "No slices were produced.")
-            return
+            return None
+        return data_vars
 
-        try:
-            slice_dataset = xr.Dataset(data_vars)
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "Generate slices", f"Failed to build dataset: {exc}")
-            return
+    def _build_1d_slices(self) -> Optional[Dict[str, xr.DataArray]]:
+        line_dim = self.cmb_row_dim.currentData()
+        if not line_dim:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Generate slices",
+                "Select a dimension to use for the 1D profile.",
+            )
+            return None
+        slice_dims = []
+        for dim, control in self._dim_controls.items():
+            indices = control.indices()
+            if not indices:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Generate slices",
+                    f"No indices selected for dimension {dim}.",
+                )
+                return None
+            slice_dims.append((dim, indices))
 
-        default_label = f"{self._current_var}_slices"
-        label, ok = QtWidgets.QInputDialog.getText(
-            self,
-            "Name sliced dataset",
-            "Dataset name:",
-            QtWidgets.QLineEdit.Normal,
-            default_label,
-        )
-        if not ok or not label.strip():
-            return
-        label = label.strip()
-        self.library.register_sliced_dataset(label, slice_dataset)
-        self.lbl_status.setText(
-            f"Registered {len(data_vars)} slice(s) as '{label}' in the Sliced Data tab."
-        )
-        log_action(
-            f"Generated {len(data_vars)} slice(s) from '{self._current_var}' into dataset '{label}'"
-        )
+        data_vars: Dict[str, xr.DataArray] = {}
+
+        def _prepare_line(arr: xr.DataArray) -> xr.DataArray:
+            try:
+                arr = arr.transpose(line_dim)
+            except Exception:
+                pass
+            arr = arr.copy(deep=True)
+            try:
+                extra_coords = [name for name in arr.coords if name not in arr.dims]
+                if extra_coords:
+                    arr = arr.drop_vars(extra_coords)
+            except Exception:
+                try:
+                    arr = arr.reset_coords(drop=True)
+                except Exception:
+                    pass
+            return arr
+
+        if not slice_dims:
+            arr = _prepare_line(self._current_da)
+            arr = arr.copy(deep=True)
+            arr.name = self._current_var
+            arr.attrs["_source_var"] = self._current_var
+            arr.attrs["_slice_label"] = "Full selection"
+            data_vars[self._current_var] = arr
+        else:
+            combos = itertools.product(*[indices for _, indices in slice_dims])
+            for combo in combos:
+                selectors = {dim: idx for (dim, _), idx in zip(slice_dims, combo)}
+                arr = self._current_da.isel(**selectors)
+                arr = _prepare_line(arr)
+                if arr.ndim != 1:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Generate slices",
+                        "Unable to reduce selection to a 1D profile; adjust the slice ranges.",
+                    )
+                    return None
+                arr = arr.copy(deep=True)
+                arr.name = self._current_var
+                arr.attrs["_source_var"] = self._current_var
+                label_parts = [f"{dim}={idx}" for dim, idx in selectors.items()]
+                label_text = ", ".join(label_parts)
+                if label_text:
+                    arr.attrs["_slice_label"] = label_text
+                arr.attrs["_slice_selectors"] = selectors
+                suffix_parts = [f"{dim}{idx}" for dim, idx in selectors.items()]
+                suffix = "_" + "_".join(suffix_parts) if suffix_parts else ""
+                name = f"{self._current_var}{suffix}"
+                data_vars[name] = arr
+
+        if not data_vars:
+            QtWidgets.QMessageBox.information(self, "Generate slices", "No slices were produced.")
+            return None
+        return data_vars
 
     # ---------- drag & drop ----------
     def dragEnterEvent(self, ev: QtGui.QDragEnterEvent):
@@ -1092,7 +1239,7 @@ class SliceDataTab(QtWidgets.QWidget):
         QtWidgets.QMessageBox.information(
             self,
             "Unsupported item",
-            "Only datasets or variables with more than two dimensions can be dropped here.",
+            "Only datasets or variables with at least two dimensions can be dropped here.",
         )
         ev.ignore()
 
