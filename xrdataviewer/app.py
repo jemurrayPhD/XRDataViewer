@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+
+os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide2")
 
 import pyqtgraph as pg
 from PySide2 import QtCore, QtGui, QtWidgets
