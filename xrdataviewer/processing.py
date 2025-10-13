@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import json
 
@@ -334,6 +334,8 @@ class PipelineEditorDialog(QtWidgets.QDialog):
             self.steps_layout.addWidget(lbl)
             return
 
+        dims = self._current_dims()
+        ndim = None if dims is None else len(dims)
         for idx, step in enumerate(self.pipeline.steps, start=1):
             spec = get_processing_function(step.key)
             title = spec.label if spec else step.key
@@ -344,7 +346,8 @@ class PipelineEditorDialog(QtWidgets.QDialog):
                 lbl.setAlignment(QtCore.Qt.AlignLeft)
                 vbox.addWidget(lbl)
             else:
-                form = ParameterForm(spec.parameters)
+                parameters = spec.parameters_for_data(dims) if spec.supports_ndim(ndim) else spec.parameters_for_data(None)
+                form = ParameterForm(parameters)
                 form.set_values(step.params)
                 form.parametersChanged.connect(self._on_parameters_changed)
                 vbox.addWidget(form)
@@ -352,6 +355,12 @@ class PipelineEditorDialog(QtWidgets.QDialog):
             self.steps_layout.addWidget(box)
         self.steps_layout.addStretch(1)
         self._apply_pipeline()
+
+    def _current_dims(self) -> Optional[Tuple[str, ...]]:
+        if self._raw_data is None:
+            return None
+        ndim = int(np.ndim(self._raw_data))
+        return tuple(f"axis{i}" for i in range(ndim))
 
     def _update_steps_from_forms(self):
         for step, form in self._forms:
@@ -775,7 +784,7 @@ class PipelineBuilderDialog(QtWidgets.QDialog):
         self.param_stack.addWidget(QtWidgets.QWidget())
         for spec in list_processing_functions():
             self.cmb_function.addItem(spec.label, spec.key)
-            form = ParameterForm(spec.parameters)
+            form = ParameterForm(spec.parameters_for_data(None))
             form.parametersChanged.connect(self._on_function_params_changed)
             idx = self.param_stack.addWidget(form)
             self._stack_indices[spec.key] = idx
@@ -1183,9 +1192,17 @@ class ProcessingDockWidget(QtWidgets.QWidget):
         self._select_pipeline(pipeline.name)
 
 class ProcessingSelectionDialog(QtWidgets.QDialog):
-    def __init__(self, manager: Optional[ProcessingManager], parent=None):
+    def __init__(
+        self,
+        manager: Optional[ProcessingManager],
+        parent=None,
+        *,
+        dims: Optional[Sequence[str]] = None,
+    ):
         super().__init__(parent)
         self.manager = manager
+        self._dims: Optional[Tuple[str, ...]] = tuple(dims) if dims else None
+        self._ndim: Optional[int] = len(self._dims) if self._dims is not None else None
         self.setWindowTitle("Apply Processing")
         self.resize(420, 360)
 
@@ -1207,8 +1224,8 @@ class ProcessingSelectionDialog(QtWidgets.QDialog):
         self._none_index = self.stack.addWidget(none_widget)
         self._add_mode_item("No processing", {"type": "none", "stack": self._none_index})
 
-        for spec in list_processing_functions():
-            form = ParameterForm(spec.parameters)
+        for spec in list_processing_functions(self._ndim):
+            form = ParameterForm(spec.parameters_for_data(self._dims))
             idx = self.stack.addWidget(form)
             self._function_forms[spec.key] = form
             self._add_mode_item(

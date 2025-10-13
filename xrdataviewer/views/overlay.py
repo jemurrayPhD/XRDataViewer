@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
@@ -552,24 +552,12 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.param_stack.setSizePolicy(
             QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         )
-        self.param_stack.addWidget(QtWidgets.QWidget())  # None placeholder
         self._function_forms: Dict[str, ParameterForm] = {}
         self._function_indices: Dict[str, int] = {}
-        for spec in list_processing_functions():
-            form = ParameterForm(spec.parameters)
-            form.parametersChanged.connect(self._on_processing_params_changed)
-            idx = self.param_stack.addWidget(form)
-            self._function_forms[spec.key] = form
-            self._function_indices[spec.key] = idx
-        summary_container = QtWidgets.QWidget()
-        summary_layout = QtWidgets.QVBoxLayout(summary_container)
-        summary_layout.setContentsMargins(0, 0, 0, 0)
-        summary_layout.setSpacing(0)
-        self.lbl_pipeline_summary = QtWidgets.QLabel("Select a pipeline to view steps.")
-        self.lbl_pipeline_summary.setWordWrap(True)
-        self.lbl_pipeline_summary.setStyleSheet("color: #666;")
-        summary_layout.addWidget(self.lbl_pipeline_summary)
-        self._pipeline_summary_index = self.param_stack.addWidget(summary_container)
+        self._none_index: int = 0
+        self._pipeline_summary_index: int = 0
+        self.lbl_pipeline_summary = QtWidgets.QLabel()
+        self._rebuild_forms_for_dims()
 
         proc_layout.addWidget(self.param_stack)
         self.btn_apply = QtWidgets.QPushButton("Apply")
@@ -677,17 +665,57 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
                     return idx
         return -1
 
+    def _current_dims(self) -> Tuple[str, ...]:
+        if self.layer.is_line_layer():
+            return ("line",)
+        data = getattr(self.layer, "base_data", None)
+        if data is None:
+            return ()
+        return tuple(f"axis{i}" for i in range(np.ndim(data)))
+
+    def _rebuild_forms_for_dims(self):
+        while self.param_stack.count():
+            widget = self.param_stack.widget(0)
+            self.param_stack.removeWidget(widget)
+            widget.deleteLater()
+        self._function_forms.clear()
+        self._function_indices.clear()
+        none_widget = QtWidgets.QWidget()
+        self._none_index = self.param_stack.addWidget(none_widget)
+        dims = self._current_dims()
+        ndim = len(dims) if dims else None
+        for spec in list_processing_functions(ndim):
+            form = ParameterForm(spec.parameters_for_data(dims))
+            form.parametersChanged.connect(self._on_processing_params_changed)
+            idx = self.param_stack.addWidget(form)
+            self._function_forms[spec.key] = form
+            self._function_indices[spec.key] = idx
+        summary_container = QtWidgets.QWidget()
+        summary_layout = QtWidgets.QVBoxLayout(summary_container)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setSpacing(0)
+        self.lbl_pipeline_summary = QtWidgets.QLabel("Select a pipeline to view steps.")
+        self.lbl_pipeline_summary.setWordWrap(True)
+        self.lbl_pipeline_summary.setStyleSheet("color: #666;")
+        summary_layout.addWidget(self.lbl_pipeline_summary)
+        self._pipeline_summary_index = self.param_stack.addWidget(summary_container)
+
     def _refresh_processing_options(self):
         current = self._current_processing_data()
+        self._rebuild_forms_for_dims()
+        dims = self._current_dims()
+        ndim = len(dims) if dims else None
         block = self.cmb_processing.blockSignals(True)
         self.cmb_processing.clear()
         self.cmb_processing.addItem("None", {"type": "none"})
-        for spec in list_processing_functions():
+        for spec in list_processing_functions(ndim):
             self.cmb_processing.addItem(spec.label, {"type": "function", "key": spec.key})
         if self.manager:
             for name in self.manager.pipeline_names():
                 self.cmb_processing.addItem(f"Pipeline: {name}", {"type": "pipeline", "name": name})
         idx = self._find_data_index(current)
+        if idx < 0:
+            idx = self._find_data_index({"type": "none"})
         if idx < 0:
             idx = 0
         self.cmb_processing.setCurrentIndex(idx)
@@ -783,7 +811,7 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
     def _on_processing_mode_changed(self):
         data = self._current_processing_data()
         if data.get("type") == "function":
-            idx = self._function_indices.get(data.get("key", ""), 0)
+            idx = self._function_indices.get(data.get("key", ""), self._none_index)
             try:
                 self.param_stack.setCurrentIndex(idx)
             except Exception:
@@ -796,7 +824,7 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
                 pass
         else:
             try:
-                self.param_stack.setCurrentIndex(0)
+                self.param_stack.setCurrentIndex(self._none_index)
             except Exception:
                 pass
         self._apply_processing()
@@ -847,12 +875,21 @@ class OverlayView(QtWidgets.QWidget):
         layout.setSpacing(6)
 
         toolbar = QtWidgets.QHBoxLayout()
+        toolbar.setSpacing(10)
+
+        def _make_group(title: str, widgets: Iterable[QtWidgets.QWidget]) -> QtWidgets.QGroupBox:
+            box = QtWidgets.QGroupBox(title)
+            layout = QtWidgets.QHBoxLayout(box)
+            layout.setContentsMargins(8, 6, 8, 6)
+            layout.setSpacing(6)
+            for widget in widgets:
+                layout.addWidget(widget)
+            return box
+
         self.btn_auto_view = QtWidgets.QPushButton("Auto view")
         self.btn_auto_view.clicked.connect(self.auto_view_range)
-        toolbar.addWidget(self.btn_auto_view)
         self.btn_clear = QtWidgets.QPushButton("Clear layers")
         self.btn_clear.clicked.connect(self.clear_layers)
-        toolbar.addWidget(self.btn_clear)
         self.btn_export = QtWidgets.QToolButton()
         self.btn_export.setText("Export")
         self.btn_export.setPopupMode(QtWidgets.QToolButton.InstantPopup)
@@ -865,10 +902,13 @@ class OverlayView(QtWidgets.QWidget):
         act_layout = export_menu.addAction("Save overlay layout…")
         act_layout.triggered.connect(self._export_full_layout)
         self.btn_export.setMenu(export_menu)
-        toolbar.addWidget(self.btn_export)
         self.btn_annotations = QtWidgets.QPushButton("Set annotations…")
         self.btn_annotations.clicked.connect(self._open_annotation_dialog)
-        toolbar.addWidget(self.btn_annotations)
+
+        toolbar.addWidget(_make_group("Layers", (self.btn_clear,)))
+        toolbar.addWidget(_make_group("Scaling", (self.btn_auto_view,)))
+        toolbar.addWidget(_make_group("Style", (self.btn_annotations,)))
+        toolbar.addWidget(_make_group("Export", (self.btn_export,)))
         toolbar.addStretch(1)
         layout.addLayout(toolbar)
 
