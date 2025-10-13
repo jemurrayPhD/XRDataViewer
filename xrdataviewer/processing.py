@@ -5,6 +5,8 @@ from functools import partial
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
+import json
+
 import numpy as np
 import pyqtgraph as pg
 from PySide2 import QtCore, QtGui, QtWidgets
