@@ -1350,6 +1350,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         if self._jupyter_manager:
             self._jupyter_manager.urlReady.connect(self._on_jupyter_url_ready)
             self._jupyter_manager.failed.connect(self._on_jupyter_failed)
+            self._jupyter_manager.message.connect(log_action)
             self._jupyter_manager.message.connect(self._on_jupyter_message)
         else:
             self.btn_run_diagnostics.setEnabled(False)
