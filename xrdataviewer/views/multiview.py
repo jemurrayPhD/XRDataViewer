@@ -13,9 +13,18 @@ from xr_coords import guess_phys_coords
 from xr_plot_widget import CentralPlotWidget, PlotAnnotationConfig, apply_plotitem_annotation, plotitem_annotation_state
 
 from ..annotations import PlotAnnotationDialog
+from ..datasets import (
+    DataSetRef,
+    HighDimVarRef,
+    MemoryDatasetRef,
+    MemoryDatasetRegistry,
+    MemorySliceRef,
+    MemoryVarRef,
+    VarRef,
+)
 from ..processing import ProcessingManager, ProcessingSelectionDialog
 from ..preferences import PreferencesManager
-from ..utils import _ensure_extension, _sanitize_filename, _save_snapshot
+from ..utils import _ensure_extension, _sanitize_filename, _save_snapshot, open_dataset
 
 
 class ViewerFrame(QtWidgets.QFrame):
