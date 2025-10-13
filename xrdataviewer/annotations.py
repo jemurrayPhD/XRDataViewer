@@ -50,9 +50,14 @@ class ColorButton(QtWidgets.QPushButton):
         return QtGui.QColor(value) if value is not None else QtGui.QColor()
 
     def _choose_color(self):
-        chosen = QtWidgets.QColorDialog.getColor(self._color, self, "Select background color")
-        if chosen.isValid():
-            self.setColor(chosen)
+        dialog = QtWidgets.QColorDialog(self._color, self)
+        dialog.setOption(QtWidgets.QColorDialog.DontUseNativeDialog, True)
+        dialog.setOption(QtWidgets.QColorDialog.ShowAlphaChannel, True)
+        dialog.setWindowTitle("Select color")
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            chosen = dialog.selectedColor()
+            if chosen.isValid():
+                self.setColor(chosen)
 
     def _update_style(self):
         self.setStyleSheet(
