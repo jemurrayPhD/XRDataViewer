@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 import xarray as xr
@@ -883,7 +883,7 @@ class MultiViewGrid(QtWidgets.QWidget):
         )
         if not ok:
             return
-            name = str(item).strip()
+        name = str(item).strip()
         for fr in frames:
             fr.plot_variable(name)
 

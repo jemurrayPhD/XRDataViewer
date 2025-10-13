@@ -22,6 +22,7 @@ from app_logging import log_action
 from xr_coords import guess_phys_coords
 from xr_plot_widget import CentralPlotWidget, ScientificAxisItem
 
+from ..datasets import DataSetRef, HighDimVarRef, MemoryDatasetRef
 from ..preferences import PreferencesManager
 from ..processing import ProcessingManager, ProcessingSelectionDialog
 from ..utils import _ensure_extension, _nan_aware_reducer, _sanitize_filename, _save_snapshot

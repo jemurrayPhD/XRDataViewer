@@ -11,6 +11,12 @@ from app_logging import log_action
 from xr_plot_widget import PlotAnnotationConfig, apply_plotitem_annotation, plotitem_annotation_state
 
 from ..annotations import PlotAnnotationDialog
+from ..datasets import (
+    MemoryDatasetRegistry,
+    MemorySliceRef,
+    MemoryVarRef,
+    VarRef,
+)
 from ..processing import ProcessingManager
 from ..preferences import PreferencesManager
 from ..utils import _ensure_extension, _sanitize_filename, _save_snapshot
