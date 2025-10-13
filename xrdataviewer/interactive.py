@@ -816,6 +816,11 @@ class InteractivePreviewWidget(QtWidgets.QWidget):
         x_vals = np.asarray(list(x), dtype=float)
         y_vals = np.asarray(list(y), dtype=float)
         self._plot_widget.plot(x_vals, y_vals, pen=pg.mkPen("#1d72b8", width=2))
+        try:
+            self._plot_widget.enableAutoRange(x=True, y=True)
+            self._plot_widget.autoRange()
+        except Exception:
+            pass
         self._plot_widget.setLabel("bottom", xlabel)
         self._plot_widget.setLabel("left", ylabel)
         self._plot_widget.setTitle(title or "")

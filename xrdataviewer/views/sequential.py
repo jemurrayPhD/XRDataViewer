@@ -141,13 +141,15 @@ class SequentialRoiWindow(QtWidgets.QWidget):
         self.profile_plot.setLabel("bottom", xlabel)
         self.profile_plot.setLabel("left", ylabel)
         self.profile_curve.setData(xs, ys)
-        self.profile_plot.enableAutoRange()
+        self.profile_plot.enableAutoRange(x=True, y=True)
+        self.profile_plot.autoRange()
 
     def update_slice_curve(self, xs: List[float], ys: List[float], xlabel: str, ylabel: str):
         self.slice_plot.setLabel("bottom", xlabel)
         self.slice_plot.setLabel("left", ylabel)
         self.slice_curve.setData(xs, ys)
-        self.slice_plot.enableAutoRange()
+        self.slice_plot.enableAutoRange(x=True, y=True)
+        self.slice_plot.autoRange()
 
     def _emit_axes_changed(self):
         if self._updating:

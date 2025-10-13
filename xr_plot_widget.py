@@ -580,7 +580,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
             "left": ScientificAxisItem("left"),
         }
         self.plot = self.glw.addPlot(row=0, col=0, axisItems=axis_items)
-        self.plot.invertY(True)
+        self.plot.invertY(False)
         self.plot.setMenuEnabled(False)
         self.plot.setLabel("left", "Y")
         self.plot.setLabel("bottom", "X")
@@ -991,42 +991,43 @@ class CentralPlotWidget(QtWidgets.QWidget):
         marker_pen: Optional[QtGui.QPen] = None
         marker_brush: Optional[QtGui.QBrush] = None
         marker_size: Optional[int] = None
+        symbol_kwargs: Dict[str, object] = {}
         if style.markers and not step_mode:
+            key = str(style.marker_style).strip().lower()
             symbol_map = {
                 "o": "o",
+                "circle": "o",
+                "●": "o",
+                "•": "o",
                 "s": "s",
+                "square": "s",
+                "□": "s",
                 "t": "t",
+                "triangle": "t",
+                "triangleup": "t",
+                "^": "t",
                 "d": "d",
+                "diamond": "d",
                 "+": "+",
+                "plus": "+",
                 "x": "x",
+                "cross": "x",
             }
-            symbol = symbol_map.get(style.marker_style, "o")
+            symbol = symbol_map.get(key, "o")
             marker_color = QtGui.QColor(color)
             marker_pen = QtGui.QPen(marker_color)
             marker_pen.setWidthF(max(1.0, width * 0.75))
             marker_brush = QtGui.QBrush(marker_color)
             marker_size = max(1, int(style.marker_size))
+            symbol_kwargs["symbol"] = symbol
+            symbol_kwargs["symbolBrush"] = marker_brush
+            symbol_kwargs["symbolPen"] = marker_pen
+            symbol_kwargs["symbolSize"] = marker_size
+        else:
+            symbol_kwargs["symbol"] = None
 
         try:
-            self._line_item.setData(x_plot, y_plot, pen=pen, **kwargs)
-            if style.markers and symbol is not None:
-                try:
-                    self._line_item.setSymbol(symbol)
-                    if marker_brush is not None:
-                        self._line_item.setSymbolBrush(marker_brush)
-                    if marker_pen is not None:
-                        self._line_item.setSymbolPen(marker_pen)
-                    if marker_size is not None:
-                        self._line_item.setSymbolSize(marker_size)
-                except Exception:
-                    pass
-            else:
-                try:
-                    self._line_item.setSymbol(None)
-                    self._line_item.setSymbolBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
-                    self._line_item.setSymbolPen(QtGui.QPen(QtCore.Qt.NoPen))
-                except Exception:
-                    pass
+            self._line_item.setData(x_plot, y_plot, pen=pen, **kwargs, **symbol_kwargs)
             self._line_item.setVisible(True)
             self.img_item.setVisible(False)
         except Exception:
@@ -1042,6 +1043,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
         if autorange:
             try:
                 self.plot.enableAutoRange(x=True, y=True)
+                self.plot.autoRange()
             except Exception:
                 pass
 

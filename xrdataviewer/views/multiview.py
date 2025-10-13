@@ -73,6 +73,12 @@ class ViewerFrame(QtWidgets.QFrame):
         # Header
         hdr = QtWidgets.QFrame(); hl = QtWidgets.QHBoxLayout(hdr); hl.setContentsMargins(6,3,6,3)
         self.lbl = QtWidgets.QLabel(title); hl.addWidget(self.lbl, 1)
+        self._line_style_btn = QtWidgets.QToolButton()
+        self._line_style_btn.setText("Style…")
+        self._line_style_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self._line_style_btn.clicked.connect(self._open_line_style_dialog)
+        self._line_style_btn.setVisible(False)
+        hl.addWidget(self._line_style_btn, 0)
         self._crosshair_btn = QtWidgets.QToolButton()
         self._crosshair_btn.setText("Crosshair")
         self._crosshair_btn.setCheckable(True)
@@ -143,6 +149,7 @@ class ViewerFrame(QtWidgets.QFrame):
         except Exception:
             pass
         self._update_histogram_visibility()
+        self._update_line_style_button()
 
     def _dataset_display_name(self) -> str:
         if self._dataset_path is not None:
@@ -208,6 +215,20 @@ class ViewerFrame(QtWidgets.QFrame):
             self.viewer.set_line_style(self._line_style, refresh=refresh)
         except Exception:
             pass
+
+    def _open_line_style_dialog(self):
+        dialog = LineStyleDialog(self, initial=self.line_style_config())
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        style = dialog.line_style()
+        if style is None:
+            return
+        self.set_line_style_config(style, refresh=True)
+        try:
+            name = self._dataset_display_name()
+        except Exception:
+            name = "viewer"
+        log_action(f"Updated line style for {name}")
 
     def is_line_display(self) -> bool:
         return self._display_mode == "line"
@@ -491,6 +512,7 @@ class ViewerFrame(QtWidgets.QFrame):
                 self.display_mode_changed.emit("line")
             except Exception:
                 pass
+            self._update_line_style_button()
             return
 
         if self._display_mode == "warped" and "X" in self._coords and "Y" in self._coords:
@@ -505,6 +527,7 @@ class ViewerFrame(QtWidgets.QFrame):
             self.display_mode_changed.emit(self._display_mode)
         except Exception:
             pass
+        self._update_line_style_button()
 
     def set_histogram_visible(self, on: bool):
         self._hist_master_enabled = bool(on)
@@ -598,8 +621,20 @@ class ViewerFrame(QtWidgets.QFrame):
             self.viewer.clear_mirrored_crosshair()
         except Exception:
             pass
+        self._update_line_style_button()
         if not preserve_header:
             self._set_header_text(None)
+
+    def _update_line_style_button(self):
+        try:
+            visible = self._display_mode == "line"
+        except Exception:
+            visible = False
+        btn = getattr(self, "_line_style_btn", None)
+        if not isinstance(btn, QtWidgets.QToolButton):
+            return
+        btn.setVisible(visible)
+        btn.setEnabled(visible)
 
     def annotation_defaults(self) -> PlotAnnotationConfig:
         return self.viewer.annotation_defaults()
