@@ -380,7 +380,8 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             label.setWordWrap(True)
             column_layout.addWidget(label)
 
-            widget = VolumeAlphaCurveWidget(default_value=0.25)
+            default_value = 0.75 if key == "value" else 1.0
+            widget = VolumeAlphaCurveWidget(default_value=default_value)
             widget.setMinimumWidth(150)
             widget.setSizePolicy(
                 QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)

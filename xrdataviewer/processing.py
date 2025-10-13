@@ -741,17 +741,27 @@ class ProcessingDockContainer(QtWidgets.QWidget):
             self.btn_toggle.setEnabled(True)
             self._content_frame.setVisible(self.btn_toggle.isChecked())
 
-class ProcessingDockWidget(QtWidgets.QWidget):
-    def __init__(self, manager: ProcessingManager, parent=None):
+
+class PipelineBuilderDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        manager: ProcessingManager,
+        pipeline: Optional[ProcessingPipeline] = None,
+        parent: Optional[QtWidgets.QWidget] = None,
+    ):
         super().__init__(parent)
         self.manager = manager
         self.steps: List[ProcessingStep] = []
+        self._stack_indices: Dict[str, int] = {}
+        self._result: Optional[ProcessingPipeline] = None
 
-        outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(6, 6, 6, 6)
-        outer.setSpacing(8)
+        self.setWindowTitle("Pipeline builder")
+        self.resize(520, 640)
 
-        # --- Step builder ---
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
         builder = QtWidgets.QGroupBox("Build step")
         builder_layout = QtWidgets.QVBoxLayout(builder)
         builder_layout.setContentsMargins(6, 6, 6, 6)
@@ -761,7 +771,6 @@ class ProcessingDockWidget(QtWidgets.QWidget):
         func_row.addWidget(QtWidgets.QLabel("Function:"))
         self.cmb_function = QtWidgets.QComboBox()
         self.cmb_function.addItem("Select…", "")
-        self._stack_indices: Dict[str, int] = {}
         self.param_stack = QtWidgets.QStackedWidget()
         self.param_stack.addWidget(QtWidgets.QWidget())
         for spec in list_processing_functions():
@@ -784,12 +793,11 @@ class ProcessingDockWidget(QtWidgets.QWidget):
         btn_row.addWidget(self.btn_update_step)
         builder_layout.addLayout(btn_row)
 
-        outer.addWidget(builder)
+        layout.addWidget(builder)
 
-        # --- Steps list ---
         self.list_steps = QtWidgets.QListWidget()
         self.list_steps.currentRowChanged.connect(self._on_step_selected)
-        outer.addWidget(self.list_steps, 1)
+        layout.addWidget(self.list_steps, 1)
 
         step_btns = QtWidgets.QHBoxLayout()
         self.btn_move_up = QtWidgets.QPushButton("Move up")
@@ -804,58 +812,37 @@ class ProcessingDockWidget(QtWidgets.QWidget):
         self.btn_clear_steps = QtWidgets.QPushButton("Clear")
         self.btn_clear_steps.clicked.connect(self._clear_steps)
         step_btns.addWidget(self.btn_clear_steps)
-        outer.addLayout(step_btns)
+        layout.addLayout(step_btns)
 
-        # --- Pipeline info ---
         name_row = QtWidgets.QHBoxLayout()
         name_row.addWidget(QtWidgets.QLabel("Pipeline name:"))
         self.edit_name = QtWidgets.QLineEdit()
         self.edit_name.textChanged.connect(lambda _: self._update_buttons())
         name_row.addWidget(self.edit_name, 1)
-        outer.addLayout(name_row)
+        layout.addLayout(name_row)
 
-        save_row = QtWidgets.QHBoxLayout()
-        self.btn_save_pipeline = QtWidgets.QPushButton("Save pipeline")
-        self.btn_save_pipeline.clicked.connect(self._save_pipeline)
-        save_row.addWidget(self.btn_save_pipeline)
+        action_row = QtWidgets.QHBoxLayout()
         self.btn_interactive = QtWidgets.QPushButton("Interactive edit…")
         self.btn_interactive.clicked.connect(self._interactive_edit)
-        save_row.addWidget(self.btn_interactive)
-        outer.addLayout(save_row)
+        action_row.addWidget(self.btn_interactive)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
 
-        # --- Saved pipelines ---
-        saved_box = QtWidgets.QGroupBox("Saved pipelines")
-        saved_layout = QtWidgets.QVBoxLayout(saved_box)
-        saved_layout.setContentsMargins(6, 6, 6, 6)
-        saved_layout.setSpacing(6)
-        self.list_saved = QtWidgets.QListWidget()
-        self.list_saved.itemSelectionChanged.connect(self._update_buttons)
-        self.list_saved.itemDoubleClicked.connect(lambda _: self._load_saved())
-        saved_layout.addWidget(self.list_saved)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
-        saved_btns = QtWidgets.QHBoxLayout()
-        self.btn_load_saved = QtWidgets.QPushButton("Load")
-        self.btn_load_saved.clicked.connect(self._load_saved)
-        saved_btns.addWidget(self.btn_load_saved)
-        self.btn_delete_saved = QtWidgets.QPushButton("Delete")
-        self.btn_delete_saved.clicked.connect(self._delete_saved)
-        saved_btns.addWidget(self.btn_delete_saved)
-        self.btn_export_saved = QtWidgets.QPushButton("Export…")
-        self.btn_export_saved.clicked.connect(self._export_saved)
-        saved_btns.addWidget(self.btn_export_saved)
-        self.btn_import_saved = QtWidgets.QPushButton("Import…")
-        self.btn_import_saved.clicked.connect(self._import_saved)
-        saved_btns.addWidget(self.btn_import_saved)
-        saved_layout.addLayout(saved_btns)
-
-        outer.addWidget(saved_box)
-        outer.addStretch(1)
-
-        self.manager.pipelines_changed.connect(self._refresh_saved)
-        self._refresh_saved()
+        initial = pipeline or ProcessingPipeline(name="", steps=[])
+        self.edit_name.setText(initial.name)
+        self.steps = [ProcessingStep(step.key, dict(step.params)) for step in initial.steps]
+        self._refresh_step_list()
+        if self.steps:
+            self.list_steps.setCurrentRow(0)
         self._update_buttons()
 
-    # ----- helpers -----
     def _current_spec(self):
         key = self.cmb_function.currentData()
         if not key:
@@ -874,12 +861,6 @@ class ProcessingDockWidget(QtWidgets.QWidget):
 
     def _selected_step_index(self) -> int:
         return self.list_steps.currentRow()
-
-    def _selected_saved_name(self) -> Optional[str]:
-        items = self.list_saved.selectedItems()
-        if not items:
-            return None
-        return str(items[0].data(QtCore.Qt.UserRole) or items[0].text())
 
     def _refresh_step_list(self):
         self.list_steps.clear()
@@ -903,9 +884,11 @@ class ProcessingDockWidget(QtWidgets.QWidget):
 
     def _build_pipeline(self) -> ProcessingPipeline:
         name = self.edit_name.text().strip() or "Untitled"
-        return ProcessingPipeline(name=name, steps=[ProcessingStep(step.key, dict(step.params)) for step in self.steps])
+        return ProcessingPipeline(
+            name=name,
+            steps=[ProcessingStep(step.key, dict(step.params)) for step in self.steps],
+        )
 
-    # ----- button state -----
     def _update_buttons(self):
         idx = self._selected_step_index()
         has_selection = 0 <= idx < len(self.steps)
@@ -916,13 +899,7 @@ class ProcessingDockWidget(QtWidgets.QWidget):
         self.btn_remove_step.setEnabled(has_selection)
         self.btn_clear_steps.setEnabled(has_steps)
         self.btn_interactive.setEnabled(has_steps)
-        self.btn_save_pipeline.setEnabled(has_steps and bool(self.edit_name.text().strip()))
-        has_saved = self._selected_saved_name() is not None
-        self.btn_load_saved.setEnabled(has_saved)
-        self.btn_delete_saved.setEnabled(has_saved)
-        self.btn_export_saved.setEnabled(has_saved)
 
-    # ----- slots -----
     def _on_function_changed(self):
         key = self.cmb_function.currentData()
         if key and key in self._stack_indices:
@@ -983,40 +960,126 @@ class ProcessingDockWidget(QtWidgets.QWidget):
             self.list_steps.setCurrentRow(min(idx, len(self.steps) - 1))
 
     def _clear_steps(self):
-        if QtWidgets.QMessageBox.question(self, "Clear steps", "Remove all steps from the pipeline?") != QtWidgets.QMessageBox.Yes:
+        if not self.steps:
+            return
+        if (
+            QtWidgets.QMessageBox.question(
+                self, "Clear steps", "Remove all steps from the pipeline?"
+            )
+            != QtWidgets.QMessageBox.Yes
+        ):
             return
         self.steps.clear()
         self._refresh_step_list()
-
-    def _save_pipeline(self):
-        if not self.steps:
-            return
-        name = self.edit_name.text().strip()
-        if not name:
-            QtWidgets.QMessageBox.warning(self, "Missing name", "Please enter a name for the pipeline.")
-            return
-        pipeline = ProcessingPipeline(name=name, steps=[ProcessingStep(step.key, dict(step.params)) for step in self.steps])
-        try:
-            self.manager.save_pipeline(pipeline)
-        except ValueError as e:
-            QtWidgets.QMessageBox.warning(self, "Save failed", str(e))
-            return
-        self._refresh_saved()
-        items = self.list_saved.findItems(name, QtCore.Qt.MatchExactly)
-        if items:
-            self.list_saved.setCurrentItem(items[0])
-        QtWidgets.QMessageBox.information(self, "Pipeline saved", f"Pipeline '{name}' saved.")
-        log_action(f"Saved processing pipeline '{name}' with {len(self.steps)} step(s)")
 
     def _interactive_edit(self):
         if not self.steps:
             return
         pipeline = self._build_pipeline()
         dlg = PipelineEditorDialog(self.manager, pipeline, self)
-        dlg.exec_()
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
         updated = dlg.result_pipeline()
+        self.edit_name.setText(updated.name)
         self.steps = [ProcessingStep(step.key, dict(step.params)) for step in updated.steps]
         self._refresh_step_list()
+        if self.steps:
+            self.list_steps.setCurrentRow(0)
+
+    def accept(self):
+        if not self.steps:
+            QtWidgets.QMessageBox.warning(
+                self, "Missing steps", "Add at least one processing step before saving."
+            )
+            return
+        name = self.edit_name.text().strip()
+        if not name:
+            QtWidgets.QMessageBox.warning(
+                self, "Missing name", "Please enter a name for the pipeline."
+            )
+            return
+        pipeline = ProcessingPipeline(
+            name=name,
+            steps=[ProcessingStep(step.key, dict(step.params)) for step in self.steps],
+        )
+        try:
+            self.manager.save_pipeline(pipeline)
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, "Save failed", str(e))
+            return
+        self._result = pipeline
+        log_action(f"Saved processing pipeline '{pipeline.name}' with {len(self.steps)} step(s)")
+        super().accept()
+
+    def result_pipeline(self) -> Optional[ProcessingPipeline]:
+        return self._result
+
+
+class ProcessingDockWidget(QtWidgets.QWidget):
+    def __init__(self, manager: ProcessingManager, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setSpacing(8)
+
+        info = QtWidgets.QLabel(
+            "Pipelines can be created or edited in a dedicated dialog."
+        )
+        info.setWordWrap(True)
+        outer.addWidget(info)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_new_pipeline = QtWidgets.QPushButton("New pipeline…")
+        self.btn_new_pipeline.clicked.connect(self._create_pipeline)
+        btn_row.addWidget(self.btn_new_pipeline)
+        self.btn_edit_pipeline = QtWidgets.QPushButton("Edit selected…")
+        self.btn_edit_pipeline.clicked.connect(self._edit_selected)
+        btn_row.addWidget(self.btn_edit_pipeline)
+        btn_row.addStretch(1)
+        outer.addLayout(btn_row)
+
+        saved_box = QtWidgets.QGroupBox("Saved pipelines")
+        saved_layout = QtWidgets.QVBoxLayout(saved_box)
+        saved_layout.setContentsMargins(6, 6, 6, 6)
+        saved_layout.setSpacing(6)
+
+        self.list_saved = QtWidgets.QListWidget()
+        self.list_saved.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.list_saved.itemSelectionChanged.connect(self._update_buttons)
+        saved_layout.addWidget(self.list_saved, 1)
+
+        saved_btns = QtWidgets.QHBoxLayout()
+        self.btn_delete_saved = QtWidgets.QPushButton("Delete")
+        self.btn_delete_saved.clicked.connect(self._delete_saved)
+        saved_btns.addWidget(self.btn_delete_saved)
+        self.btn_export_saved = QtWidgets.QPushButton("Export…")
+        self.btn_export_saved.clicked.connect(self._export_saved)
+        saved_btns.addWidget(self.btn_export_saved)
+        self.btn_import_saved = QtWidgets.QPushButton("Import…")
+        self.btn_import_saved.clicked.connect(self._import_saved)
+        saved_btns.addWidget(self.btn_import_saved)
+        saved_layout.addLayout(saved_btns)
+
+        outer.addWidget(saved_box)
+        outer.addStretch(1)
+
+        self.manager.pipelines_changed.connect(self._refresh_saved)
+        self._refresh_saved()
+        self._update_buttons()
+
+    def _selected_saved_name(self) -> Optional[str]:
+        items = self.list_saved.selectedItems()
+        if not items:
+            return None
+        return str(items[0].data(QtCore.Qt.UserRole) or items[0].text())
+
+    def _update_buttons(self):
+        has_selection = self._selected_saved_name() is not None
+        self.btn_edit_pipeline.setEnabled(has_selection)
+        self.btn_delete_saved.setEnabled(has_selection)
+        self.btn_export_saved.setEnabled(has_selection)
 
     def _refresh_saved(self):
         selected = self._selected_saved_name()
@@ -1033,28 +1096,48 @@ class ProcessingDockWidget(QtWidgets.QWidget):
         self.list_saved.blockSignals(False)
         self._update_buttons()
 
-    def _load_saved(self):
+    def _create_pipeline(self):
+        self._open_builder(None)
+
+    def _edit_selected(self):
         name = self._selected_saved_name()
         if not name:
             return
         pipeline = self.manager.get_pipeline(name)
         if pipeline is None:
             return
-        self.edit_name.setText(pipeline.name)
-        self.steps = [ProcessingStep(step.key, dict(step.params)) for step in pipeline.steps]
-        self._refresh_step_list()
-        if self.steps:
-            self.list_steps.setCurrentRow(0)
+        self._open_builder(pipeline)
+
+    def _open_builder(self, pipeline: Optional[ProcessingPipeline]):
+        dialog = PipelineBuilderDialog(self.manager, pipeline, self)
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            result = dialog.result_pipeline()
+            self._refresh_saved()
+            if result:
+                self._select_pipeline(result.name)
+
+    def _select_pipeline(self, name: str):
+        for row in range(self.list_saved.count()):
+            item = self.list_saved.item(row)
+            if item and item.text() == name:
+                self.list_saved.setCurrentRow(row)
+                break
+        self._update_buttons()
 
     def _delete_saved(self):
         name = self._selected_saved_name()
         if not name:
             return
-        if QtWidgets.QMessageBox.question(self, "Delete pipeline", f"Delete pipeline '{name}'?") != QtWidgets.QMessageBox.Yes:
+        if (
+            QtWidgets.QMessageBox.question(
+                self, "Delete pipeline", f"Delete pipeline '{name}'?"
+            )
+            != QtWidgets.QMessageBox.Yes
+        ):
             return
         self.manager.delete_pipeline(name)
-        self._refresh_saved()
         log_action(f"Deleted processing pipeline '{name}'")
+        self._refresh_saved()
 
     def _export_saved(self):
         name = self._selected_saved_name()
@@ -1063,21 +1146,31 @@ class ProcessingDockWidget(QtWidgets.QWidget):
         pipeline = self.manager.get_pipeline(name)
         if pipeline is None:
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export pipeline", f"{name}.json", "Pipeline JSON (*.json);;All files (*)")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export pipeline",
+            f"{name}.json",
+            "Pipeline JSON (*.json);;All files (*)",
+        )
         if not path:
             return
         try:
-            with open(path, "w", encoding="utf-8") as fh:
+            with open(path, 'w', encoding='utf-8') as fh:
                 json.dump(pipeline.to_dict(), fh, indent=2)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Export failed", str(e))
 
     def _import_saved(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import pipeline", "", "Pipeline JSON (*.json);;All files (*)")
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Import pipeline",
+            "",
+            "Pipeline JSON (*.json);;All files (*)",
+        )
         if not path:
             return
         try:
-            with open(path, "r", encoding="utf-8") as fh:
+            with open(path, 'r', encoding='utf-8') as fh:
                 data = json.load(fh)
             pipeline = ProcessingPipeline.from_dict(data)
             if not pipeline.name:
@@ -1087,9 +1180,7 @@ class ProcessingDockWidget(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Import failed", str(e))
             return
         self._refresh_saved()
-        items = self.list_saved.findItems(pipeline.name, QtCore.Qt.MatchExactly)
-        if items:
-            self.list_saved.setCurrentItem(items[0])
+        self._select_pipeline(pipeline.name)
 
 class ProcessingSelectionDialog(QtWidgets.QDialog):
     def __init__(self, manager: Optional[ProcessingManager], parent=None):

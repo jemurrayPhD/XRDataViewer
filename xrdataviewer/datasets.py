@@ -88,9 +88,14 @@ class VarRef(QtCore.QObject):
 
     def load(self):
         ds = open_dataset(self.path)
-        if self.var not in ds.data_vars or ds[self.var].ndim != 2:
-            raise RuntimeError(f"{self.var!r} is not a 2D variable in {self.path}")
+        if self.var not in ds.data_vars:
+            raise RuntimeError(f"Variable {self.var!r} is not present in {self.path}")
         da = ds[self.var]
+        ndim = getattr(da, "ndim", 0)
+        if ndim <= 0:
+            raise RuntimeError("Variable has no dimensions to plot")
+        if ndim > 2:
+            raise RuntimeError(f"{self.var!r} is higher than 2D in {self.path}")
         coords = guess_phys_coords(da)
         return da, coords
 
@@ -181,8 +186,11 @@ class MemoryVarRef(QtCore.QObject):
         if dataset is None or self.var not in dataset.data_vars:
             raise RuntimeError("Variable is no longer available in memory")
         da = dataset[self.var]
-        if getattr(da, "ndim", 0) != 2:
-            raise RuntimeError("Variable is not two-dimensional")
+        ndim = getattr(da, "ndim", 0)
+        if ndim <= 0:
+            raise RuntimeError("Variable has no dimensions to plot")
+        if ndim > 2:
+            raise RuntimeError("Variable is higher than two-dimensional")
         coords = guess_phys_coords(da)
         return da, coords
 
@@ -345,15 +353,13 @@ class DatasetsPane(QtWidgets.QWidget):
 
         self._trees: Dict[str, QtWidgets.QTreeWidget] = {}
         self._roots: Dict[str, Dict[str, QtWidgets.QTreeWidgetItem]] = {
-            "2d": {},
-            "nd": {},
+            "datasets": {},
             "sliced": {},
             "interactive": {},
         }
 
         for key, title in (
-            ("2d", "2D Data"),
-            ("nd", ">2D Data"),
+            ("datasets", "Datasets"),
             ("sliced", "Sliced Data"),
             ("interactive", "Interactive Data"),
         ):
@@ -423,6 +429,7 @@ class DatasetsPane(QtWidgets.QWidget):
         item.setToolTip(0, str(path))
         item.setExpanded(True)
         item.setData(0, QtCore.Qt.UserRole, DataSetRef(path).to_mime())
+        item.setData(0, QtCore.Qt.UserRole + 1, category)
         self._trees[category].addTopLevelItem(item)
         roots[key] = item
         return key, item
@@ -461,8 +468,7 @@ class DatasetsPane(QtWidgets.QWidget):
             return
 
         try:
-            self._populate_disk_category("2d", path, ds, lambda arr: getattr(arr, "ndim", 0) == 2)
-            self._populate_disk_category("nd", path, ds, lambda arr: getattr(arr, "ndim", 0) > 2)
+            self._populate_dataset_tree(path, ds)
             if not quiet:
                 log_action(f"Loaded dataset '{path.name}'")
         finally:
@@ -471,32 +477,28 @@ class DatasetsPane(QtWidgets.QWidget):
             except Exception:
                 pass
 
-    def _populate_disk_category(
-        self,
-        category: str,
-        path: Path,
-        dataset: xr.Dataset,
-        predicate,
-    ):
-        key, item = self._ensure_disk_root(category, path)
+    def _populate_dataset_tree(self, path: Path, dataset: xr.Dataset):
+        key, item = self._ensure_disk_root("datasets", path)
         added = False
         for var in dataset.data_vars:
             try:
                 da = dataset[var]
             except Exception:
                 continue
-            if not predicate(da):
+            ndim = getattr(da, "ndim", 0)
+            if ndim <= 0:
                 continue
             hint = self._format_hint(da)
-            child = QtWidgets.QTreeWidgetItem([f"{var}  {hint}"])
-            if category == "2d":
+            text = f"{var}  {hint}" if hint else var
+            child = QtWidgets.QTreeWidgetItem([text])
+            if ndim <= 2:
                 child.setData(0, QtCore.Qt.UserRole, VarRef(path, var, hint).to_mime())
             else:
                 child.setData(0, QtCore.Qt.UserRole, HighDimVarRef(var, hint, path=path).to_mime())
             item.addChild(child)
             added = True
         if not added:
-            self._remove_root(category, key)
+            self._remove_root("datasets", key)
 
     def _unique_label(self, category: str, base: str) -> str:
         existing = {itm.text(0) for itm in self._roots[category].values()}
@@ -580,7 +582,7 @@ class DatasetsPane(QtWidgets.QWidget):
 
             text = f"{var}  {hint}" if hint else var
             child = QtWidgets.QTreeWidgetItem([text])
-            if ndim == 2:
+            if 0 < ndim <= 2:
                 child.setData(0, QtCore.Qt.UserRole, MemoryVarRef(key, var, hint).to_mime())
                 added = True
             elif ndim > 2:
