@@ -986,6 +986,10 @@ class CentralPlotWidget(QtWidgets.QWidget):
         if step_mode:
             kwargs["stepMode"] = True
 
+        symbol = None
+        marker_pen: Optional[QtGui.QPen] = None
+        marker_brush: Optional[QtGui.QBrush] = None
+        marker_size: Optional[int] = None
         if style.markers:
             symbol_map = {
                 "o": "o",
@@ -999,19 +1003,29 @@ class CentralPlotWidget(QtWidgets.QWidget):
             marker_color = QtGui.QColor(color)
             marker_pen = QtGui.QPen(marker_color)
             marker_pen.setWidthF(max(1.0, width * 0.75))
-            kwargs.update(
-                {
-                    "symbol": symbol,
-                    "symbolBrush": marker_color,
-                    "symbolPen": marker_pen,
-                    "symbolSize": max(1, int(style.marker_size)),
-                }
-            )
-        else:
-            kwargs["symbol"] = None
+            marker_brush = QtGui.QBrush(marker_color)
+            marker_size = max(1, int(style.marker_size))
 
         try:
             self._line_item.setData(x_plot, y_plot, pen=pen, **kwargs)
+            if style.markers and symbol is not None:
+                try:
+                    self._line_item.setSymbol(symbol)
+                    if marker_brush is not None:
+                        self._line_item.setSymbolBrush(marker_brush)
+                    if marker_pen is not None:
+                        self._line_item.setSymbolPen(marker_pen)
+                    if marker_size is not None:
+                        self._line_item.setSymbolSize(marker_size)
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._line_item.setSymbol(None)
+                    self._line_item.setSymbolBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
+                    self._line_item.setSymbolPen(QtGui.QPen(QtCore.Qt.NoPen))
+                except Exception:
+                    pass
             self._line_item.setVisible(True)
             self.img_item.setVisible(False)
         except Exception:
