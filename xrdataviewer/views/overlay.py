@@ -28,8 +28,12 @@ from ..datasets import (
 from ..processing import (
     ParameterForm,
     ProcessingManager,
+    ProcessingPipeline,
+    ProcessingStep,
+    get_processing_function,
     apply_processing_step,
     list_processing_functions,
+    summarize_parameters,
 )
 from ..preferences import PreferencesManager
 from ..utils import ask_layout_label, ensure_extension, process_events, sanitize_filename, save_snapshot
@@ -84,6 +88,8 @@ class OverlayLayer(QtCore.QObject):
         self.opacity = 1.0
         self.current_processing = "none"
         self.processing_params: dict = {}
+        self.processing_stack: List[ProcessingStep] = []
+        self.selected = False
         self.widget: Optional["OverlayLayerWidget"] = None
         self.legend_proxy: pg.PlotDataItem
         self.image_item: Optional[pg.ImageItem]
@@ -183,6 +189,104 @@ class OverlayLayer(QtCore.QObject):
         self.widget = widget
         widget.update_from_layer()
 
+    # ---------- processing state helpers ----------
+    def set_selected(self, selected: bool):
+        self.selected = bool(selected)
+
+    def has_processing(self) -> bool:
+        return bool(self.processing_stack)
+
+    def processing_steps(self) -> List[ProcessingStep]:
+        return [ProcessingStep(step.key, dict(step.params)) for step in self.processing_stack]
+
+    def processing_pipeline(self, name: str = "") -> ProcessingPipeline:
+        return ProcessingPipeline(name=name, steps=self.processing_steps())
+
+    def clear_processing(self) -> Tuple[bool, Optional[str]]:
+        self.processing_stack = []
+        self.current_processing = "none"
+        self.processing_params = {}
+        self._apply_processed_array(np.array(self.base_data, copy=True))
+        return True, None
+
+    def append_processing_step(self, key: str, params: dict) -> Tuple[bool, Optional[str]]:
+        if get_processing_function(key) is None:
+            return False, f"Unknown processing mode: {key}"
+        candidate = self.processing_steps()
+        candidate.append(ProcessingStep(key=key, params=dict(params or {})))
+        try:
+            data = self._execute_steps(candidate)
+        except Exception as e:
+            return False, str(e)
+        self.processing_stack = candidate
+        self.current_processing = key
+        self.processing_params = dict(params or {})
+        self._apply_processed_array(data)
+        return True, None
+
+    def apply_pipeline(self, pipeline: ProcessingPipeline) -> Tuple[bool, Optional[str]]:
+        steps = [ProcessingStep(step.key, dict(step.params)) for step in pipeline.steps]
+        try:
+            data = self._execute_steps(steps)
+        except Exception as e:
+            return False, str(e)
+        self.processing_stack = steps
+        name = str(pipeline.name).strip()
+        self.current_processing = f"pipeline:{name}" if name else "none"
+        self.processing_params = {}
+        self._apply_processed_array(data)
+        return True, None
+
+    def undo_processing(self) -> Tuple[bool, Optional[str]]:
+        if not self.processing_stack:
+            return False, "No processing steps to undo."
+        steps = self.processing_steps()[:-1]
+        try:
+            data = self._execute_steps(steps)
+        except Exception as e:
+            return False, str(e)
+        self.processing_stack = steps
+        if steps:
+            last = steps[-1]
+            self.current_processing = last.key
+            self.processing_params = dict(last.params)
+        else:
+            self.current_processing = "none"
+            self.processing_params = {}
+        self._apply_processed_array(data)
+        return True, None
+
+    def processing_summary_lines(self) -> List[str]:
+        lines: List[str] = []
+        for i, step in enumerate(self.processing_stack, start=1):
+            spec = get_processing_function(step.key)
+            label = spec.label if spec else step.key
+            params = summarize_parameters(step.key, step.params)
+            if params:
+                lines.append(f"{i}. {label} ({params})")
+            else:
+                lines.append(f"{i}. {label}")
+        return lines
+
+    def _execute_steps(self, steps: Iterable[ProcessingStep]) -> np.ndarray:
+        data = np.asarray(self.base_data, float)
+        result = data
+        for step in steps:
+            result = apply_processing_step(step.key, result, step.params)
+        return np.asarray(result, float)
+
+    def _apply_processed_array(self, data: np.ndarray):
+        if self.is_line_layer():
+            self.processed_data = np.asarray(data, float).reshape(-1)
+            self._update_line_item(autorange=False)
+        else:
+            self.processed_data = np.asarray(data, float)
+            try:
+                self.graphics_item.setImage(self.processed_data, autoLevels=False)
+            except Exception:
+                pass
+            self.auto_levels()
+
     # ---------- layer controls ----------
     def set_visible(self, on: bool):
         self.visible = bool(on)
@@ -241,9 +345,8 @@ class OverlayLayer(QtCore.QObject):
     def legend_item(self):
         return self.legend_proxy
 
-    def apply_processing(self, mode: str, params: dict):
-        data = np.asarray(self.base_data, float)
-        mode = mode or "none"
+    def apply_processing(self, mode: str, params: dict) -> Tuple[bool, Optional[str]]:
+        mode = (mode or "none").strip()
         params = dict(params or {})
 
         if mode.startswith("pipeline:"):
@@ -251,36 +354,11 @@ class OverlayLayer(QtCore.QObject):
             manager = getattr(self.view, "processing_manager", None)
             pipeline = manager.get_pipeline(name) if manager else None
             if pipeline is None:
-                QtWidgets.QMessageBox.warning(self.view, "Processing failed", f"Pipeline '{name}' is not available.")
-                return
-            try:
-                data = pipeline.apply(data)
-            except Exception as e:
-                QtWidgets.QMessageBox.warning(self.view, "Processing failed", str(e))
-                return
-            params = {}
-        elif mode != "none":
-            try:
-                data = apply_processing_step(mode, data, params)
-            except KeyError:
-                QtWidgets.QMessageBox.warning(self.view, "Processing failed", f"Unknown processing mode: {mode}")
-                return
-            except Exception as e:
-                QtWidgets.QMessageBox.warning(self.view, "Processing failed", str(e))
-                return
-
-        self.current_processing = mode
-        self.processing_params = dict(params)
-        if self.is_line_layer():
-            self.processed_data = np.asarray(data, float).reshape(-1)
-            self._update_line_item(autorange=False)
-        else:
-            self.processed_data = np.asarray(data, float)
-            try:
-                self.graphics_item.setImage(self.processed_data, autoLevels=False)
-            except Exception:
-                pass
-            self.auto_levels()
+                return False, f"Pipeline '{name}' is not available."
+            return self.apply_pipeline(pipeline)
+        if mode == "none" or not mode:
+            return self.clear_processing()
+        return self.append_processing_step(mode, params)
 
     def get_display_rect(self):
         if self.is_line_layer():
@@ -347,18 +425,21 @@ class OverlayLayer(QtCore.QObject):
                 y_plot = ys
         color = style.effective_color()
         color.setAlphaF(style.normalized_opacity())
-        width = max(0.1, float(style.width))
-        pen = pg.mkPen(color, width=width)
-        try:
-            pen_style = {
-                "solid": QtCore.Qt.SolidLine,
-                "dashed": QtCore.Qt.DashLine,
-                "dotted": QtCore.Qt.DotLine,
-                "dashdot": QtCore.Qt.DashDotLine,
-            }.get(style.pen_style, QtCore.Qt.SolidLine)
-            pen.setStyle(pen_style)
-        except Exception:
-            pass
+        base_width = max(0.1, float(style.width))
+        if style.show_line:
+            pen = pg.mkPen(color, width=base_width)
+            try:
+                pen_style = {
+                    "solid": QtCore.Qt.SolidLine,
+                    "dashed": QtCore.Qt.DashLine,
+                    "dotted": QtCore.Qt.DotLine,
+                    "dashdot": QtCore.Qt.DashDotLine,
+                }.get(style.pen_style, QtCore.Qt.SolidLine)
+                pen.setStyle(pen_style)
+            except Exception:
+                pass
+        else:
+            pen = None
 
         kwargs: Dict[str, object] = {}
         if step_mode:
@@ -393,7 +474,7 @@ class OverlayLayer(QtCore.QObject):
             symbol = symbol_map.get(key, "o")
             marker_color = QtGui.QColor(color)
             marker_pen = QtGui.QPen(marker_color)
-            marker_pen.setWidthF(max(1.0, width * 0.75))
+            marker_pen.setWidthF(max(1.0, base_width * 0.75))
             marker_brush = QtGui.QBrush(marker_color)
             marker_size = max(1, int(style.marker_size))
         try:
@@ -461,6 +542,10 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.chk_visible.setChecked(True)
         self.chk_visible.toggled.connect(self._on_visibility)
         header.addWidget(self.chk_visible)
+        self.chk_selected = QtWidgets.QCheckBox("Select")
+        self.chk_selected.setToolTip("Include this layer when applying processing to a selection")
+        self.chk_selected.toggled.connect(self._on_selected)
+        header.addWidget(self.chk_selected)
         self.btn_style = QtWidgets.QToolButton()
         self.btn_style.setText("Style…")
         self.btn_style.clicked.connect(self._on_style)
@@ -560,20 +645,64 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self._rebuild_forms_for_dims()
 
         proc_layout.addWidget(self.param_stack)
+
+        apply_row = QtWidgets.QHBoxLayout()
+        apply_row.setContentsMargins(0, 0, 0, 0)
+        apply_row.setSpacing(6)
+        self.chk_apply_selected = QtWidgets.QCheckBox("Apply to selected layers")
+        self.chk_apply_selected.setToolTip(
+            "When checked, apply, undo, and clear actions will also affect other layers marked as selected."
+        )
+        apply_row.addWidget(self.chk_apply_selected, 1)
         self.btn_apply = QtWidgets.QPushButton("Apply")
         self.btn_apply.clicked.connect(self._apply_processing)
-        proc_layout.addWidget(self.btn_apply, alignment=QtCore.Qt.AlignRight)
+        apply_row.addWidget(self.btn_apply, 0)
+        proc_layout.addLayout(apply_row)
+
+        self.history_stack = QtWidgets.QStackedWidget()
+        self.lst_history = QtWidgets.QListWidget()
+        self.lst_history.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.lst_history.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.lst_history.setMinimumHeight(80)
+        self.lst_history.setStyleSheet("QListWidget { background: rgba(255,255,255,8); }")
+        self.lbl_history_hint = QtWidgets.QLabel("No processing steps applied.")
+        self.lbl_history_hint.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_history_hint.setStyleSheet("color: #666; padding: 4px;")
+        self.history_stack.addWidget(self.lbl_history_hint)
+        self.history_stack.addWidget(self.lst_history)
+        proc_layout.addWidget(self.history_stack)
+
+        history_buttons = QtWidgets.QHBoxLayout()
+        history_buttons.setContentsMargins(0, 0, 0, 0)
+        history_buttons.setSpacing(6)
+        self.btn_undo = QtWidgets.QPushButton("Undo last")
+        self.btn_undo.clicked.connect(self._on_undo_processing)
+        history_buttons.addWidget(self.btn_undo)
+        self.btn_clear_processing = QtWidgets.QPushButton("Clear")
+        self.btn_clear_processing.clicked.connect(self._on_clear_processing)
+        history_buttons.addWidget(self.btn_clear_processing)
+        history_buttons.addStretch(1)
+        self.btn_save_pipeline = QtWidgets.QPushButton("Save pipeline…")
+        self.btn_save_pipeline.clicked.connect(self._on_save_pipeline)
+        history_buttons.addWidget(self.btn_save_pipeline)
+        proc_layout.addLayout(history_buttons)
         lay.addWidget(proc_box)
         self.set_processing_manager(manager_ref)
 
         self._ready = True
-        self._on_processing_mode_changed()
+        self._set_apply_pending(False)
+        self._refresh_history_display()
+        self._update_history_controls()
+        self._update_selection_style()
 
     # ---------- UI helpers ----------
     def update_from_layer(self):
         self._ready = False
         self.setTitle(self.layer.title)
         self.chk_visible.setChecked(self.layer.visible)
+        block_sel = self.chk_selected.blockSignals(True)
+        self.chk_selected.setChecked(self.layer.selected)
+        self.chk_selected.blockSignals(block_sel)
         is_line = self.layer.is_line_layer()
         self.btn_style.setVisible(is_line)
         supports_cmap = self.layer.supports_colormap()
@@ -595,7 +724,7 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.sld_opacity.blockSignals(block)
         current_mode = self.layer.current_processing or "none"
         self._refresh_processing_options()
-        self._select_processing_mode(current_mode)
+        self._select_processing_mode(current_mode, trigger=False)
         if current_mode.startswith("pipeline:"):
             name = current_mode.split(":", 1)[1]
             self._update_pipeline_summary(name)
@@ -604,7 +733,10 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
             if form:
                 form.set_values(self.layer.processing_params)
         self._ready = True
-        self._apply_processing()
+        self._set_apply_pending(False)
+        self._refresh_history_display()
+        self._update_history_controls()
+        self._update_selection_style()
 
     def _set_colormap_selection(self, name: str):
         if not self.layer.supports_colormap():
@@ -630,6 +762,82 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
     def update_opacity_label(self, alpha: float):
         pct = int(round(float(alpha) * 100))
         self.lbl_opacity.setText(f"{pct}%")
+
+    def update_selection_state(self):
+        block = self.chk_selected.blockSignals(True)
+        self.chk_selected.setChecked(self.layer.selected)
+        self.chk_selected.blockSignals(block)
+        self._update_selection_style()
+
+    def _update_selection_style(self):
+        if getattr(self.layer, "selected", False):
+            self.setStyleSheet("QGroupBox { border: 2px solid #4fc3f7; border-radius: 4px; }")
+        else:
+            self.setStyleSheet("")
+
+    def _set_apply_pending(self, pending: bool):
+        text = "Apply*" if pending else "Apply"
+        if self.btn_apply.text() != text:
+            self.btn_apply.setText(text)
+
+    def _mark_apply_pending(self):
+        if not self._ready:
+            return
+        self._set_apply_pending(True)
+
+    def _refresh_history_display(self):
+        lines = self.layer.processing_summary_lines()
+        self.lst_history.clear()
+        if not lines:
+            self.history_stack.setCurrentWidget(self.lbl_history_hint)
+            return
+        for line in lines:
+            self.lst_history.addItem(line)
+        self.history_stack.setCurrentWidget(self.lst_history)
+
+    def _update_history_controls(self):
+        has_steps = self.layer.has_processing()
+        self.btn_undo.setEnabled(has_steps)
+        self.btn_clear_processing.setEnabled(has_steps)
+        self.btn_save_pipeline.setEnabled(bool(self.manager) and has_steps)
+
+    def _selected_layers_for_actions(self) -> List[OverlayLayer]:
+        targets = [self.layer]
+        if self.chk_apply_selected.isChecked():
+            for layer in self.view.selected_layers():
+                if layer is self.layer or layer in targets:
+                    continue
+                targets.append(layer)
+        return targets
+
+    def _update_mode_ui(self, data: Dict[str, object], *, mark_pending: bool):
+        mode_type = data.get("type")
+        if mode_type == "function":
+            idx = self._function_indices.get(data.get("key", ""), self._none_index)
+            try:
+                self.param_stack.setCurrentIndex(idx)
+            except Exception:
+                pass
+            if hasattr(self, "lbl_pipeline_summary"):
+                self.lbl_pipeline_summary.setText("Select a pipeline to view steps.")
+        elif mode_type == "pipeline":
+            name = str(data.get("name", ""))
+            try:
+                self.param_stack.setCurrentIndex(self._pipeline_summary_index)
+            except Exception:
+                pass
+            self._update_pipeline_summary(name)
+        else:
+            try:
+                self.param_stack.setCurrentIndex(self._none_index)
+            except Exception:
+                pass
+            if hasattr(self, "lbl_pipeline_summary"):
+                self.lbl_pipeline_summary.setText("Select a pipeline to view steps.")
+        if mark_pending:
+            self._mark_apply_pending()
+        else:
+            self._set_apply_pending(False)
 
     def processing_parameters(self) -> dict:
         data = self._current_processing_data()
@@ -720,7 +928,7 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
             idx = 0
         self.cmb_processing.setCurrentIndex(idx)
         self.cmb_processing.blockSignals(block)
-        self._on_processing_mode_changed()
+        self._update_mode_ui(self._current_processing_data(), mark_pending=False)
 
     def _update_pipeline_summary(self, name: str):
         if not self.manager:
@@ -753,9 +961,11 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         if manager:
             manager.pipelines_changed.connect(self._on_pipelines_changed)
         self._refresh_processing_options()
+        self._update_history_controls()
 
     def _on_pipelines_changed(self):
         self._refresh_processing_options()
+        self._update_history_controls()
 
     # ---------- Slots ----------
     def _on_visibility(self, on: bool):
@@ -765,6 +975,11 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
 
     def _on_remove(self):
         self.view.remove_layer(self.layer)
+
+    def _on_selected(self, on: bool):
+        if not self._ready:
+            return
+        self.view.set_layer_selected(self.layer, bool(on))
 
     def _on_colormap(self, name: str):
         if not self._ready or not self.layer.supports_colormap():
@@ -808,38 +1023,137 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.update_opacity_label(self.layer.opacity)
         self.view.auto_view_range()
 
+    def _on_undo_processing(self):
+        targets = self._selected_layers_for_actions()
+        successes: List[OverlayLayer] = []
+        errors: List[Tuple[str, str]] = []
+        for layer in targets:
+            ok, err = layer.undo_processing()
+            if ok:
+                successes.append(layer)
+            else:
+                errors.append((layer.title, err or "No processing steps to undo."))
+        if successes:
+            for layer in successes:
+                if layer.widget:
+                    layer.widget.update_from_layer()
+            self.view.auto_view_range()
+        if errors:
+            messages = {err for _, err in errors}
+            if successes or len(messages) > 1 or next(iter(messages), "") != "No processing steps to undo.":
+                text = "Unable to undo for:\n" + "\n".join(f"• {title}: {err}" for title, err in errors)
+                QtWidgets.QMessageBox.warning(self, "Undo failed", text)
+            else:
+                QtWidgets.QMessageBox.information(self, "Nothing to undo", "No processing steps to undo for the selected layers.")
+
+    def _on_clear_processing(self):
+        targets = self._selected_layers_for_actions()
+        successes: List[OverlayLayer] = []
+        errors: List[Tuple[str, str]] = []
+        for layer in targets:
+            ok, err = layer.clear_processing()
+            if ok:
+                successes.append(layer)
+            else:
+                errors.append((layer.title, err or "Unable to clear processing."))
+        if successes:
+            for layer in successes:
+                if layer.widget:
+                    layer.widget.update_from_layer()
+            self.view.auto_view_range()
+        if errors:
+            text = "Some layers could not be cleared:\n" + "\n".join(f"• {title}: {err}" for title, err in errors)
+            QtWidgets.QMessageBox.warning(self, "Clear failed", text)
+
+    def _on_save_pipeline(self):
+        if not self.manager:
+            QtWidgets.QMessageBox.information(self, "Save pipeline", "No processing manager is available to store pipelines.")
+            return
+        if not self.layer.has_processing():
+            QtWidgets.QMessageBox.information(self, "Save pipeline", "Add at least one processing step before saving a pipeline.")
+            return
+        default_name = f"{self.layer.title} pipeline"
+        name, ok = QtWidgets.QInputDialog.getText(self, "Save pipeline", "Pipeline name:", text=default_name)
+        if not ok:
+            return
+        name = str(name).strip()
+        if not name:
+            QtWidgets.QMessageBox.warning(self, "Save pipeline", "Pipeline name cannot be empty.")
+            return
+        pipeline = self.layer.processing_pipeline(name)
+        try:
+            self.manager.save_pipeline(pipeline)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Save pipeline", str(e))
+            return
+        QtWidgets.QMessageBox.information(self, "Pipeline saved", f"Saved pipeline '{name}'.")
+
     def _on_processing_mode_changed(self):
         data = self._current_processing_data()
-        if data.get("type") == "function":
-            idx = self._function_indices.get(data.get("key", ""), self._none_index)
-            try:
-                self.param_stack.setCurrentIndex(idx)
-            except Exception:
-                pass
-        elif data.get("type") == "pipeline":
-            self._update_pipeline_summary(str(data.get("name", "")))
-            try:
-                self.param_stack.setCurrentIndex(self._pipeline_summary_index)
-            except Exception:
-                pass
-        else:
-            try:
-                self.param_stack.setCurrentIndex(self._none_index)
-            except Exception:
-                pass
-        self._apply_processing()
+        self._update_mode_ui(data, mark_pending=True)
 
     def _on_processing_params_changed(self, *_):
-        self._apply_processing()
+        self._mark_apply_pending()
 
     def _apply_processing(self):
         if not self._ready:
             return
-        mode = self.current_processing()
-        params = self.processing_parameters()
-        self.layer.apply_processing(mode, params)
+        data = self._current_processing_data()
+        targets = self._selected_layers_for_actions()
+        if not targets:
+            return
 
-    def _select_processing_mode(self, mode: str):
+        successes: List[OverlayLayer] = []
+        errors: List[Tuple[str, str]] = []
+
+        mode_type = data.get("type")
+        if mode_type == "pipeline":
+            if not self.manager:
+                QtWidgets.QMessageBox.warning(self, "Processing failed", "No processing manager is available.")
+                return
+            name = str(data.get("name", ""))
+            pipeline = self.manager.get_pipeline(name)
+            if pipeline is None:
+                QtWidgets.QMessageBox.warning(self, "Processing failed", f"Pipeline '{name}' is not available.")
+                return
+            for layer in targets:
+                ok, err = layer.apply_pipeline(pipeline)
+                if ok:
+                    successes.append(layer)
+                else:
+                    errors.append((layer.title, err or "Unknown error"))
+        elif mode_type == "function":
+            key = data.get("key", "")
+            params = self.processing_parameters()
+            for layer in targets:
+                ok, err = layer.append_processing_step(str(key), params)
+                if ok:
+                    successes.append(layer)
+                else:
+                    errors.append((layer.title, err or "Processing step failed"))
+        else:
+            for layer in targets:
+                ok, err = layer.clear_processing()
+                if ok:
+                    successes.append(layer)
+                else:
+                    errors.append((layer.title, err or "Unable to clear processing"))
+
+        if successes:
+            for layer in successes:
+                if layer.widget and layer.widget is not self:
+                    layer.widget.update_from_layer()
+            self.update_from_layer()
+            self.view.auto_view_range()
+        if successes:
+            self._set_apply_pending(False)
+        if errors:
+            message = "Some layers could not be processed:\n" + "\n".join(
+                f"• {title}: {reason}" for title, reason in errors
+            )
+            QtWidgets.QMessageBox.warning(self, "Processing failed", message)
+
+    def _select_processing_mode(self, mode: str, trigger: bool = True):
         if mode.startswith("pipeline:"):
             name = mode.split(":", 1)[1]
             target = {"type": "pipeline", "name": name}
@@ -853,7 +1167,7 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         block = self.cmb_processing.blockSignals(True)
         self.cmb_processing.setCurrentIndex(idx)
         self.cmb_processing.blockSignals(block)
-        self._on_processing_mode_changed()
+        self._update_mode_ui(self._current_processing_data(), mark_pending=trigger)
 
 class OverlayView(QtWidgets.QWidget):
     def __init__(
@@ -1045,6 +1359,7 @@ class OverlayView(QtWidgets.QWidget):
     def remove_layer(self, layer: OverlayLayer):
         if layer in self.layers:
             self.layers.remove(layer)
+        layer.set_selected(False)
         try:
             self.plot.removeItem(layer.graphics_item)
         except Exception:
@@ -1238,6 +1553,16 @@ class OverlayView(QtWidgets.QWidget):
         for layer in self.layers:
             if layer.widget:
                 layer.widget.set_processing_manager(manager)
+
+    def selected_layers(self) -> List[OverlayLayer]:
+        return [layer for layer in self.layers if getattr(layer, "selected", False)]
+
+    def set_layer_selected(self, layer: OverlayLayer, selected: bool):
+        if layer not in self.layers:
+            return
+        layer.set_selected(selected)
+        if layer.widget:
+            layer.widget.update_selection_state()
 
     def auto_view_range(self):
         rects = []

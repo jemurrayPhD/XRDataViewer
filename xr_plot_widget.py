@@ -28,6 +28,7 @@ class LineStyleConfig:
     markers: bool = False
     marker_style: str = "o"
     marker_size: int = 7
+    show_line: bool = True
 
     def normalized_opacity(self) -> float:
         return max(0.0, min(1.0, float(self.opacity)))
@@ -65,6 +66,7 @@ def clone_line_style(style: Optional[LineStyleConfig]) -> LineStyleConfig:
         markers=src.markers,
         marker_style=src.marker_style,
         marker_size=src.marker_size,
+        show_line=src.show_line,
     )
 
 
@@ -1014,18 +1016,22 @@ class CentralPlotWidget(QtWidgets.QWidget):
 
         color = style.effective_color()
         color.setAlphaF(style.normalized_opacity())
-        width = max(0.1, float(style.width))
-        pen = pg.mkPen(color, width=width)
-        try:
-            pen_style = {
-                "solid": QtCore.Qt.SolidLine,
-                "dashed": QtCore.Qt.DashLine,
-                "dotted": QtCore.Qt.DotLine,
-                "dashdot": QtCore.Qt.DashDotLine,
-            }.get(style.pen_style, QtCore.Qt.SolidLine)
-            pen.setStyle(pen_style)
-        except Exception:
-            pass
+        pen: Optional[QtGui.QPen]
+        base_width = max(0.1, float(style.width))
+        if style.show_line:
+            pen = pg.mkPen(color, width=base_width)
+            try:
+                pen_style = {
+                    "solid": QtCore.Qt.SolidLine,
+                    "dashed": QtCore.Qt.DashLine,
+                    "dotted": QtCore.Qt.DotLine,
+                    "dashdot": QtCore.Qt.DashDotLine,
+                }.get(style.pen_style, QtCore.Qt.SolidLine)
+                pen.setStyle(pen_style)
+            except Exception:
+                pass
+        else:
+            pen = None
 
         kwargs: Dict[str, object] = {}
         if step_mode:
@@ -1061,7 +1067,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
             symbol = symbol_map.get(key, "o")
             marker_color = QtGui.QColor(color)
             marker_pen = QtGui.QPen(marker_color)
-            marker_pen.setWidthF(max(1.0, width * 0.75))
+            marker_pen.setWidthF(max(1.0, base_width * 0.75))
             marker_brush = QtGui.QBrush(marker_color)
             marker_size = max(1, int(style.marker_size))
             symbol_kwargs["symbol"] = symbol
