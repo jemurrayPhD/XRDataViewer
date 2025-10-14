@@ -1374,7 +1374,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             placeholder = QtWidgets.QTextBrowser()
             placeholder.setHtml(
                 "<h2>JupyterLab integration unavailable</h2>"
-                "<p>QtWebEngineWidgets is not installed. Launch JupyterLab separately and use the Register buttons below.</p>"
+                "<p>QtWebEngineWidgets is not installed. Launch JupyterLab separately to register datasets manually.</p>"
             )
             placeholder.setReadOnly(True)
             placeholder.setOpenExternalLinks(True)
@@ -1408,13 +1408,6 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             self.bridge_server.datasetRegistered.connect(self._on_bridge_registered)
 
         layout.addWidget(self.stack, 1)
-
-        controls = QtWidgets.QHBoxLayout()
-        self.btn_register_dataset = QtWidgets.QPushButton("Register dataset from session…")
-        self.btn_register_dataset.clicked.connect(self._register_dataset)
-        controls.addWidget(self.btn_register_dataset)
-        controls.addStretch(1)
-        layout.addLayout(controls)
 
         self.lbl_status = QtWidgets.QLabel(" ")
         self.lbl_status.setStyleSheet("color: #555;")
@@ -1615,35 +1608,3 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
                 pass
             self._jupyter_view = None
             self._jupyter_page = None
-    def _register_dataset(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "Select dataset",
-            "",
-            "NetCDF / Zarr (*.nc *.zarr);;All files (*)",
-        )
-        if not path:
-            return
-        p = Path(path)
-        try:
-            dataset = open_dataset(p)
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "Load failed", str(exc))
-            return
-        default = p.stem or "interactive_dataset"
-        name, ok = QtWidgets.QInputDialog.getText(
-            self,
-            "Dataset name",
-            "Name to display in the Interactive Data tab:",
-            QtWidgets.QLineEdit.Normal,
-            default,
-        )
-        if not ok or not name.strip():
-            try:
-                dataset.close()
-            except Exception:
-                pass
-            return
-        label = name.strip()
-        final_label = self.library.register_interactive_dataset(label, dataset)
-        self._set_status(f"Registered '{final_label}' in the Interactive Data tab.")
