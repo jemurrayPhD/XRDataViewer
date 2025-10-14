@@ -336,27 +336,35 @@ class _DatasetsTree(QtWidgets.QTreeWidget):
 class DatasetsPane(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        self.setObjectName("datasetsPane")
 
-        btn_row = QtWidgets.QHBoxLayout()
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
+
+        btn_frame = QtWidgets.QFrame()
+        btn_frame.setProperty("modernSection", True)
+        btn_layout = QtWidgets.QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(12, 8, 12, 8)
+        btn_layout.setSpacing(8)
+
         self.btn_open_netcdf = QtWidgets.QPushButton("Load NetCDF…")
         self.btn_open_netcdf.clicked.connect(self._open_netcdf)
-        btn_row.addWidget(self.btn_open_netcdf)
+        btn_layout.addWidget(self.btn_open_netcdf)
 
         self.btn_open_json = QtWidgets.QPushButton("Load JSON…")
         self.btn_open_json.clicked.connect(self._open_json)
-        btn_row.addWidget(self.btn_open_json)
+        btn_layout.addWidget(self.btn_open_json)
 
         self.btn_open_db = QtWidgets.QPushButton("Load Database…")
         self.btn_open_db.clicked.connect(self._open_database)
-        btn_row.addWidget(self.btn_open_db)
+        btn_layout.addWidget(self.btn_open_db)
 
-        btn_row.addStretch(1)
-        layout.addLayout(btn_row)
+        btn_layout.addStretch(1)
+        layout.addWidget(btn_frame)
 
         self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setDocumentMode(True)
         layout.addWidget(self.tabs, 1)
 
         self._trees: Dict[str, QtWidgets.QTreeWidget] = {}

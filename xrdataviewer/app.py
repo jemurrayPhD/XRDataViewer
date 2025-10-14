@@ -7,7 +7,7 @@ from typing import Callable, Dict, Optional
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide2")
 
 import pyqtgraph as pg
-from PySide2 import QtCore, QtGui, QtWidgets
+from PySide2 import QtCore, QtGui, QtWidgets, QtUiTools
 
 from app_logging import ACTION_LOGGER, log_action
 
@@ -187,44 +187,54 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("Dataset Multi-Viewer")
 
-        main = QtWidgets.QSplitter()
-        self.setCentralWidget(main)
-
         self.preferences = PreferencesManager()
         self.processing_manager = ProcessingManager()
         self._startup_splash = startup_splash
 
-        self._build_menus()
+        placeholders = self._load_central_layout()
+        dataset_host = placeholders["dataset_host"]
+        processing_host = placeholders["processing_host"]
+        self.tabs = placeholders["tabs"]
+        self._main_splitter = placeholders["main_splitter"]
+        self._left_splitter = placeholders["left_splitter"]
 
-        left_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        left_splitter.setChildrenCollapsible(False)
-        left_splitter.setHandleWidth(8)
-        self.datasets = DatasetsPane()
+        self.datasets = DatasetsPane(dataset_host)
+        dataset_layout = dataset_host.layout() or QtWidgets.QVBoxLayout(dataset_host)
+        dataset_layout.setContentsMargins(0, 0, 0, 0)
+        dataset_layout.setSpacing(0)
+        dataset_layout.addWidget(self.datasets)
+
         self.bridge_server = InteractiveBridgeServer(self.datasets, self)
         self.bridge_server.start()
-        left_splitter.addWidget(self.datasets)
+
         self.processing_dock = ProcessingDockWidget(self.processing_manager)
-        self.processing_panel = ProcessingDockContainer("Processing Pipelines", self.processing_dock)
-        left_splitter.addWidget(self.processing_panel)
-        left_splitter.setStretchFactor(0, 1)
-        left_splitter.setStretchFactor(1, 1)
-        main.addWidget(left_splitter)
+        self.processing_panel = ProcessingDockContainer(
+            "Processing Pipelines", self.processing_dock, processing_host
+        )
+        processing_layout = processing_host.layout() or QtWidgets.QVBoxLayout(processing_host)
+        processing_layout.setContentsMargins(0, 0, 0, 0)
+        processing_layout.setSpacing(0)
+        processing_layout.addWidget(self.processing_panel)
 
-        QtCore.QTimer.singleShot(0, lambda: left_splitter.setSizes([700, 400]))
+        if self._left_splitter is not None:
+            self._left_splitter.setStretchFactor(0, 1)
+            self._left_splitter.setStretchFactor(1, 1)
+            QtCore.QTimer.singleShot(0, lambda: self._left_splitter.setSizes([340, 420]))
 
-        self.tabs = QtWidgets.QTabWidget()
-        main.addWidget(self.tabs)
-        main.setStretchFactor(1, 1)
+        if self._main_splitter is not None:
+            self._main_splitter.setStretchFactor(1, 1)
+
+        self._build_menus()
 
         self.tab_multiview = MultiViewGrid(self.processing_manager, self.preferences)
         self.tabs.addTab(self.tab_multiview, "MultiView")
         self.tab_sequential = SequentialView(self.processing_manager, self.preferences)
         self.tabs.addTab(self.tab_sequential, "Sequential View")
-        self.tab_slice = SliceDataTab(self.datasets)
-        self.tabs.addTab(self.tab_slice, "Slice Data")
         self.tab_overlay = OverlayView(self.processing_manager, self.preferences)
         self.tabs.addTab(self.tab_overlay, "Overlay")
         self.tab_overlay.set_processing_manager(self.processing_manager)
+        self.tab_slice = SliceDataTab(self.datasets)
+        self.tabs.addTab(self.tab_slice, "Slice Data")
         startup_callbacks: Optional[Dict[str, Callable]] = None
         if self._startup_splash is not None:
             startup_callbacks = self._startup_splash.startup_callbacks()
@@ -241,7 +251,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_dock.setFloating(False)
         self.log_dock.resize(800, 200)
 
-        self.resize(1500, 900)
+        self.resize(1220, 780)
+        self.setMinimumSize(920, 640)
 
         if self._startup_splash is not None and not self.tab_interactive.has_embedded_jupyter:
             self._startup_splash.notify_no_jupyter()
@@ -310,6 +321,46 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Save failed", str(exc))
             return
         log_action(f"Saved preferences to {path}")
+
+    def _load_central_layout(self) -> Dict[str, QtWidgets.QWidget]:
+        ui_path = Path(__file__).resolve().parent / "ui" / "main_window.ui"
+        if not ui_path.exists():
+            raise RuntimeError(f"Main window UI not found at {ui_path}")
+
+        ui_file = QtCore.QFile(str(ui_path))
+        if not ui_file.open(QtCore.QIODevice.ReadOnly):
+            raise RuntimeError(f"Unable to open UI definition {ui_path}")
+
+        loader = QtUiTools.QUiLoader()
+        loader.setWorkingDirectory(str(ui_path.parent))
+
+        try:
+            central = loader.load(ui_file, self)
+        finally:
+            ui_file.close()
+
+        if central is None:
+            raise RuntimeError(f"Failed to load UI from {ui_path}: {loader.errorString()}")
+
+        self.setCentralWidget(central)
+
+        main_splitter = central.findChild(QtWidgets.QSplitter, "mainSplitter")
+        left_splitter = central.findChild(QtWidgets.QSplitter, "leftSplitter")
+        tabs = central.findChild(QtWidgets.QTabWidget, "mainTabs")
+        dataset_host = central.findChild(QtWidgets.QWidget, "datasetsHost")
+        processing_host = central.findChild(QtWidgets.QWidget, "processingHost")
+
+        if None in (main_splitter, left_splitter, tabs, dataset_host, processing_host):
+            raise RuntimeError("Main window UI is missing required widgets")
+
+        return {
+            "central": central,
+            "main_splitter": main_splitter,
+            "left_splitter": left_splitter,
+            "tabs": tabs,
+            "dataset_host": dataset_host,
+            "processing_host": processing_host,
+        }
 
 
 def main() -> None:
