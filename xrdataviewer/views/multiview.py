@@ -427,6 +427,10 @@ class ViewerFrame(QtWidgets.QFrame):
         prefs = self.preferences
         if prefs is None:
             return
+        try:
+            self.viewer.set_value_precision(prefs.value_precision())
+        except Exception:
+            pass
         if self._display_mode == "line":
             return
         cmap_name = prefs.preferred_colormap(self._current_variable)

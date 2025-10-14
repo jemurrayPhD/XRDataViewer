@@ -1330,6 +1330,7 @@ class SequentialView(QtWidgets.QWidget):
                 preferences.changed.connect(self._on_preferences_changed)
             except Exception:
                 pass
+        self._apply_value_precision()
         self._apply_preference_colormap()
         self._apply_selected_colormap()
         if self._volume_window is not None:
@@ -1356,8 +1357,21 @@ class SequentialView(QtWidgets.QWidget):
                 self.cmb_colormap.blockSignals(block)
 
     def _on_preferences_changed(self, _data):
+        self._apply_value_precision()
         self._apply_preference_colormap()
         self._apply_selected_colormap()
+
+    def _apply_value_precision(self):
+        precision = 6
+        if self.preferences is not None:
+            try:
+                precision = self.preferences.value_precision()
+            except Exception:
+                precision = 6
+        try:
+            self.viewer.set_value_precision(precision)
+        except Exception:
+            pass
 
     # ---------- export helpers ----------
     def _export_current_slice(self):

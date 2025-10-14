@@ -638,13 +638,11 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         lvl_row.setSpacing(6)
         lvl_row.addWidget(QtWidgets.QLabel("Levels:"))
         self.spin_min = QtWidgets.QDoubleSpinBox()
-        self.spin_min.setDecimals(6)
         self.spin_min.setRange(-1e12, 1e12)
         self.spin_min.valueChanged.connect(self._on_levels_changed)
         lvl_row.addWidget(self.spin_min)
         lvl_row.addWidget(QtWidgets.QLabel("→"))
         self.spin_max = QtWidgets.QDoubleSpinBox()
-        self.spin_max.setDecimals(6)
         self.spin_max.setRange(-1e12, 1e12)
         self.spin_max.valueChanged.connect(self._on_levels_changed)
         lvl_row.addWidget(self.spin_max)
@@ -741,6 +739,9 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         lay.addWidget(proc_box)
         self.set_processing_manager(manager_ref)
 
+        self._value_precision = -1
+        self.set_value_precision(6)
+
         self._ready = True
         self._set_apply_pending(False)
         self._refresh_history_display()
@@ -788,6 +789,26 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self._refresh_history_display()
         self._update_history_controls()
         self.update_target_summary()
+
+    def set_value_precision(self, digits: int):
+        try:
+            digits = int(digits)
+        except Exception:
+            digits = self._value_precision
+        digits = max(0, min(8, digits))
+        if getattr(self, "_value_precision", None) == digits:
+            return
+        self._value_precision = digits
+        step = 10 ** (-digits) if digits > 0 else 1.0
+        for spin in (self.spin_min, self.spin_max):
+            block = spin.blockSignals(True)
+            spin.setDecimals(digits)
+            spin.setSingleStep(step)
+            spin.setValue(spin.value())
+            spin.blockSignals(block)
+        if self.layer.supports_levels():
+            lo, hi = getattr(self.layer, "_levels", (0.0, 1.0))
+            self.update_level_spins(lo, hi)
 
     def _set_colormap_selection(self, name: str):
         if not self.layer.supports_colormap():
@@ -1322,13 +1343,13 @@ class OverlayView(QtWidgets.QWidget):
 
         # Layer controls panel
         panel = QtWidgets.QWidget()
-        panel.setMinimumWidth(320)
+        panel.setMinimumWidth(440)
         panel.setSizePolicy(
             QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         )
         panel_layout = QtWidgets.QVBoxLayout(panel)
-        panel_layout.setContentsMargins(0, 0, 0, 0)
-        panel_layout.setSpacing(6)
+        panel_layout.setContentsMargins(12, 12, 12, 12)
+        panel_layout.setSpacing(10)
 
         self._layer_rows: Dict[OverlayLayer, int] = {}
         self._layer_pages: Dict[OverlayLayer, int] = {}
@@ -1387,9 +1408,9 @@ class OverlayView(QtWidgets.QWidget):
         self.plot.setLabel("left", "Y")
         self.plot.setLabel("bottom", "X")
         splitter.addWidget(self.glw)
-        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
-        QtCore.QTimer.singleShot(0, lambda: splitter.setSizes([420, 780]))
+        QtCore.QTimer.singleShot(0, lambda: splitter.setSizes([520, 640]))
 
         self.set_preferences(preferences)
 
@@ -1477,6 +1498,7 @@ class OverlayView(QtWidgets.QWidget):
     def _register_layer_widget(self, layer: OverlayLayer, widget: OverlayLayerWidget):
         page = self.detail_stack.addWidget(widget)
         self._layer_pages[layer] = page
+        widget.set_value_precision(self._preferred_value_precision())
         widget.set_active(False)
         self._append_layer_row(layer)
         self._update_hint()
@@ -1550,6 +1572,10 @@ class OverlayView(QtWidgets.QWidget):
         self._apply_preferences_to_layers()
 
     def _apply_preferences_to_layers(self):
+        precision = self._preferred_value_precision()
+        for layer in self.layers:
+            if layer.widget is not None:
+                layer.widget.set_value_precision(precision)
         if not self.preferences:
             return
         preferred = self.preferences.preferred_colormap(None)
@@ -1573,6 +1599,11 @@ class OverlayView(QtWidgets.QWidget):
         if self.preferences:
             return self.preferences.default_export_directory()
         return ""
+
+    def _preferred_value_precision(self) -> int:
+        if self.preferences:
+            return self.preferences.value_precision()
+        return 6
 
     def _store_export_dir(self, directory: str):
         if self.preferences and directory:

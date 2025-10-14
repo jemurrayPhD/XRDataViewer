@@ -20,6 +20,7 @@ class PreferencesManager(QtCore.QObject):
             "general": {
                 "autoscale_on_load": True,
                 "default_layout_label": "",
+                "value_precision": 6,
             },
             "colormaps": {
                 "default": "viridis",
@@ -38,6 +39,13 @@ class PreferencesManager(QtCore.QObject):
         general = data.get("general", {}) if isinstance(data, dict) else {}
         if isinstance(general, dict):
             normalized["general"].update(general)
+            digits = general.get("value_precision")
+            try:
+                digits = int(digits)
+            except Exception:
+                digits = normalized["general"].get("value_precision", 6)
+            digits = max(0, min(8, digits))
+            normalized["general"]["value_precision"] = digits
         colormaps = data.get("colormaps", {}) if isinstance(data, dict) else {}
         if isinstance(colormaps, dict):
             normalized["colormaps"].update({k: v for k, v in colormaps.items() if k in ("default", "variables")})
@@ -65,6 +73,12 @@ class PreferencesManager(QtCore.QObject):
 
     def default_export_directory(self) -> str:
         return str(self._data.get("misc", {}).get("default_export_dir", ""))
+
+    def value_precision(self) -> int:
+        try:
+            return int(self._data.get("general", {}).get("value_precision", 6))
+        except Exception:
+            return 6
 
     def preferred_colormap(self, variable: Optional[str]) -> Optional[str]:
         variables = self._data.get("colormaps", {}).get("variables", {})
@@ -139,6 +153,17 @@ class PreferencesDialog(QtWidgets.QDialog):
             str(self._data.get("general", {}).get("default_layout_label", ""))
         )
         form.addRow("Default layout label", self.txt_layout_label)
+
+        self.spn_value_precision = QtWidgets.QSpinBox()
+        self.spn_value_precision.setRange(0, 8)
+        self.spn_value_precision.setValue(
+            int(self._data.get("general", {}).get("value_precision", 6))
+        )
+        self.spn_value_precision.setSuffix(" decimals")
+        self.spn_value_precision.setToolTip(
+            "Number of decimal places used for value readouts and controls."
+        )
+        form.addRow("Value precision", self.spn_value_precision)
 
         export_row = QtWidgets.QHBoxLayout()
         self.txt_export_dir = QtWidgets.QLineEdit(
@@ -270,7 +295,8 @@ class PreferencesDialog(QtWidgets.QDialog):
     def _collect_data(self) -> Dict[str, object]:
         general = {
             "autoscale_on_load": self.chk_autoscale.isChecked(),
-            "default_layout_label": self.txt_layout_label.text(),
+            "default_layout_label": self.txt_layout_label.text().strip(),
+            "value_precision": int(self.spn_value_precision.value()),
         }
         colormaps = {
             "default": self.cmb_default_cmap.currentData() or "",
@@ -294,6 +320,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         data = self._data
         self.chk_autoscale.setChecked(bool(data.get("general", {}).get("autoscale_on_load", True)))
         self.txt_layout_label.setText(str(data.get("general", {}).get("default_layout_label", "")))
+        self.spn_value_precision.setValue(int(data.get("general", {}).get("value_precision", 6)))
         self.txt_export_dir.setText(str(data.get("misc", {}).get("default_export_dir", "")))
         default_cmap = str(data.get("colormaps", {}).get("default", ""))
         idx = self.cmb_default_cmap.findData(default_cmap)

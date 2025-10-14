@@ -613,6 +613,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._line_plot_y: Optional[np.ndarray] = None
         self._mode: str = "image"
         self._line_style = LineStyleConfig()
+        self._value_precision: int = 6
 
         self._legend_item: Optional[pg.LegendItem] = None
         self._legend_sources: List[Tuple[pg.GraphicsObject, str]] = []
@@ -816,6 +817,22 @@ class CentralPlotWidget(QtWidgets.QWidget):
     # ---------- public API ----------
     def set_labels(self, xlabel: str = "X", ylabel: str = "Y"):
         self.plot.setLabel("bottom", xlabel); self.plot.setLabel("left", ylabel)
+
+    def set_value_precision(self, digits: int):
+        try:
+            digits = int(digits)
+        except Exception:
+            digits = self._value_precision
+        digits = max(0, min(8, digits))
+        if self._value_precision == digits:
+            return
+        self._value_precision = digits
+        if self._last_local_crosshair:
+            x, y, value, _label = self._last_local_crosshair
+            label = self._format_crosshair_text(x, y, value)
+            self._set_last_local_crosshair(x, y, value, label)
+            if self._local_crosshair_visible or self._crosshair_is_mirrored:
+                self.show_crosshair(x, y, value, mirrored=self._crosshair_is_mirrored, label=label)
 
     def get_levels(self):
         try: return self.lut.getLevels()
@@ -1269,7 +1286,9 @@ class CentralPlotWidget(QtWidgets.QWidget):
                 if isinstance(val, (float, int, np.floating, np.integer)):
                     if np.isnan(val):
                         return "nan"
-                    return f"{float(val):.4g}"
+                    precision = max(0, int(self._value_precision))
+                    fmt_spec = f".{precision}f" if precision > 0 else ".0f"
+                    return format(float(val), fmt_spec)
             except Exception:
                 pass
             return str(val)
