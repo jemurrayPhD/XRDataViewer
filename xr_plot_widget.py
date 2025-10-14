@@ -616,6 +616,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
 
         self._legend_item: Optional[pg.LegendItem] = None
         self._legend_sources: List[Tuple[pg.GraphicsObject, str]] = []
+        self._legend_proxies: List[pg.PlotDataItem] = []
 
         self._histogram_menu_getter = None
         self._histogram_menu_setter = None
@@ -714,11 +715,21 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._colorbar_label_widget.setVisible(bool(html_text))
 
     def set_legend_sources(self, items: Sequence[Tuple[object, str]]):
-        processed: List[Tuple[object, str]] = []
+        self._legend_proxies = []
+        processed: List[Tuple[pg.GraphicsObject, str]] = []
         for obj, label in items:
             if obj is None:
                 continue
-            processed.append((obj, str(label)))
+            sample = obj
+            if not hasattr(sample, "opts"):
+                proxy = pg.PlotDataItem([0], [0])
+                try:
+                    proxy.setPen(pg.mkPen((200, 200, 200)))
+                except Exception:
+                    pass
+                sample = proxy
+                self._legend_proxies.append(proxy)
+            processed.append((sample, str(label)))
         self._legend_sources = processed
 
     def _ensure_legend(self) -> pg.LegendItem:
