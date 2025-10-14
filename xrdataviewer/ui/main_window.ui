@@ -163,11 +163,17 @@ QLabel#processingPlaceholder {
    ]]></string>
   </property>
   <layout class="QVBoxLayout" name="outerLayout">
-   <property name="contentsMargins">
-    <left>12</left>
-    <top>12</top>
-    <right>12</right>
-    <bottom>12</bottom>
+   <property name="leftMargin">
+    <number>12</number>
+   </property>
+   <property name="topMargin">
+    <number>12</number>
+   </property>
+   <property name="rightMargin">
+    <number>12</number>
+   </property>
+   <property name="bottomMargin">
+    <number>12</number>
    </property>
    <property name="spacing">
     <number>12</number>
@@ -185,11 +191,17 @@ QLabel#processingPlaceholder {
      </property>
      <widget class="QWidget" name="leftPane">
       <layout class="QVBoxLayout" name="leftPaneLayout">
-       <property name="contentsMargins">
-        <left>0</left>
-        <top>0</top>
-        <right>0</right>
-        <bottom>0</bottom>
+       <property name="leftMargin">
+        <number>0</number>
+       </property>
+       <property name="topMargin">
+        <number>0</number>
+       </property>
+       <property name="rightMargin">
+        <number>0</number>
+       </property>
+       <property name="bottomMargin">
+        <number>0</number>
        </property>
        <property name="spacing">
         <number>12</number>
@@ -207,11 +219,17 @@ QLabel#processingPlaceholder {
          </property>
          <widget class="QWidget" name="datasetsSection">
           <layout class="QVBoxLayout" name="datasetsSectionLayout">
-           <property name="contentsMargins">
-            <left>0</left>
-            <top>0</top>
-            <right>0</right>
-            <bottom>0</bottom>
+           <property name="leftMargin">
+            <number>0</number>
+           </property>
+           <property name="topMargin">
+            <number>0</number>
+           </property>
+           <property name="rightMargin">
+            <number>0</number>
+           </property>
+           <property name="bottomMargin">
+            <number>0</number>
            </property>
            <property name="spacing">
             <number>0</number>
@@ -219,11 +237,17 @@ QLabel#processingPlaceholder {
            <item>
             <widget class="QWidget" name="datasetsHost">
              <layout class="QVBoxLayout" name="datasetsHostLayout">
-              <property name="contentsMargins">
-               <left>0</left>
-               <top>0</top>
-               <right>0</right>
-               <bottom>0</bottom>
+              <property name="leftMargin">
+               <number>0</number>
+              </property>
+              <property name="topMargin">
+               <number>0</number>
+              </property>
+              <property name="rightMargin">
+               <number>0</number>
+              </property>
+              <property name="bottomMargin">
+               <number>0</number>
               </property>
               <property name="spacing">
                <number>0</number>
@@ -235,11 +259,17 @@ QLabel#processingPlaceholder {
          </widget>
          <widget class="QWidget" name="processingSection">
           <layout class="QVBoxLayout" name="processingSectionLayout">
-           <property name="contentsMargins">
-            <left>0</left>
-            <top>0</top>
-            <right>0</right>
-            <bottom>0</bottom>
+           <property name="leftMargin">
+            <number>0</number>
+           </property>
+           <property name="topMargin">
+            <number>0</number>
+           </property>
+           <property name="rightMargin">
+            <number>0</number>
+           </property>
+           <property name="bottomMargin">
+            <number>0</number>
            </property>
            <property name="spacing">
             <number>0</number>
@@ -247,11 +277,17 @@ QLabel#processingPlaceholder {
            <item>
             <widget class="QWidget" name="processingHost">
              <layout class="QVBoxLayout" name="processingHostLayout">
-              <property name="contentsMargins">
-               <left>0</left>
-               <top>0</top>
-               <right>0</right>
-               <bottom>0</bottom>
+              <property name="leftMargin">
+               <number>0</number>
+              </property>
+              <property name="topMargin">
+               <number>0</number>
+              </property>
+              <property name="rightMargin">
+               <number>0</number>
+              </property>
+              <property name="bottomMargin">
+               <number>0</number>
               </property>
               <property name="spacing">
                <number>0</number>
@@ -267,11 +303,17 @@ QLabel#processingPlaceholder {
      </widget>
      <widget class="QWidget" name="rightPane">
       <layout class="QVBoxLayout" name="rightPaneLayout">
-       <property name="contentsMargins">
-        <left>0</left>
-        <top>0</top>
-        <right>0</right>
-        <bottom>0</bottom>
+       <property name="leftMargin">
+        <number>0</number>
+       </property>
+       <property name="topMargin">
+        <number>0</number>
+       </property>
+       <property name="rightMargin">
+        <number>0</number>
+       </property>
+       <property name="bottomMargin">
+        <number>0</number>
        </property>
        <property name="spacing">
         <number>0</number>
