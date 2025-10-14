@@ -525,9 +525,16 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.view = view
         self.layer = layer
         self._ready = False
+        self._active = False
 
         self.setSizePolicy(
             QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        )
+        self.setProperty("activeLayer", False)
+        self.setStyleSheet(
+            "QGroupBox { border: 1px solid palette(mid); border-radius: 4px; margin-top: 8px; }"
+            "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 6px; }"
+            "QGroupBox[activeLayer=\"true\"] { border: 2px solid palette(highlight); }"
         )
 
         lay = QtWidgets.QVBoxLayout(self)
@@ -542,10 +549,6 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.chk_visible.setChecked(True)
         self.chk_visible.toggled.connect(self._on_visibility)
         header.addWidget(self.chk_visible)
-        self.chk_selected = QtWidgets.QCheckBox("Select")
-        self.chk_selected.setToolTip("Include this layer when applying processing to a selection")
-        self.chk_selected.toggled.connect(self._on_selected)
-        header.addWidget(self.chk_selected)
         self.btn_style = QtWidgets.QToolButton()
         self.btn_style.setText("Style…")
         self.btn_style.clicked.connect(self._on_style)
@@ -649,12 +652,11 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         apply_row = QtWidgets.QHBoxLayout()
         apply_row.setContentsMargins(0, 0, 0, 0)
         apply_row.setSpacing(6)
-        self.chk_apply_selected = QtWidgets.QCheckBox("Apply to selected layers")
-        self.chk_apply_selected.setToolTip(
-            "When checked, apply, undo, and clear actions will also affect other layers marked as selected."
-        )
-        apply_row.addWidget(self.chk_apply_selected, 1)
-        self.btn_apply = QtWidgets.QPushButton("Apply")
+        self.lbl_targets = QtWidgets.QLabel()
+        self.lbl_targets.setStyleSheet("color: #666;")
+        apply_row.addWidget(self.lbl_targets, 1)
+        self._apply_label_base = "Apply to selection"
+        self.btn_apply = QtWidgets.QPushButton(self._apply_label_base)
         self.btn_apply.clicked.connect(self._apply_processing)
         apply_row.addWidget(self.btn_apply, 0)
         proc_layout.addLayout(apply_row)
@@ -693,16 +695,13 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self._set_apply_pending(False)
         self._refresh_history_display()
         self._update_history_controls()
-        self._update_selection_style()
+        self.update_target_summary()
 
     # ---------- UI helpers ----------
     def update_from_layer(self):
         self._ready = False
         self.setTitle(self.layer.title)
         self.chk_visible.setChecked(self.layer.visible)
-        block_sel = self.chk_selected.blockSignals(True)
-        self.chk_selected.setChecked(self.layer.selected)
-        self.chk_selected.blockSignals(block_sel)
         is_line = self.layer.is_line_layer()
         self.btn_style.setVisible(is_line)
         supports_cmap = self.layer.supports_colormap()
@@ -732,11 +731,13 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
             form = self._function_forms.get(current_mode)
             if form:
                 form.set_values(self.layer.processing_params)
+        if hasattr(self.view, "_update_layer_row"):
+            self.view._update_layer_row(self.layer)
         self._ready = True
         self._set_apply_pending(False)
         self._refresh_history_display()
         self._update_history_controls()
-        self._update_selection_style()
+        self.update_target_summary()
 
     def _set_colormap_selection(self, name: str):
         if not self.layer.supports_colormap():
@@ -763,20 +764,26 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         pct = int(round(float(alpha) * 100))
         self.lbl_opacity.setText(f"{pct}%")
 
-    def update_selection_state(self):
-        block = self.chk_selected.blockSignals(True)
-        self.chk_selected.setChecked(self.layer.selected)
-        self.chk_selected.blockSignals(block)
-        self._update_selection_style()
+    def set_active(self, active: bool):
+        active = bool(active)
+        if self._active == active:
+            return
+        self._active = active
+        self.setProperty("activeLayer", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
-    def _update_selection_style(self):
-        if getattr(self.layer, "selected", False):
-            self.setStyleSheet("QGroupBox { border: 2px solid #4fc3f7; border-radius: 4px; }")
+    def update_target_summary(self):
+        targets = self._selected_layers_for_actions()
+        count = len(targets)
+        if count <= 1:
+            text = "Target: this layer"
         else:
-            self.setStyleSheet("")
+            text = f"Target: {count} layers"
+        self.lbl_targets.setText(text)
 
     def _set_apply_pending(self, pending: bool):
-        text = "Apply*" if pending else "Apply"
+        text = f"{self._apply_label_base}*" if pending else self._apply_label_base
         if self.btn_apply.text() != text:
             self.btn_apply.setText(text)
 
@@ -802,13 +809,21 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.btn_save_pipeline.setEnabled(bool(self.manager) and has_steps)
 
     def _selected_layers_for_actions(self) -> List[OverlayLayer]:
-        targets = [self.layer]
-        if self.chk_apply_selected.isChecked():
-            for layer in self.view.selected_layers():
-                if layer is self.layer or layer in targets:
-                    continue
-                targets.append(layer)
-        return targets
+        selected = list(self.view.selected_layers())
+        if not selected:
+            return [self.layer]
+        if self.layer not in selected:
+            selected.insert(0, self.layer)
+        else:
+            selected = [self.layer] + [layer for layer in selected if layer is not self.layer]
+        seen = set()
+        ordered: List[OverlayLayer] = []
+        for layer in selected:
+            if layer in seen:
+                continue
+            seen.add(layer)
+            ordered.append(layer)
+        return ordered
 
     def _update_mode_ui(self, data: Dict[str, object], *, mark_pending: bool):
         mode_type = data.get("type")
@@ -970,16 +985,13 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
     # ---------- Slots ----------
     def _on_visibility(self, on: bool):
         self.layer.set_visible(on)
+        if hasattr(self.view, "_update_layer_row"):
+            self.view._update_layer_row(self.layer)
         if on:
             self.view.auto_view_range()
 
     def _on_remove(self):
         self.view.remove_layer(self.layer)
-
-    def _on_selected(self, on: bool):
-        if not self._ready:
-            return
-        self.view.set_layer_selected(self.layer, bool(on))
 
     def _on_colormap(self, name: str):
         if not self._ready or not self.layer.supports_colormap():
@@ -1239,15 +1251,47 @@ class OverlayView(QtWidgets.QWidget):
         panel_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.setSpacing(6)
 
-        self.layer_scroll = QtWidgets.QScrollArea()
-        self.layer_scroll.setWidgetResizable(True)
-        self.layer_list_widget = QtWidgets.QWidget()
-        self.layer_list_layout = QtWidgets.QVBoxLayout(self.layer_list_widget)
-        self.layer_list_layout.setContentsMargins(0, 0, 0, 0)
-        self.layer_list_layout.setSpacing(6)
-        self.layer_list_layout.addStretch(1)
-        self.layer_scroll.setWidget(self.layer_list_widget)
-        panel_layout.addWidget(self.layer_scroll, 1)
+        self._layer_rows: Dict[OverlayLayer, int] = {}
+        self._layer_pages: Dict[OverlayLayer, int] = {}
+        self._active_layer: Optional[OverlayLayer] = None
+        self._updating_table = False
+
+        self.layer_table = QtWidgets.QTableWidget(0, 3)
+        self.layer_table.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        )
+        self.layer_table.setMinimumHeight(140)
+        self.layer_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.layer_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.layer_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.layer_table.verticalHeader().setVisible(False)
+        self.layer_table.setHorizontalHeaderLabels(["Vis", "Layer", "Type"])
+        header = self.layer_table.horizontalHeader()
+        try:
+            header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+            header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+            header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        except Exception:
+            pass
+        self.layer_table.itemSelectionChanged.connect(self._on_layer_selection_changed)
+        self.layer_table.itemChanged.connect(self._on_layer_table_item_changed)
+        panel_layout.addWidget(self.layer_table)
+
+        self.detail_stack = QtWidgets.QStackedWidget()
+        self.detail_stack.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        )
+        self._empty_detail = QtWidgets.QLabel("Select a layer to adjust its appearance and processing.")
+        self._empty_detail.setAlignment(QtCore.Qt.AlignCenter)
+        self._empty_detail.setWordWrap(True)
+        self.detail_stack.addWidget(self._empty_detail)
+        self.detail_stack.setCurrentWidget(self._empty_detail)
+
+        self.detail_container = QtWidgets.QScrollArea()
+        self.detail_container.setWidgetResizable(True)
+        self.detail_container.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.detail_container.setWidget(self.detail_stack)
+        panel_layout.addWidget(self.detail_container, 1)
 
         self.lbl_hint = QtWidgets.QLabel("Drag datasets here to overlay them.")
         self.lbl_hint.setAlignment(QtCore.Qt.AlignCenter)
@@ -1344,17 +1388,19 @@ class OverlayView(QtWidgets.QWidget):
         widget.set_processing_manager(self.processing_manager)
         layer.set_widget(widget)
         self.layers.append(layer)
-        self._insert_layer_widget(widget)
+        self._register_layer_widget(layer, widget)
         self._apply_legend_config(self._annotation_config)
         return True
 
     # ---------- layer management ----------
-    def _insert_layer_widget(self, widget: OverlayLayerWidget):
-        stretch = self.layer_list_layout.itemAt(self.layer_list_layout.count() - 1)
-        if stretch and stretch.spacerItem():
-            self.layer_list_layout.insertWidget(self.layer_list_layout.count() - 1, widget)
-        else:
-            self.layer_list_layout.addWidget(widget)
+    def _register_layer_widget(self, layer: OverlayLayer, widget: OverlayLayerWidget):
+        page = self.detail_stack.addWidget(widget)
+        self._layer_pages[layer] = page
+        widget.set_active(False)
+        self._append_layer_row(layer)
+        self._update_hint()
+        self._update_target_summaries()
+        QtCore.QTimer.singleShot(0, lambda: self._select_only_layer(layer))
 
     def remove_layer(self, layer: OverlayLayer):
         if layer in self.layers:
@@ -1365,13 +1411,20 @@ class OverlayView(QtWidgets.QWidget):
         except Exception:
             pass
         if layer.widget:
-            w = layer.widget
+            widget = layer.widget
             layer.widget = None
-            w.setParent(None)
-            w.deleteLater()
+            page = self._layer_pages.pop(layer, None)
+            if page is not None:
+                self.detail_stack.removeWidget(widget)
+            widget.deleteLater()
+        self._remove_layer_row(layer)
+        if self._active_layer is layer:
+            self._set_active_layer(None)
         self._update_hint()
+        self._update_target_summaries()
         self.auto_view_range()
         self._apply_legend_config(self._annotation_config)
+        self._on_layer_selection_changed()
 
     def clear_layers(self):
         for layer in list(self.layers):
@@ -1555,14 +1608,167 @@ class OverlayView(QtWidgets.QWidget):
                 layer.widget.set_processing_manager(manager)
 
     def selected_layers(self) -> List[OverlayLayer]:
-        return [layer for layer in self.layers if getattr(layer, "selected", False)]
+        return list(self._selected_layers_from_table())
 
     def set_layer_selected(self, layer: OverlayLayer, selected: bool):
-        if layer not in self.layers:
+        row = self._layer_rows.get(layer)
+        if row is None:
             return
-        layer.set_selected(selected)
-        if layer.widget:
-            layer.widget.update_selection_state()
+        selection_model = self.layer_table.selectionModel()
+        if selection_model is None:
+            return
+        index = self.layer_table.model().index(row, 0)
+        command = QtCore.QItemSelectionModel.Select | QtCore.QItemSelectionModel.Rows
+        if not selected:
+            command = QtCore.QItemSelectionModel.Deselect | QtCore.QItemSelectionModel.Rows
+        selection_model.select(index, command)
+        if selected:
+            self.layer_table.setCurrentCell(row, 1)
+
+    # ---------- layer table helpers ----------
+    def _selected_layers_from_table(self) -> List[OverlayLayer]:
+        selection = self.layer_table.selectionModel()
+        layers: List[OverlayLayer] = []
+        if not selection:
+            return layers
+        for model_index in selection.selectedRows():
+            item = self.layer_table.item(model_index.row(), 1)
+            if item is None:
+                continue
+            layer = item.data(QtCore.Qt.UserRole)
+            if isinstance(layer, OverlayLayer):
+                layers.append(layer)
+        return layers
+
+    def _append_layer_row(self, layer: OverlayLayer):
+        self._updating_table = True
+        try:
+            row = self.layer_table.rowCount()
+            self.layer_table.insertRow(row)
+            vis_item = QtWidgets.QTableWidgetItem()
+            vis_item.setFlags(
+                QtCore.Qt.ItemIsEnabled
+                | QtCore.Qt.ItemIsSelectable
+                | QtCore.Qt.ItemIsUserCheckable
+            )
+            vis_item.setCheckState(QtCore.Qt.Checked if layer.visible else QtCore.Qt.Unchecked)
+            vis_item.setData(QtCore.Qt.UserRole, layer)
+            self.layer_table.setItem(row, 0, vis_item)
+
+            name_item = QtWidgets.QTableWidgetItem(layer.title)
+            name_item.setData(QtCore.Qt.UserRole, layer)
+            name_item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+            self.layer_table.setItem(row, 1, name_item)
+
+            type_item = QtWidgets.QTableWidgetItem("Curve" if layer.is_line_layer() else "Image")
+            type_item.setData(QtCore.Qt.UserRole, layer)
+            type_item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+            self.layer_table.setItem(row, 2, type_item)
+            self._layer_rows[layer] = row
+        finally:
+            self._updating_table = False
+
+    def _reindex_layer_rows(self, start: int = 0):
+        for row in range(start, self.layer_table.rowCount()):
+            item = self.layer_table.item(row, 1)
+            if item is None:
+                continue
+            layer = item.data(QtCore.Qt.UserRole)
+            if isinstance(layer, OverlayLayer):
+                self._layer_rows[layer] = row
+
+    def _remove_layer_row(self, layer: OverlayLayer):
+        row = self._layer_rows.pop(layer, None)
+        if row is None:
+            return
+        self._updating_table = True
+        try:
+            self.layer_table.removeRow(row)
+        finally:
+            self._updating_table = False
+        self._reindex_layer_rows(row)
+
+    def _update_layer_row(self, layer: OverlayLayer):
+        row = self._layer_rows.get(layer)
+        if row is None:
+            return
+        self._updating_table = True
+        try:
+            vis_item = self.layer_table.item(row, 0)
+            if vis_item is not None:
+                desired = QtCore.Qt.Checked if layer.visible else QtCore.Qt.Unchecked
+                if vis_item.checkState() != desired:
+                    vis_item.setCheckState(desired)
+            name_item = self.layer_table.item(row, 1)
+            if name_item is not None and name_item.text() != layer.title:
+                name_item.setText(layer.title)
+            type_item = self.layer_table.item(row, 2)
+            if type_item is not None:
+                text = "Curve" if layer.is_line_layer() else "Image"
+                if type_item.text() != text:
+                    type_item.setText(text)
+        finally:
+            self._updating_table = False
+
+    def _on_layer_table_item_changed(self, item: QtWidgets.QTableWidgetItem):
+        if self._updating_table:
+            return
+        layer = item.data(QtCore.Qt.UserRole)
+        if not isinstance(layer, OverlayLayer):
+            return
+        if item.column() == 0:
+            visible = item.checkState() == QtCore.Qt.Checked
+            if layer.visible != visible:
+                layer.set_visible(visible)
+                if layer.widget:
+                    layer.widget.update_from_layer()
+                if visible:
+                    self.auto_view_range()
+
+    def _on_layer_selection_changed(self):
+        selected = self._selected_layers_from_table()
+        selected_set = set(selected)
+        for layer in self.layers:
+            layer.set_selected(layer in selected_set)
+            if layer.widget:
+                layer.widget.update_target_summary()
+        self._set_active_layer(selected[0] if selected else None)
+
+    def _set_active_layer(self, layer: Optional[OverlayLayer]):
+        if layer is self._active_layer:
+            return
+        if self._active_layer and self._active_layer.widget:
+            self._active_layer.widget.set_active(False)
+        self._active_layer = layer
+        if layer and layer.widget:
+            layer.widget.set_active(True)
+            page = self._layer_pages.get(layer)
+            if page is not None:
+                self.detail_stack.setCurrentIndex(page)
+            layer.widget.update_from_layer()
+            QtCore.QTimer.singleShot(0, lambda: self.detail_container.verticalScrollBar().setValue(0))
+        else:
+            self.detail_stack.setCurrentWidget(self._empty_detail)
+
+    def _update_target_summaries(self):
+        for layer in self.layers:
+            if layer.widget:
+                layer.widget.update_target_summary()
+
+    def _select_only_layer(self, layer: OverlayLayer):
+        row = self._layer_rows.get(layer)
+        if row is None:
+            return
+        self.layer_table.clearSelection()
+        selection_model = self.layer_table.selectionModel()
+        if selection_model is None:
+            return
+        index = self.layer_table.model().index(row, 0)
+        selection_model.select(
+            index,
+            QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows,
+        )
+        self.layer_table.setCurrentCell(row, 1)
 
     def auto_view_range(self):
         rects = []
