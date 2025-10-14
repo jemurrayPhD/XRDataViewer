@@ -1,0 +1,297 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindowCentral</class>
+ <widget class="QWidget" name="MainWindowCentral">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1200</width>
+    <height>800</height>
+   </rect>
+  </property>
+  <property name="styleSheet">
+   <string notr="true"><![CDATA[
+QWidget {
+    font-family: 'Segoe UI', 'Inter', 'Noto Sans', sans-serif;
+    font-size: 11pt;
+    color: #1f2430;
+}
+QWidget, QMainWindow, QDialog {
+    background-color: #f4f6fb;
+}
+QSplitter::handle:horizontal, QSplitter::handle:vertical {
+    background: #d5dbeb;
+    border-radius: 4px;
+}
+QSplitter::handle:horizontal:hover, QSplitter::handle:vertical:hover {
+    background: #b9c2dd;
+}
+QTabWidget::pane {
+    border: 1px solid #d1d7e6;
+    border-radius: 8px;
+    padding: 6px;
+    background: #ffffff;
+}
+QTabBar::tab {
+    background: #e6eaf5;
+    border: 1px solid #d1d7e6;
+    border-bottom: none;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    padding: 8px 14px;
+    margin-right: 6px;
+    color: #4a5568;
+}
+QTabBar::tab:selected {
+    background: #ffffff;
+    color: #1f2430;
+    border-color: #4057d4;
+}
+QTabBar::tab:hover {
+    background: #f2f4fb;
+}
+QFrame[modernSection="true"] {
+    background: #ffffff;
+    border: 1px solid #d1d7e6;
+    border-radius: 12px;
+    padding: 8px 12px;
+}
+QLabel[modernSectionTitle="true"] {
+    font-size: 10pt;
+    font-weight: 600;
+    color: #33415c;
+    padding-bottom: 4px;
+}
+QGroupBox {
+    border: 1px solid #d1d7e6;
+    border-radius: 10px;
+    margin-top: 12px;
+    padding: 10px;
+    background: #ffffff;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 16px;
+    padding: 0 8px;
+    color: #3a4b6c;
+    font-weight: 600;
+}
+QTreeWidget, QListWidget, QTextEdit, QPlainTextEdit, QTableView, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+    background: #ffffff;
+    border: 1px solid #c5ccde;
+    border-radius: 8px;
+    padding: 4px 6px;
+}
+QTreeWidget::item:selected, QListWidget::item:selected {
+    background: #d9e1ff;
+    color: #1f2430;
+}
+QPushButton, QToolButton {
+    background-color: #4f6bed;
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 14px;
+}
+QPushButton:disabled, QToolButton:disabled {
+    background-color: #a9b4d6;
+    color: #f5f6fb;
+}
+QPushButton:hover, QToolButton:hover {
+    background-color: #637cf2;
+}
+QPushButton:pressed, QToolButton:pressed {
+    background-color: #4057d4;
+}
+QToolButton[headerAction="true"] {
+    background: transparent;
+    color: #465575;
+    padding: 4px 8px;
+}
+QToolButton[headerAction="true"]:hover {
+    background: rgba(79, 107, 237, 0.12);
+    color: #2c3e75;
+}
+QDockWidget {
+    titlebar-close-icon: url();
+    titlebar-normal-icon: url();
+    font-size: 10pt;
+}
+QDockWidget::title {
+    text-align: center;
+    background: #e6ebf7;
+    border: 1px solid #d1d7e6;
+    border-radius: 8px 8px 0 0;
+    padding: 6px;
+}
+QHeaderView::section {
+    background: #e6ebf7;
+    border: none;
+    padding: 6px 10px;
+    font-weight: 600;
+    color: #3a4b6c;
+}
+QStatusBar {
+    background: #e6ebf7;
+    border-top: 1px solid #d1d7e6;
+}
+QWidget#datasetsPane {
+    background: #ffffff;
+    border: 1px solid #d1d7e6;
+    border-radius: 16px;
+}
+QWidget#processingContainer {
+    background: #ffffff;
+    border: 1px solid #d1d7e6;
+    border-radius: 16px;
+}
+QWidget#processingHeader {
+    border-bottom: 1px solid #e2e6f2;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f6f8fd, stop:1 #eceff9);
+    border-top-left-radius: 16px;
+    border-top-right-radius: 16px;
+}
+QWidget#processingContent {
+    border-bottom-left-radius: 16px;
+    border-bottom-right-radius: 16px;
+}
+QLabel#processingPlaceholder {
+    color: #5a6276;
+    padding: 16px;
+}
+   ]]></string>
+  </property>
+  <layout class="QVBoxLayout" name="outerLayout">
+   <property name="contentsMargins">
+    <left>12</left>
+    <top>12</top>
+    <right>12</right>
+    <bottom>12</bottom>
+   </property>
+   <property name="spacing">
+    <number>12</number>
+   </property>
+   <item>
+    <widget class="QSplitter" name="mainSplitter">
+     <property name="orientation">
+      <enum>Qt::Horizontal</enum>
+     </property>
+     <property name="childrenCollapsible">
+      <bool>false</bool>
+     </property>
+     <property name="handleWidth">
+      <number>10</number>
+     </property>
+     <widget class="QWidget" name="leftPane">
+      <layout class="QVBoxLayout" name="leftPaneLayout">
+       <property name="contentsMargins">
+        <left>0</left>
+        <top>0</top>
+        <right>0</right>
+        <bottom>0</bottom>
+       </property>
+       <property name="spacing">
+        <number>12</number>
+       </property>
+       <item>
+        <widget class="QSplitter" name="leftSplitter">
+         <property name="orientation">
+          <enum>Qt::Vertical</enum>
+         </property>
+         <property name="childrenCollapsible">
+          <bool>false</bool>
+         </property>
+         <property name="handleWidth">
+          <number>8</number>
+         </property>
+         <widget class="QWidget" name="datasetsSection">
+          <layout class="QVBoxLayout" name="datasetsSectionLayout">
+           <property name="contentsMargins">
+            <left>0</left>
+            <top>0</top>
+            <right>0</right>
+            <bottom>0</bottom>
+           </property>
+           <property name="spacing">
+            <number>0</number>
+           </property>
+           <item>
+            <widget class="QWidget" name="datasetsHost">
+             <layout class="QVBoxLayout" name="datasetsHostLayout">
+              <property name="contentsMargins">
+               <left>0</left>
+               <top>0</top>
+               <right>0</right>
+               <bottom>0</bottom>
+              </property>
+              <property name="spacing">
+               <number>0</number>
+              </property>
+             </layout>
+            </widget>
+           </item>
+          </layout>
+         </widget>
+         <widget class="QWidget" name="processingSection">
+          <layout class="QVBoxLayout" name="processingSectionLayout">
+           <property name="contentsMargins">
+            <left>0</left>
+            <top>0</top>
+            <right>0</right>
+            <bottom>0</bottom>
+           </property>
+           <property name="spacing">
+            <number>0</number>
+           </property>
+           <item>
+            <widget class="QWidget" name="processingHost">
+             <layout class="QVBoxLayout" name="processingHostLayout">
+              <property name="contentsMargins">
+               <left>0</left>
+               <top>0</top>
+               <right>0</right>
+               <bottom>0</bottom>
+              </property>
+              <property name="spacing">
+               <number>0</number>
+              </property>
+             </layout>
+            </widget>
+           </item>
+          </layout>
+         </widget>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+     <widget class="QWidget" name="rightPane">
+      <layout class="QVBoxLayout" name="rightPaneLayout">
+       <property name="contentsMargins">
+        <left>0</left>
+        <top>0</top>
+        <right>0</right>
+        <bottom>0</bottom>
+       </property>
+       <property name="spacing">
+        <number>0</number>
+       </property>
+       <item>
+        <widget class="QTabWidget" name="mainTabs">
+         <property name="documentMode">
+          <bool>true</bool>
+         </property>
+         <property name="movable">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
