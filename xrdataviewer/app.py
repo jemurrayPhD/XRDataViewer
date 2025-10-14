@@ -27,7 +27,7 @@ class StartupSplash(QtWidgets.QWidget):
     startupComplete = QtCore.Signal(bool)
 
     def __init__(self) -> None:
-        super().__init__(flags=QtCore.Qt.SplashScreen | QtCore.Qt.FramelessWindowHint)
+        super().__init__(None, QtCore.Qt.SplashScreen | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setWindowModality(QtCore.Qt.ApplicationModal)
