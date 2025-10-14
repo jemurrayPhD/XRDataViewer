@@ -219,7 +219,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._left_splitter is not None:
             self._left_splitter.setStretchFactor(0, 1)
             self._left_splitter.setStretchFactor(1, 1)
-            QtCore.QTimer.singleShot(0, lambda: self._left_splitter.setSizes([700, 400]))
+            QtCore.QTimer.singleShot(0, lambda: self._left_splitter.setSizes([340, 420]))
 
         if self._main_splitter is not None:
             self._main_splitter.setStretchFactor(1, 1)
@@ -251,7 +251,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_dock.setFloating(False)
         self.log_dock.resize(800, 200)
 
-        self.resize(1500, 900)
+        self.resize(1220, 780)
+        self.setMinimumSize(920, 640)
 
         if self._startup_splash is not None and not self.tab_interactive.has_embedded_jupyter:
             self._startup_splash.notify_no_jupyter()

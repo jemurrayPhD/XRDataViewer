@@ -1322,7 +1322,7 @@ class OverlayView(QtWidgets.QWidget):
 
         # Layer controls panel
         panel = QtWidgets.QWidget()
-        panel.setMinimumWidth(360)
+        panel.setMinimumWidth(320)
         panel.setSizePolicy(
             QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         )
