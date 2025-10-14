@@ -313,6 +313,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def main() -> None:
+    """Start the Qt application with the splash screen and main window."""
+
     app = QtWidgets.QApplication([])
     pg.setConfigOptions(imageAxisOrder="row-major")
     splash = StartupSplash()

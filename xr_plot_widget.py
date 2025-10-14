@@ -55,6 +55,8 @@ class LineStyleConfig:
 
 
 def clone_line_style(style: Optional[LineStyleConfig]) -> LineStyleConfig:
+    """Return a copy of ``style`` with values normalised for rendering."""
+
     src = style or LineStyleConfig()
     return LineStyleConfig(
         color=src.effective_color(),
@@ -121,6 +123,8 @@ class _SafeFormatDict(dict):
 
 
 def _format_with_context(text: str, context: Optional[Dict[str, Any]]) -> str:
+    """Format ``text`` with ``context`` while tolerating missing keys."""
+
     if not text:
         return ""
     if not context:
@@ -205,7 +209,7 @@ def _parse_basic_latex(text: str) -> str:
 
 
 def latex_to_html(text: str, context: Optional[Dict[str, Any]] = None) -> str:
-    """Public helper to convert a label with optional formatting context."""
+    """Convert lightweight LaTeX-style text to safe HTML, optionally formatted."""
 
     formatted = _format_with_context(text, context)
     return _parse_basic_latex(formatted)
@@ -239,6 +243,8 @@ def plotitem_annotation_state(
     plot: pg.PlotItem,
     colorbar_label: Optional[QtWidgets.QLabel] = None,
 ) -> PlotAnnotationConfig:
+    """Capture the current labels, fonts, and legend state for *plot*."""
+
     title = ""
     try:
         title = plot.titleLabel.text
@@ -354,6 +360,8 @@ def apply_plotitem_annotation(
     background_widget: Optional[QtWidgets.QWidget] = None,
     legend_handler: Optional[Callable[[PlotAnnotationConfig], None]] = None,
 ):
+    """Apply ``config`` annotations and background styling to ``plot`` widgets."""
+
     sources = getattr(plot, "_annotation_sources", {})
     if not isinstance(sources, dict):
         sources = {}

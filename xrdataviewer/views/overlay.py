@@ -40,6 +40,8 @@ from ..utils import ask_layout_label, ensure_extension, process_events, sanitize
 
 
 def _compute_line_rect(xs: np.ndarray, ys: np.ndarray) -> QtCore.QRectF:
+    """Return a bounding rectangle that safely encloses sampled line data."""
+
     xs = np.asarray(xs, float).reshape(-1)
     ys = np.asarray(ys, float).reshape(-1)
     mask = np.isfinite(xs) & np.isfinite(ys)
@@ -67,6 +69,8 @@ def _compute_line_rect(xs: np.ndarray, ys: np.ndarray) -> QtCore.QRectF:
 
 
 class OverlayLayer(QtCore.QObject):
+    """Representation of a layer drawn in the overlay plot (image or line)."""
+
     def __init__(
         self,
         view: "OverlayView",
@@ -152,6 +156,8 @@ class OverlayLayer(QtCore.QObject):
         return clone_line_style(self._line_style)
 
     def set_line_style(self, style: LineStyleConfig):
+        """Update the curve style and refresh the rendered line."""
+
         if not self.is_line_layer():
             return
         self._line_style = clone_line_style(style)
@@ -167,6 +173,8 @@ class OverlayLayer(QtCore.QObject):
                 pass
 
     def _compute_levels(self, data: np.ndarray) -> Tuple[float, float]:
+        """Calculate a robust low/high bound for image intensity."""
+
         data = np.asarray(data, float)
         finite = np.isfinite(data)
         if not finite.any():
@@ -191,18 +199,28 @@ class OverlayLayer(QtCore.QObject):
 
     # ---------- processing state helpers ----------
     def set_selected(self, selected: bool):
+        """Track whether the layer is part of the current selection."""
+
         self.selected = bool(selected)
 
     def has_processing(self) -> bool:
+        """Return ``True`` when the layer has any processing steps."""
+
         return bool(self.processing_stack)
 
     def processing_steps(self) -> List[ProcessingStep]:
+        """Return a copy of the recorded processing steps."""
+
         return [ProcessingStep(step.key, dict(step.params)) for step in self.processing_stack]
 
     def processing_pipeline(self, name: str = "") -> ProcessingPipeline:
+        """Bundle the stack into a :class:`ProcessingPipeline` named ``name``."""
+
         return ProcessingPipeline(name=name, steps=self.processing_steps())
 
     def clear_processing(self) -> Tuple[bool, Optional[str]]:
+        """Remove all processing steps and restore the base data."""
+
         self.processing_stack = []
         self.current_processing = "none"
         self.processing_params = {}
@@ -210,6 +228,8 @@ class OverlayLayer(QtCore.QObject):
         return True, None
 
     def append_processing_step(self, key: str, params: dict) -> Tuple[bool, Optional[str]]:
+        """Append a new step to the processing stack and update the layer."""
+
         if get_processing_function(key) is None:
             return False, f"Unknown processing mode: {key}"
         candidate = self.processing_steps()
@@ -225,6 +245,8 @@ class OverlayLayer(QtCore.QObject):
         return True, None
 
     def apply_pipeline(self, pipeline: ProcessingPipeline) -> Tuple[bool, Optional[str]]:
+        """Replace the existing stack with ``pipeline`` and evaluate it."""
+
         steps = [ProcessingStep(step.key, dict(step.params)) for step in pipeline.steps]
         try:
             data = self._execute_steps(steps)
@@ -238,6 +260,8 @@ class OverlayLayer(QtCore.QObject):
         return True, None
 
     def undo_processing(self) -> Tuple[bool, Optional[str]]:
+        """Remove the most recent processing step and refresh the display."""
+
         if not self.processing_stack:
             return False, "No processing steps to undo."
         steps = self.processing_steps()[:-1]
@@ -257,6 +281,8 @@ class OverlayLayer(QtCore.QObject):
         return True, None
 
     def processing_summary_lines(self) -> List[str]:
+        """Return formatted text describing the processing stack."""
+
         lines: List[str] = []
         for i, step in enumerate(self.processing_stack, start=1):
             spec = get_processing_function(step.key)
@@ -269,6 +295,8 @@ class OverlayLayer(QtCore.QObject):
         return lines
 
     def _execute_steps(self, steps: Iterable[ProcessingStep]) -> np.ndarray:
+        """Run ``steps`` in order against the layer's base data."""
+
         data = np.asarray(self.base_data, float)
         result = data
         for step in steps:
@@ -276,6 +304,8 @@ class OverlayLayer(QtCore.QObject):
         return np.asarray(result, float)
 
     def _apply_processed_array(self, data: np.ndarray):
+        """Store processed results and notify the underlying graphics item."""
+
         if self.is_line_layer():
             self.processed_data = np.asarray(data, float).reshape(-1)
             self._update_line_item(autorange=False)
@@ -289,6 +319,8 @@ class OverlayLayer(QtCore.QObject):
 
     # ---------- layer controls ----------
     def set_visible(self, on: bool):
+        """Toggle whether the layer's graphics item is shown."""
+
         self.visible = bool(on)
         try:
             self.graphics_item.setVisible(self.visible)
@@ -296,6 +328,8 @@ class OverlayLayer(QtCore.QObject):
             pass
 
     def set_opacity(self, alpha: float):
+        """Adjust the transparency of the rendered layer."""
+
         alpha = float(np.clip(alpha, 0.0, 1.0))
         self.opacity = alpha
         if self.is_line_layer():
@@ -310,6 +344,8 @@ class OverlayLayer(QtCore.QObject):
             self.widget.update_opacity_label(alpha)
 
     def set_colormap(self, name: str):
+        """Update the image colormap if supported."""
+
         self.colormap_name = name or "viridis"
         if not self.supports_colormap():
             return
@@ -322,6 +358,8 @@ class OverlayLayer(QtCore.QObject):
             pass
 
     def set_levels(self, lo: float, hi: float, *, update_widget: bool = True):
+        """Apply manual intensity levels to the image layer."""
+
         if not np.isfinite(lo) or not np.isfinite(hi):
             return
         if hi <= lo:
@@ -337,6 +375,8 @@ class OverlayLayer(QtCore.QObject):
             self.widget.update_level_spins(self._levels[0], self._levels[1])
 
     def auto_levels(self):
+        """Auto-scale image intensity using the processed array."""
+
         if not self.supports_levels():
             return
         lo, hi = self._compute_levels(self.processed_data)
@@ -346,6 +386,8 @@ class OverlayLayer(QtCore.QObject):
         return self.legend_proxy
 
     def apply_processing(self, mode: str, params: dict) -> Tuple[bool, Optional[str]]:
+        """Apply a processing command or pipeline based on ``mode``."""
+
         mode = (mode or "none").strip()
         params = dict(params or {})
 
@@ -361,6 +403,8 @@ class OverlayLayer(QtCore.QObject):
         return self.append_processing_step(mode, params)
 
     def get_display_rect(self):
+        """Return the graphics rect for legend placement and camera fits."""
+
         if self.is_line_layer():
             return self.rect
         rect = self.rect
@@ -373,6 +417,8 @@ class OverlayLayer(QtCore.QObject):
 
     # ---------- line helpers ----------
     def _normalise_line_x(self, values: Optional[np.ndarray], length: int) -> np.ndarray:
+        """Generate evenly spaced X coordinates when metadata is missing."""
+
         if length <= 0:
             return np.array([], dtype=float)
         if values is None:
@@ -391,6 +437,8 @@ class OverlayLayer(QtCore.QObject):
         return np.linspace(start, end, length, dtype=float)
 
     def _resample_line_axis(self, xs: np.ndarray, length: int) -> np.ndarray:
+        """Resample ``xs`` to ``length`` points preserving start/end values."""
+
         xs = np.asarray(xs, float).reshape(-1)
         if length <= 0:
             return np.array([], dtype=float)
@@ -520,6 +568,8 @@ class OverlayLayer(QtCore.QObject):
         return edges
 
 class OverlayLayerWidget(QtWidgets.QGroupBox):
+    """Side-panel inspector widget for adjusting a single overlay layer."""
+
     def __init__(self, view: "OverlayView", layer: OverlayLayer):
         super().__init__(layer.title)
         self.view = view
@@ -809,6 +859,8 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.btn_save_pipeline.setEnabled(bool(self.manager) and has_steps)
 
     def _selected_layers_for_actions(self) -> List[OverlayLayer]:
+        """Return selected layers with the inspector layer prioritised first."""
+
         selected = list(self.view.selected_layers())
         if not selected:
             return [self.layer]
@@ -1078,6 +1130,8 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
             QtWidgets.QMessageBox.warning(self, "Clear failed", text)
 
     def _on_save_pipeline(self):
+        """Prompt for a pipeline name and persist the layer's processing stack."""
+
         if not self.manager:
             QtWidgets.QMessageBox.information(self, "Save pipeline", "No processing manager is available to store pipelines.")
             return
@@ -1108,6 +1162,8 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self._mark_apply_pending()
 
     def _apply_processing(self):
+        """Run the selected processing configuration on the active layer set."""
+
         if not self._ready:
             return
         data = self._current_processing_data()
@@ -1182,6 +1238,8 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self._update_mode_ui(self._current_processing_data(), mark_pending=trigger)
 
 class OverlayView(QtWidgets.QWidget):
+    """Interactive view that manages layered image and curve overlays."""
+
     def __init__(
         self,
         processing_manager: Optional[ProcessingManager] = None,
@@ -1338,6 +1396,8 @@ class OverlayView(QtWidgets.QWidget):
             ev.ignore()
 
     def _add_payload(self, payload: str) -> bool:
+        """Decode ``payload`` into a new overlay layer and attach it to the view."""
+
         vr = VarRef.from_mime(payload)
         mem_var = None if vr else MemoryVarRef.from_mime(payload)
         slice_ref = None if (vr or mem_var) else MemorySliceRef.from_mime(payload)
@@ -1874,6 +1934,8 @@ class OverlayView(QtWidgets.QWidget):
 
     # ---------- data prep ----------
     def _prepare_layer(self, da, coords):
+        """Convert the dropped dataset ``da`` into layer data/geometry metadata."""
+
         coords = coords or {}
         values = getattr(da, "values", da)
         Z = np.asarray(values, float)
@@ -1898,6 +1960,8 @@ class OverlayView(QtWidgets.QWidget):
         return {"type": "image", "data": data, "rect": rect}
 
     def _line_axis_from_coords(self, coords: Dict[str, object], length: int) -> np.ndarray:
+        """Return a 1D coordinate array derived from metadata or a fallback grid."""
+
         if length <= 0:
             return np.array([], dtype=float)
         if not isinstance(coords, dict):
@@ -1939,6 +2003,8 @@ class OverlayView(QtWidgets.QWidget):
         return QRectF(float(x0), float(y0), float(x1 - x0), float(y1 - y0))
 
     def _resample_rectilinear(self, x1, y1, Z):
+        """Resample rectilinear coordinate grids onto a uniform image grid."""
+
         x1 = np.asarray(x1, float)
         y1 = np.asarray(y1, float)
         Z = np.asarray(Z, float)
@@ -1965,6 +2031,8 @@ class OverlayView(QtWidgets.QWidget):
         return Zu, rect
 
     def _resample_warped(self, X, Y, Z):
+        """Interpolate warped coordinate meshes back to a rectilinear grid."""
+
         try:
             from scipy.interpolate import griddata
         except Exception:

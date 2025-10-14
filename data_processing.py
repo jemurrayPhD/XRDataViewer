@@ -21,6 +21,8 @@ except Exception:
 # ---------------------------------------------------------------------------
 
 def poly2d_detrend(Z: np.ndarray, order_x: int = 2, order_y: int = 2) -> np.ndarray:
+    """Subtract a 2D polynomial fit from *Z* to remove broad background trends."""
+
     Z = np.asarray(Z, float)
     Ny, Nx = Z.shape
     y, x = np.mgrid[0:Ny, 0:Nx]
@@ -34,6 +36,8 @@ def poly2d_detrend(Z: np.ndarray, order_x: int = 2, order_y: int = 2) -> np.ndar
     return Z - fit
 
 def _axis_choices(dims: Optional[Sequence[str]]) -> List[tuple[str, str]]:
+    """Return axis selection labels used by anisotropic filter parameter factories."""
+
     labels = []
     if not dims:
         return labels
@@ -46,6 +50,8 @@ def _axis_choices(dims: Optional[Sequence[str]]) -> List[tuple[str, str]]:
 def gaussian_filter_nd(
     data: np.ndarray, sigma: float = 1.0, mode: str = "iso"
 ) -> np.ndarray:
+    """Apply an N-dimensional Gaussian filter with isotropic or axis-wise control."""
+
     data = np.asarray(data, float)
     if not _HAS_SCIPY:
         return data
@@ -75,6 +81,8 @@ def gaussian_filter_nd(
 
 
 def median_filter_nd(data: np.ndarray, ksize: int = 3, mode: str = "iso") -> np.ndarray:
+    """Run a median filter either isotropically or along individual axes."""
+
     data = np.asarray(data, float)
     if not _HAS_SCIPY:
         return data
@@ -111,6 +119,8 @@ def butterworth_filter(
     btype: str = "low",
     mode: str = "iso",
 ) -> np.ndarray:
+    """Apply a Butterworth filter, optionally sweeping each axis of an array."""
+
     data = np.asarray(data, float)
     if not _HAS_SCIPY:
         raise RuntimeError("Butterworth requires SciPy")
@@ -150,6 +160,8 @@ def butterworth_filter(
 
 
 def poly1d_detrend(data: np.ndarray, order: int = 2) -> np.ndarray:
+    """Remove a low-order polynomial baseline from 1D data."""
+
     arr = np.asarray(data, float).reshape(-1)
     if arr.size == 0:
         return arr
@@ -164,6 +176,8 @@ def poly1d_detrend(data: np.ndarray, order: int = 2) -> np.ndarray:
 
 
 def moving_average_1d(data: np.ndarray, window: int = 5) -> np.ndarray:
+    """Smooth a 1D signal with a centered moving-average kernel."""
+
     arr = np.asarray(data, float).reshape(-1)
     window = max(1, int(window))
     kernel = np.ones(window, dtype=float) / float(window)
@@ -171,6 +185,8 @@ def moving_average_1d(data: np.ndarray, window: int = 5) -> np.ndarray:
 
 
 def savgol_1d(data: np.ndarray, window: int = 5, poly: int = 2) -> np.ndarray:
+    """Perform Savitzky–Golay filtering on 1D data when SciPy is available."""
+
     arr = np.asarray(data, float).reshape(-1)
     if not _HAS_SCIPY or savgol_filter is None:
         return arr
@@ -241,6 +257,8 @@ class ProcessingFunctionSpec:
 
 
 def _gaussian_parameters(dims: Optional[Sequence[str]]) -> List[ParameterDefinition]:
+    """Build parameter definitions for Gaussian filtering based on dimensionality."""
+
     params = [
         ParameterDefinition(
             name="sigma",
@@ -269,6 +287,8 @@ def _gaussian_parameters(dims: Optional[Sequence[str]]) -> List[ParameterDefinit
 
 
 def _median_parameters(dims: Optional[Sequence[str]]) -> List[ParameterDefinition]:
+    """Create the parameter set for median filters, adapting axis choices."""
+
     params = [
         ParameterDefinition(
             name="ksize",
@@ -297,6 +317,8 @@ def _median_parameters(dims: Optional[Sequence[str]]) -> List[ParameterDefinitio
 
 
 def _butter_parameters(dims: Optional[Sequence[str]]) -> List[ParameterDefinition]:
+    """Return Butterworth parameter definitions including axis handling options."""
+
     params = [
         ParameterDefinition(
             name="cutoff",
@@ -464,10 +486,14 @@ _PROCESSING_FUNCTIONS: Dict[str, ProcessingFunctionSpec] = {
 
 
 def list_processing_functions(ndim: Optional[int] = None) -> List[ProcessingFunctionSpec]:
+    """Enumerate processing functions that support arrays of the requested dimension."""
+
     return [spec for spec in _PROCESSING_FUNCTIONS.values() if spec.supports_ndim(ndim)]
 
 
 def get_processing_function(key: str) -> Optional[ProcessingFunctionSpec]:
+    """Look up a processing function specification by registry key."""
+
     return _PROCESSING_FUNCTIONS.get(key)
 
 
@@ -476,6 +502,8 @@ def apply_processing_step(
     data: np.ndarray,
     params: Optional[Dict[str, float | int | str]] = None,
 ) -> np.ndarray:
+    """Execute the named processing step using *params* on *data*."""
+
     spec = get_processing_function(key)
     if spec is None:
         raise KeyError(key)
@@ -485,6 +513,8 @@ def apply_processing_step(
 
 
 def summarize_parameters(key: str, params: Dict[str, float | int | str]) -> str:
+    """Produce a compact human-readable summary for a processing configuration."""
+
     spec = get_processing_function(key)
     if spec is None:
         return ""
