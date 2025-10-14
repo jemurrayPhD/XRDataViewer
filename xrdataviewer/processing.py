@@ -608,11 +608,14 @@ class ProcessingDockContainer(QtWidgets.QWidget):
         self._content_widget = widget
         self._floating_window: Optional[QtWidgets.QDialog] = None
 
+        self.setObjectName("processingContainer")
+
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         header = QtWidgets.QWidget()
+        header.setObjectName("processingHeader")
         header_layout = QtWidgets.QHBoxLayout(header)
         header_layout.setContentsMargins(6, 6, 6, 6)
         header_layout.setSpacing(6)
@@ -628,6 +631,7 @@ class ProcessingDockContainer(QtWidgets.QWidget):
         self.btn_float.setAutoRaise(True)
         self.btn_float.setToolTip("Undock processing pane to a floating window")
         self.btn_float.clicked.connect(self._on_float_clicked)
+        self.btn_float.setProperty("headerAction", True)
         header_layout.addWidget(self.btn_float)
 
         self.btn_toggle = QtWidgets.QToolButton()
@@ -637,11 +641,13 @@ class ProcessingDockContainer(QtWidgets.QWidget):
         self.btn_toggle.setArrowType(QtCore.Qt.DownArrow)
         self.btn_toggle.setToolTip("Hide processing pane")
         self.btn_toggle.toggled.connect(self._on_toggle_toggled)
+        self.btn_toggle.setProperty("headerAction", True)
         header_layout.addWidget(self.btn_toggle)
 
         layout.addWidget(header)
 
         self._content_frame = QtWidgets.QWidget()
+        self._content_frame.setObjectName("processingContent")
         self._content_layout = QtWidgets.QVBoxLayout(self._content_frame)
         self._content_layout.setContentsMargins(0, 0, 0, 0)
         self._content_layout.setSpacing(0)
@@ -654,6 +660,7 @@ class ProcessingDockContainer(QtWidgets.QWidget):
         self._placeholder.setAlignment(QtCore.Qt.AlignCenter)
         self._placeholder.setWordWrap(True)
         self._placeholder.hide()
+        self._placeholder.setObjectName("processingPlaceholder")
         layout.addWidget(self._placeholder, 1)
 
         self._update_toggle_visuals()

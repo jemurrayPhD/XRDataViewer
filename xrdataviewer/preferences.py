@@ -5,7 +5,19 @@ import json
 from pathlib import Path
 from typing import Dict, Optional
 
+import pyqtgraph as pg
 from PySide2 import QtCore, QtWidgets
+
+from .appearance import (
+    ACCENT_OPTIONS,
+    BACKGROUND_OPTIONS,
+    BUTTON_SHAPE_OPTIONS,
+    BUILTIN_PROFILES,
+    FONT_OPTIONS,
+    default_appearance,
+    sanitize_appearance,
+    sanitize_profile_values,
+)
 
 
 class PreferencesManager(QtCore.QObject):
@@ -20,6 +32,7 @@ class PreferencesManager(QtCore.QObject):
             "general": {
                 "autoscale_on_load": True,
                 "default_layout_label": "",
+                "value_precision": 6,
             },
             "colormaps": {
                 "default": "viridis",
@@ -28,6 +41,7 @@ class PreferencesManager(QtCore.QObject):
             "misc": {
                 "default_export_dir": "",
             },
+            "appearance": default_appearance(),
         }
 
     def data(self) -> Dict[str, object]:
@@ -38,6 +52,13 @@ class PreferencesManager(QtCore.QObject):
         general = data.get("general", {}) if isinstance(data, dict) else {}
         if isinstance(general, dict):
             normalized["general"].update(general)
+            digits = general.get("value_precision")
+            try:
+                digits = int(digits)
+            except Exception:
+                digits = normalized["general"].get("value_precision", 6)
+            digits = max(0, min(8, digits))
+            normalized["general"]["value_precision"] = digits
         colormaps = data.get("colormaps", {}) if isinstance(data, dict) else {}
         if isinstance(colormaps, dict):
             normalized["colormaps"].update({k: v for k, v in colormaps.items() if k in ("default", "variables")})
@@ -54,6 +75,8 @@ class PreferencesManager(QtCore.QObject):
         misc = data.get("misc", {}) if isinstance(data, dict) else {}
         if isinstance(misc, dict):
             normalized["misc"].update(misc)
+        appearance = data.get("appearance") if isinstance(data, dict) else None
+        normalized["appearance"] = sanitize_appearance(appearance)
         self._data = normalized
         self.changed.emit(self.data())
 
@@ -66,6 +89,12 @@ class PreferencesManager(QtCore.QObject):
     def default_export_directory(self) -> str:
         return str(self._data.get("misc", {}).get("default_export_dir", ""))
 
+    def value_precision(self) -> int:
+        try:
+            return int(self._data.get("general", {}).get("value_precision", 6))
+        except Exception:
+            return 6
+
     def preferred_colormap(self, variable: Optional[str]) -> Optional[str]:
         variables = self._data.get("colormaps", {}).get("variables", {})
         if isinstance(variables, dict) and variable:
@@ -76,6 +105,9 @@ class PreferencesManager(QtCore.QObject):
         if default:
             return str(default)
         return None
+
+    def appearance(self) -> Dict[str, object]:
+        return copy.deepcopy(self._data.get("appearance", default_appearance()))
 
     def load_from_file(self, path: Path):
         try:
@@ -99,6 +131,12 @@ class PreferencesDialog(QtWidgets.QDialog):
         self.resize(520, 420)
         self._manager = manager
         self._data = manager.data()
+        self._appearance_profiles = copy.deepcopy(
+            self._data.get("appearance", {}).get("profiles", {})
+        )
+        self._appearance_active_profile = str(
+            self._data.get("appearance", {}).get("active_profile", "")
+        )
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -108,6 +146,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         layout.addWidget(self.tabs)
 
         self._build_general_tab()
+        self._build_appearance_tab()
         self._build_colormap_tab()
 
         controls = QtWidgets.QHBoxLayout()
@@ -140,6 +179,17 @@ class PreferencesDialog(QtWidgets.QDialog):
         )
         form.addRow("Default layout label", self.txt_layout_label)
 
+        self.spn_value_precision = QtWidgets.QSpinBox()
+        self.spn_value_precision.setRange(0, 8)
+        self.spn_value_precision.setValue(
+            int(self._data.get("general", {}).get("value_precision", 6))
+        )
+        self.spn_value_precision.setSuffix(" decimals")
+        self.spn_value_precision.setToolTip(
+            "Number of decimal places used for value readouts and controls."
+        )
+        form.addRow("Value precision", self.spn_value_precision)
+
         export_row = QtWidgets.QHBoxLayout()
         self.txt_export_dir = QtWidgets.QLineEdit(
             str(self._data.get("misc", {}).get("default_export_dir", ""))
@@ -151,6 +201,78 @@ class PreferencesDialog(QtWidgets.QDialog):
         form.addRow("Default export folder", export_row)
 
         self.tabs.addTab(tab, "General")
+
+    def _build_appearance_tab(self):
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(8)
+
+        self.cmb_profiles = QtWidgets.QComboBox()
+        self.cmb_profiles.currentIndexChanged.connect(self._on_profile_selected)
+        layout.addWidget(QtWidgets.QLabel("Profiles"))
+        layout.addWidget(self.cmb_profiles)
+
+        form = QtWidgets.QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(6)
+
+        self.cmb_font_family = QtWidgets.QComboBox()
+        for name in FONT_OPTIONS:
+            self.cmb_font_family.addItem(name, name)
+        self.cmb_font_family.currentIndexChanged.connect(self._on_appearance_modified)
+        form.addRow("Font family", self.cmb_font_family)
+
+        self.spn_font_size = QtWidgets.QDoubleSpinBox()
+        self.spn_font_size.setDecimals(1)
+        self.spn_font_size.setRange(8.0, 14.0)
+        self.spn_font_size.setSingleStep(0.5)
+        self.spn_font_size.valueChanged.connect(self._on_appearance_modified)
+        form.addRow("Font size", self.spn_font_size)
+
+        self.cmb_accent = QtWidgets.QComboBox()
+        for name in ACCENT_OPTIONS:
+            self.cmb_accent.addItem(name, name)
+        self.cmb_accent.currentIndexChanged.connect(self._on_appearance_modified)
+        form.addRow("Accent color", self.cmb_accent)
+
+        self.cmb_background = QtWidgets.QComboBox()
+        for name in BACKGROUND_OPTIONS:
+            self.cmb_background.addItem(name, name)
+        self.cmb_background.currentIndexChanged.connect(self._on_appearance_modified)
+        form.addRow("Background", self.cmb_background)
+
+        self.cmb_button_shape = QtWidgets.QComboBox()
+        for name in BUTTON_SHAPE_OPTIONS:
+            self.cmb_button_shape.addItem(name, name)
+        self.cmb_button_shape.currentIndexChanged.connect(self._on_appearance_modified)
+        form.addRow("Button shape", self.cmb_button_shape)
+
+        layout.addLayout(form)
+
+        button_row = QtWidgets.QHBoxLayout()
+        self.btn_save_profile = QtWidgets.QPushButton("Save profile…")
+        self.btn_save_profile.clicked.connect(self._save_profile)
+        button_row.addWidget(self.btn_save_profile)
+
+        self.btn_delete_profile = QtWidgets.QPushButton("Delete profile")
+        self.btn_delete_profile.clicked.connect(self._delete_profile)
+        button_row.addWidget(self.btn_delete_profile)
+
+        self.btn_export_profile = QtWidgets.QPushButton("Export selected…")
+        self.btn_export_profile.clicked.connect(self._export_profile)
+        button_row.addWidget(self.btn_export_profile)
+
+        self.btn_import_profile = QtWidgets.QPushButton("Import profile…")
+        self.btn_import_profile.clicked.connect(self._import_profile)
+        button_row.addWidget(self.btn_import_profile)
+
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        self.tabs.addTab(tab, "Appearance")
+
+        self._apply_appearance_tab()
 
     def _build_colormap_tab(self):
         tab = QtWidgets.QWidget()
@@ -270,7 +392,8 @@ class PreferencesDialog(QtWidgets.QDialog):
     def _collect_data(self) -> Dict[str, object]:
         general = {
             "autoscale_on_load": self.chk_autoscale.isChecked(),
-            "default_layout_label": self.txt_layout_label.text(),
+            "default_layout_label": self.txt_layout_label.text().strip(),
+            "value_precision": int(self.spn_value_precision.value()),
         }
         colormaps = {
             "default": self.cmb_default_cmap.currentData() or "",
@@ -288,12 +411,27 @@ class PreferencesDialog(QtWidgets.QDialog):
         misc = {
             "default_export_dir": self.txt_export_dir.text().strip(),
         }
-        return {"general": general, "colormaps": colormaps, "misc": misc}
+        appearance = {
+            "font_family": self.cmb_font_family.currentData(),
+            "font_size": float(self.spn_font_size.value()),
+            "accent": self.cmb_accent.currentData(),
+            "background": self.cmb_background.currentData(),
+            "button_shape": self.cmb_button_shape.currentData(),
+            "active_profile": self._appearance_active_profile,
+            "profiles": copy.deepcopy(self._appearance_profiles),
+        }
+        return {
+            "general": general,
+            "colormaps": colormaps,
+            "misc": misc,
+            "appearance": appearance,
+        }
 
     def _apply_data(self):
         data = self._data
         self.chk_autoscale.setChecked(bool(data.get("general", {}).get("autoscale_on_load", True)))
         self.txt_layout_label.setText(str(data.get("general", {}).get("default_layout_label", "")))
+        self.spn_value_precision.setValue(int(data.get("general", {}).get("value_precision", 6)))
         self.txt_export_dir.setText(str(data.get("misc", {}).get("default_export_dir", "")))
         default_cmap = str(data.get("colormaps", {}).get("default", ""))
         idx = self.cmb_default_cmap.findData(default_cmap)
@@ -308,6 +446,200 @@ class PreferencesDialog(QtWidgets.QDialog):
                 self.table_colormaps.insertRow(row)
                 self.table_colormaps.setItem(row, 0, QtWidgets.QTableWidgetItem(str(var)))
                 self.table_colormaps.setItem(row, 1, QtWidgets.QTableWidgetItem(str(cmap)))
+        self._appearance_profiles = copy.deepcopy(
+            data.get("appearance", {}).get("profiles", {})
+        )
+        self._appearance_active_profile = str(
+            data.get("appearance", {}).get("active_profile", "")
+        )
+        self._apply_appearance_tab()
+
+    # ---------- appearance helpers ----------
+
+    def _apply_appearance_tab(self):
+        appearance = sanitize_appearance(self._data.get("appearance", {}))
+        self._appearance_profiles = copy.deepcopy(appearance.get("profiles", {}))
+        self._appearance_active_profile = str(appearance.get("active_profile", ""))
+        self._set_combobox_value(self.cmb_font_family, appearance.get("font_family"))
+        self._set_font_size(float(appearance.get("font_size", 10.5)))
+        self._set_combobox_value(self.cmb_accent, appearance.get("accent"))
+        self._set_combobox_value(self.cmb_background, appearance.get("background"))
+        self._set_combobox_value(self.cmb_button_shape, appearance.get("button_shape"))
+        self._refresh_profile_combo()
+
+    def _set_combobox_value(self, combo: QtWidgets.QComboBox, value):
+        idx = combo.findData(value)
+        if idx < 0:
+            idx = 0
+        block = combo.blockSignals(True)
+        combo.setCurrentIndex(idx)
+        combo.blockSignals(block)
+
+    def _set_font_size(self, value: float):
+        block = self.spn_font_size.blockSignals(True)
+        self.spn_font_size.setValue(max(8.0, min(14.0, float(value))))
+        self.spn_font_size.blockSignals(block)
+
+    def _refresh_profile_combo(self):
+        current = self._appearance_active_profile
+        self.cmb_profiles.blockSignals(True)
+        self.cmb_profiles.clear()
+        self.cmb_profiles.addItem("Custom (unsaved)", {"kind": "custom", "name": ""})
+        for name in BUILTIN_PROFILES:
+            self.cmb_profiles.addItem(f"{name} (built-in)", {"kind": "builtin", "name": name})
+        for name in sorted(self._appearance_profiles):
+            self.cmb_profiles.addItem(name, {"kind": "stored", "name": name})
+        index = 0
+        if current:
+            for i in range(self.cmb_profiles.count()):
+                info = self.cmb_profiles.itemData(i)
+                if isinstance(info, dict) and info.get("name") == current:
+                    index = i
+                    break
+        self.cmb_profiles.setCurrentIndex(index)
+        self.cmb_profiles.blockSignals(False)
+        self._update_profile_buttons()
+
+    def _update_profile_buttons(self):
+        info = self.cmb_profiles.currentData()
+        is_stored = isinstance(info, dict) and info.get("kind") == "stored"
+        self.btn_delete_profile.setEnabled(is_stored)
+        self.btn_export_profile.setEnabled(info is not None)
+
+    def _on_profile_selected(self, index: int):
+        info = self.cmb_profiles.itemData(index)
+        if not isinstance(info, dict):
+            return
+        kind = info.get("kind")
+        name = info.get("name", "")
+        if kind == "custom":
+            self._appearance_active_profile = ""
+            self._update_profile_buttons()
+            return
+        if kind == "builtin":
+            values = BUILTIN_PROFILES.get(name, {})
+        else:
+            values = self._appearance_profiles.get(name, {})
+        if not values:
+            return
+        self._set_combobox_value(self.cmb_font_family, values.get("font_family"))
+        self._set_font_size(float(values.get("font_size", 10.5)))
+        self._set_combobox_value(self.cmb_accent, values.get("accent"))
+        self._set_combobox_value(self.cmb_background, values.get("background"))
+        self._set_combobox_value(self.cmb_button_shape, values.get("button_shape"))
+        self._appearance_active_profile = name
+        self._update_profile_buttons()
+
+    def _on_appearance_modified(self):
+        self._appearance_active_profile = ""
+        block = self.cmb_profiles.blockSignals(True)
+        self.cmb_profiles.setCurrentIndex(0)
+        self.cmb_profiles.blockSignals(block)
+        self._update_profile_buttons()
+
+    def _current_appearance(self) -> Dict[str, object]:
+        return {
+            "font_family": self.cmb_font_family.currentData(),
+            "font_size": float(self.spn_font_size.value()),
+            "accent": self.cmb_accent.currentData(),
+            "background": self.cmb_background.currentData(),
+            "button_shape": self.cmb_button_shape.currentData(),
+        }
+
+    def _save_profile(self):
+        name, ok = QtWidgets.QInputDialog.getText(self, "Save profile", "Profile name:")
+        if not ok:
+            return
+        key = str(name).strip()
+        if not key:
+            return
+        values = sanitize_profile_values(self._current_appearance())
+        self._appearance_profiles[key] = values
+        self._appearance_active_profile = key
+        self._refresh_profile_combo()
+
+    def _delete_profile(self):
+        info = self.cmb_profiles.currentData()
+        if not isinstance(info, dict) or info.get("kind") != "stored":
+            return
+        name = info.get("name", "")
+        if name in self._appearance_profiles:
+            del self._appearance_profiles[name]
+        self._appearance_active_profile = ""
+        self._refresh_profile_combo()
+
+    def _export_profile(self):
+        info = self.cmb_profiles.currentData()
+        name = "Custom"
+        if isinstance(info, dict):
+            kind = info.get("kind")
+            name = info.get("name", "Custom")
+            if kind == "builtin":
+                values = BUILTIN_PROFILES.get(name, {})
+            elif kind == "stored":
+                values = self._appearance_profiles.get(name, {})
+            else:
+                values = self._current_appearance()
+        else:
+            values = self._current_appearance()
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export aesthetic profile",
+            f"{name or 'profile'}.json",
+            "JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            payload = {
+                "name": name or "Custom",
+                "profile": sanitize_profile_values(values),
+            }
+            Path(path).write_text(json.dumps(payload, indent=2))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Export failed", str(exc))
+
+    def _import_profile(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Import aesthetic profile",
+            "",
+            "JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            data = json.loads(Path(path).read_text())
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Import failed", str(exc))
+            return
+        name = "Imported"
+        if isinstance(data, dict):
+            if isinstance(data.get("profile"), dict):
+                values = sanitize_profile_values(data["profile"])
+                name = str(data.get("name", name))
+            else:
+                values = sanitize_profile_values(data)
+                if "name" in data:
+                    name = str(data.get("name", name))
+        else:
+            QtWidgets.QMessageBox.warning(self, "Import failed", "File format not recognized.")
+            return
+        key = name.strip() or "Imported"
+        base_key = key
+        counter = 1
+        while key in self._appearance_profiles or key in BUILTIN_PROFILES:
+            counter += 1
+            key = f"{base_key} {counter}"
+        self._appearance_profiles[key] = values
+        self._appearance_active_profile = key
+        self._set_combobox_value(self.cmb_font_family, values.get("font_family"))
+        self._set_font_size(float(values.get("font_size", 10.5)))
+        self._set_combobox_value(self.cmb_accent, values.get("accent"))
+        self._set_combobox_value(self.cmb_background, values.get("background"))
+        self._set_combobox_value(self.cmb_button_shape, values.get("button_shape"))
+        self._refresh_profile_combo()
+
 
     def accept(self):
         self._data = self._collect_data()
