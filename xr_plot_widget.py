@@ -28,6 +28,7 @@ class LineStyleConfig:
     markers: bool = False
     marker_style: str = "o"
     marker_size: int = 7
+    show_line: bool = True
 
     def normalized_opacity(self) -> float:
         return max(0.0, min(1.0, float(self.opacity)))
@@ -54,6 +55,8 @@ class LineStyleConfig:
 
 
 def clone_line_style(style: Optional[LineStyleConfig]) -> LineStyleConfig:
+    """Return a copy of ``style`` with values normalised for rendering."""
+
     src = style or LineStyleConfig()
     return LineStyleConfig(
         color=src.effective_color(),
@@ -65,6 +68,7 @@ def clone_line_style(style: Optional[LineStyleConfig]) -> LineStyleConfig:
         markers=src.markers,
         marker_style=src.marker_style,
         marker_size=src.marker_size,
+        show_line=src.show_line,
     )
 
 
@@ -119,6 +123,8 @@ class _SafeFormatDict(dict):
 
 
 def _format_with_context(text: str, context: Optional[Dict[str, Any]]) -> str:
+    """Format ``text`` with ``context`` while tolerating missing keys."""
+
     if not text:
         return ""
     if not context:
@@ -203,7 +209,7 @@ def _parse_basic_latex(text: str) -> str:
 
 
 def latex_to_html(text: str, context: Optional[Dict[str, Any]] = None) -> str:
-    """Public helper to convert a label with optional formatting context."""
+    """Convert lightweight LaTeX-style text to safe HTML, optionally formatted."""
 
     formatted = _format_with_context(text, context)
     return _parse_basic_latex(formatted)
@@ -237,6 +243,8 @@ def plotitem_annotation_state(
     plot: pg.PlotItem,
     colorbar_label: Optional[QtWidgets.QLabel] = None,
 ) -> PlotAnnotationConfig:
+    """Capture the current labels, fonts, and legend state for *plot*."""
+
     title = ""
     try:
         title = plot.titleLabel.text
@@ -352,6 +360,8 @@ def apply_plotitem_annotation(
     background_widget: Optional[QtWidgets.QWidget] = None,
     legend_handler: Optional[Callable[[PlotAnnotationConfig], None]] = None,
 ):
+    """Apply ``config`` annotations and background styling to ``plot`` widgets."""
+
     sources = getattr(plot, "_annotation_sources", {})
     if not isinstance(sources, dict):
         sources = {}
@@ -580,7 +590,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
             "left": ScientificAxisItem("left"),
         }
         self.plot = self.glw.addPlot(row=0, col=0, axisItems=axis_items)
-        self.plot.invertY(True)
+        self.plot.invertY(False)
         self.plot.setMenuEnabled(False)
         self.plot.setLabel("left", "Y")
         self.plot.setLabel("bottom", "X")
@@ -599,6 +609,8 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._last_rect = None
         self._line_x: Optional[np.ndarray] = None
         self._line_y: Optional[np.ndarray] = None
+        self._line_plot_x: Optional[np.ndarray] = None
+        self._line_plot_y: Optional[np.ndarray] = None
         self._mode: str = "image"
         self._line_style = LineStyleConfig()
 
@@ -712,17 +724,39 @@ class CentralPlotWidget(QtWidgets.QWidget):
     def _ensure_legend(self) -> pg.LegendItem:
         if self._legend_item is None:
             legend = pg.LegendItem(offset=(10, 10))
-            legend.setParentItem(self.plot.graphicsItem())
+            try:
+                legend.setParentItem(self.plot.vb)
+            except Exception:
+                legend.setParentItem(self.plot.graphicsItem())
             self._legend_item = legend
         return self._legend_item
 
+    def _release_legend(self):
+        if self._legend_item is None:
+            return
+        legend = self._legend_item
+        self._legend_item = None
+        try:
+            legend.hide()
+        except Exception:
+            pass
+        try:
+            scene = legend.scene()
+        except Exception:
+            scene = None
+        if scene is not None:
+            try:
+                scene.removeItem(legend)
+            except Exception:
+                pass
+        try:
+            legend.setParentItem(None)
+        except Exception:
+            pass
+
     def _apply_legend(self, config: PlotAnnotationConfig):
         if not config.legend_visible or not self._legend_sources:
-            if self._legend_item is not None:
-                try:
-                    self._legend_item.hide()
-                except Exception:
-                    pass
+            self._release_legend()
             return
         legend = self._ensure_legend()
         try:
@@ -760,6 +794,13 @@ class CentralPlotWidget(QtWidgets.QWidget):
             legend.show()
         except Exception:
             pass
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        try:
+            self._release_legend()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     # ---------- public API ----------
     def set_labels(self, xlabel: str = "X", ylabel: str = "Y"):
@@ -810,6 +851,20 @@ class CentralPlotWidget(QtWidgets.QWidget):
             pass
 
     def auto_view_range(self):
+        if self._mode == "line":
+            xs = self._line_plot_x if self._line_plot_x is not None else self._line_x
+            ys = self._line_plot_y if self._line_plot_y is not None else self._line_y
+            if xs is None or ys is None or xs.size == 0:
+                return
+            rect = self._line_data_rect(xs, ys)
+            if rect is None:
+                return
+            try:
+                self.plot.vb.setXRange(rect.left(), rect.right(), padding=0.05)
+                self.plot.vb.setYRange(rect.top(), rect.bottom(), padding=0.05)
+            except Exception:
+                pass
+            return
         try:
             rect = self.img_item.mapRectToParent(self.img_item.boundingRect())
         except Exception:
@@ -969,18 +1024,22 @@ class CentralPlotWidget(QtWidgets.QWidget):
 
         color = style.effective_color()
         color.setAlphaF(style.normalized_opacity())
-        width = max(0.1, float(style.width))
-        pen = pg.mkPen(color, width=width)
-        try:
-            pen_style = {
-                "solid": QtCore.Qt.SolidLine,
-                "dashed": QtCore.Qt.DashLine,
-                "dotted": QtCore.Qt.DotLine,
-                "dashdot": QtCore.Qt.DashDotLine,
-            }.get(style.pen_style, QtCore.Qt.SolidLine)
-            pen.setStyle(pen_style)
-        except Exception:
-            pass
+        pen: Optional[QtGui.QPen]
+        base_width = max(0.1, float(style.width))
+        if style.show_line:
+            pen = pg.mkPen(color, width=base_width)
+            try:
+                pen_style = {
+                    "solid": QtCore.Qt.SolidLine,
+                    "dashed": QtCore.Qt.DashLine,
+                    "dotted": QtCore.Qt.DotLine,
+                    "dashdot": QtCore.Qt.DashDotLine,
+                }.get(style.pen_style, QtCore.Qt.SolidLine)
+                pen.setStyle(pen_style)
+            except Exception:
+                pass
+        else:
+            pen = None
 
         kwargs: Dict[str, object] = {}
         if step_mode:
@@ -991,27 +1050,48 @@ class CentralPlotWidget(QtWidgets.QWidget):
         marker_pen: Optional[QtGui.QPen] = None
         marker_brush: Optional[QtGui.QBrush] = None
         marker_size: Optional[int] = None
+        symbol_kwargs: Dict[str, object] = {}
         if style.markers and not step_mode:
+            key = str(style.marker_style).strip().lower()
             symbol_map = {
                 "o": "o",
+                "circle": "o",
+                "●": "o",
+                "•": "o",
                 "s": "s",
+                "square": "s",
+                "□": "s",
                 "t": "t",
+                "triangle": "t",
+                "triangleup": "t",
+                "^": "t",
                 "d": "d",
+                "diamond": "d",
                 "+": "+",
+                "plus": "+",
                 "x": "x",
+                "cross": "x",
             }
-            symbol = symbol_map.get(style.marker_style, "o")
+            symbol = symbol_map.get(key, "o")
             marker_color = QtGui.QColor(color)
             marker_pen = QtGui.QPen(marker_color)
-            marker_pen.setWidthF(max(1.0, width * 0.75))
+            marker_pen.setWidthF(max(1.0, base_width * 0.75))
             marker_brush = QtGui.QBrush(marker_color)
             marker_size = max(1, int(style.marker_size))
+            symbol_kwargs["symbol"] = symbol
+            symbol_kwargs["symbolBrush"] = marker_brush
+            symbol_kwargs["symbolPen"] = marker_pen
+            symbol_kwargs["symbolSize"] = marker_size
+        else:
+            symbol_kwargs["symbol"] = None
 
         try:
-            self._line_item.setData(x_plot, y_plot, pen=pen, **kwargs)
-            if style.markers and symbol is not None:
+            self._line_item.setData(x_plot, y_plot, pen=pen, **kwargs, **symbol_kwargs)
+            self._line_item.setVisible(True)
+            self.img_item.setVisible(False)
+            if symbol_kwargs.get("symbol"):
                 try:
-                    self._line_item.setSymbol(symbol)
+                    self._line_item.setSymbol(symbol_kwargs.get("symbol"))
                     if marker_brush is not None:
                         self._line_item.setSymbolBrush(marker_brush)
                     if marker_pen is not None:
@@ -1023,15 +1103,13 @@ class CentralPlotWidget(QtWidgets.QWidget):
             else:
                 try:
                     self._line_item.setSymbol(None)
-                    self._line_item.setSymbolBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
-                    self._line_item.setSymbolPen(QtGui.QPen(QtCore.Qt.NoPen))
                 except Exception:
                     pass
-            self._line_item.setVisible(True)
-            self.img_item.setVisible(False)
         except Exception:
             pass
 
+        self._line_plot_x = np.array(x_plot, copy=True)
+        self._line_plot_y = np.array(y_plot, copy=True)
         container = self.histogram_widget()
         if container is not None:
             container.setVisible(False)
@@ -1040,10 +1118,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
         except Exception:
             pass
         if autorange:
-            try:
-                self.plot.enableAutoRange(x=True, y=True)
-            except Exception:
-                pass
+            self.auto_view_range()
 
     def _step_edges(self, xs: np.ndarray) -> np.ndarray:
         xs = np.asarray(xs, float)
@@ -1067,6 +1142,38 @@ class CentralPlotWidget(QtWidgets.QWidget):
         edges[:-1] = xs
         edges[-1] = xs[-1]
         return edges
+
+    def _line_data_rect(self, xs: np.ndarray, ys: np.ndarray) -> Optional[QtCore.QRectF]:
+        xs = np.asarray(xs, float).reshape(-1)
+        ys = np.asarray(ys, float).reshape(-1)
+        if xs.size == 0 or ys.size == 0:
+            return None
+        if ys.size != xs.size:
+            m = min(xs.size, ys.size)
+            xs = xs[:m]
+            ys = ys[:m]
+        mask = np.isfinite(xs) & np.isfinite(ys)
+        if not mask.any():
+            return None
+        x_vals = xs[mask]
+        y_vals = ys[mask]
+        x0 = float(np.nanmin(x_vals))
+        x1 = float(np.nanmax(x_vals))
+        y0 = float(np.nanmin(y_vals))
+        y1 = float(np.nanmax(y_vals))
+        if not np.isfinite(x0) or not np.isfinite(x1):
+            x0, x1 = 0.0, float(xs.size - 1 if xs.size > 1 else 1.0)
+        if not np.isfinite(y0) or not np.isfinite(y1):
+            y0, y1 = 0.0, 1.0
+        if x0 == x1:
+            pad = 0.5 if xs.size <= 1 else max(1e-6, abs(x0) * 0.01)
+            x0 -= pad
+            x1 += pad
+        if y0 == y1:
+            pad = 0.5 if ys.size <= 1 else max(1e-6, abs(y0) * 0.05)
+            y0 -= pad
+            y1 += pad
+        return QtCore.QRectF(x0, y0, x1 - x0, y1 - y0)
 
     # ---------- sample grid overlay on main plot ----------
     def show_sample_grid(self, show: bool, *, x1=None, y1=None, X=None, Y=None, step: int = 10):

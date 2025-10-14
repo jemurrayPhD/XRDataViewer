@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -141,13 +142,15 @@ class SequentialRoiWindow(QtWidgets.QWidget):
         self.profile_plot.setLabel("bottom", xlabel)
         self.profile_plot.setLabel("left", ylabel)
         self.profile_curve.setData(xs, ys)
-        self.profile_plot.enableAutoRange()
+        self.profile_plot.enableAutoRange(x=True, y=True)
+        self.profile_plot.autoRange()
 
     def update_slice_curve(self, xs: List[float], ys: List[float], xlabel: str, ylabel: str):
         self.slice_plot.setLabel("bottom", xlabel)
         self.slice_plot.setLabel("left", ylabel)
         self.slice_curve.setData(xs, ys)
-        self.slice_plot.enableAutoRange()
+        self.slice_plot.enableAutoRange(x=True, y=True)
+        self.slice_plot.autoRange()
 
     def _emit_axes_changed(self):
         if self._updating:
@@ -300,26 +303,21 @@ class SequentialView(QtWidgets.QWidget):
         slider_row.addWidget(self.spin_slice, 0)
         outer.addLayout(slider_row)
 
-        btn_row = QtWidgets.QHBoxLayout()
         self.btn_apply_processing = QtWidgets.QPushButton("Apply processing…")
         self.btn_apply_processing.setEnabled(False)
         self.btn_apply_processing.clicked.connect(self._choose_processing)
-        btn_row.addWidget(self.btn_apply_processing)
 
         self.btn_reset_processing = QtWidgets.QPushButton("Reset processing")
         self.btn_reset_processing.setEnabled(False)
         self.btn_reset_processing.clicked.connect(self._reset_processing)
-        btn_row.addWidget(self.btn_reset_processing)
 
         self.btn_autoscale = QtWidgets.QPushButton("Autoscale colors")
         self.btn_autoscale.setEnabled(False)
         self.btn_autoscale.clicked.connect(self._on_autoscale_clicked)
-        btn_row.addWidget(self.btn_autoscale)
 
         self.btn_autorange = QtWidgets.QPushButton("Auto view")
         self.btn_autorange.setEnabled(False)
         self.btn_autorange.clicked.connect(self._on_autorange_clicked)
-        btn_row.addWidget(self.btn_autorange)
 
         self.btn_export = QtWidgets.QToolButton()
         self.btn_export.setText("Export")
@@ -337,23 +335,50 @@ class SequentialView(QtWidgets.QWidget):
         act_layout = export_menu.addAction("Save view layout…")
         act_layout.triggered.connect(self._export_sequential_layout)
         self.btn_export.setMenu(export_menu)
-        btn_row.addWidget(self.btn_export)
 
-        btn_row.addSpacing(12)
-
-        cmap_label = QtWidgets.QLabel("Color map:")
+        cmap_label = QtWidgets.QLabel("Colormap:")
         cmap_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        btn_row.addWidget(cmap_label, 0)
-
         self.cmb_colormap = QtWidgets.QComboBox()
         self.cmb_colormap.setEnabled(False)
         self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
         self.cmb_colormap.currentIndexChanged.connect(self._on_colormap_changed)
-        btn_row.addWidget(self.cmb_colormap, 0)
         self._populate_colormap_choices()
 
-        btn_row.addStretch(1)
-        outer.addLayout(btn_row)
+        self.btn_annotations = QtWidgets.QPushButton("Set annotations…")
+        self.btn_annotations.setEnabled(False)
+        self.btn_annotations.clicked.connect(self._open_annotation_dialog)
+
+        self.btn_line_style = QtWidgets.QPushButton("Line style…")
+        self.btn_line_style.setEnabled(False)
+        self.btn_line_style.clicked.connect(self._open_line_style_dialog)
+
+        def _make_group(title: str, widgets: Iterable[QtWidgets.QWidget]) -> QtWidgets.QGroupBox:
+            box = QtWidgets.QGroupBox(title)
+            layout = QtWidgets.QHBoxLayout(box)
+            layout.setContentsMargins(8, 6, 8, 6)
+            layout.setSpacing(6)
+            for widget in widgets:
+                layout.addWidget(widget)
+            return box
+
+        controls_bar = QtWidgets.QHBoxLayout()
+        controls_bar.setSpacing(10)
+        controls_bar.addWidget(
+            _make_group("Processing", (self.btn_apply_processing, self.btn_reset_processing))
+        )
+        controls_bar.addWidget(
+            _make_group("Scaling", (self.btn_autoscale, self.btn_autorange))
+        )
+        controls_bar.addWidget(
+            _make_group("Display", (cmap_label, self.cmb_colormap))
+        )
+        controls_bar.addWidget(
+            _make_group("Style", (self.btn_line_style, self.btn_annotations))
+        )
+        controls_bar.addWidget(_make_group("Export", (self.btn_export,)))
+        controls_bar.addStretch(1)
+        outer.addLayout(controls_bar)
+        self._update_line_style_button()
 
         self.viewer_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self.viewer_split.setChildrenCollapsible(False)
@@ -362,6 +387,10 @@ class SequentialView(QtWidgets.QWidget):
 
         self.viewer = CentralPlotWidget(self)
         self.viewer_split.addWidget(self.viewer)
+        try:
+            self.viewer.set_line_style(self._line_style, refresh=False)
+        except Exception:
+            pass
         hist = self.viewer.histogram_widget()
         if hist is not None and self.viewer_split.indexOf(hist) == -1:
             hist.setSizePolicy(
@@ -392,11 +421,6 @@ class SequentialView(QtWidgets.QWidget):
                 "3D volume rendering requires the optional pyqtgraph.opengl module"
             )
         roi_row.addWidget(self.btn_volume_view)
-
-        self.btn_annotations = QtWidgets.QPushButton("Set annotations…")
-        self.btn_annotations.setEnabled(False)
-        self.btn_annotations.clicked.connect(self._open_annotation_dialog)
-        roi_row.addWidget(self.btn_annotations)
 
         self.lbl_roi_status = QtWidgets.QLabel("ROI disabled")
         self.lbl_roi_status.setStyleSheet("color: #666;")
@@ -629,6 +653,7 @@ class SequentialView(QtWidgets.QWidget):
         self.btn_autorange.setEnabled(False)
         self.cmb_colormap.setEnabled(False)
         self.lbl_slice.setText("Slice: –")
+        self._update_line_style_button()
 
     def _set_dataset(self, ds: xr.Dataset, path: Optional[Path], label: Optional[str] = None):
         if self._dataset is not None and self._dataset is not ds:
@@ -684,6 +709,7 @@ class SequentialView(QtWidgets.QWidget):
         self._roi_axes_selection = (0, 1)
         self._volume_cache = None
         self._update_roi_window_options()
+        self._update_line_style_button()
 
     def _clear_fixed_dim_widgets(self):
         while self.fixed_dims_layout.rowCount():
@@ -786,6 +812,20 @@ class SequentialView(QtWidgets.QWidget):
             self._on_roi_toggled(False)
         self._update_axis_coords()
         self._update_volume_window_axis_labels()
+        self._update_line_style_button()
+
+    def _current_processing_dims(self) -> Tuple[str, ...]:
+        if self._line_mode:
+            axis = self._row_axis or (self._dims[0] if self._dims else "axis0")
+            return (str(axis),)
+        dims: List[str] = []
+        if self._row_axis:
+            dims.append(str(self._row_axis))
+        if self._col_axis:
+            dims.append(str(self._col_axis))
+        if not dims and self._current_da is not None:
+            dims = [str(d) for d in list(self._current_da.dims)[:2]]
+        return tuple(dims)
 
     def _update_axis_coords(self):
         axis = self._slice_axis
@@ -1081,6 +1121,7 @@ class SequentialView(QtWidgets.QWidget):
                 self._update_roi_curve()
             self.cmb_colormap.setEnabled(False)
             self._refresh_volume_window()
+            self._update_line_style_button()
             return
         try:
             processed = self._apply_processing(data)
@@ -1099,6 +1140,10 @@ class SequentialView(QtWidgets.QWidget):
             xs = self._current_line_coords
             if xs is None or xs.size != self._current_processed_slice.size:
                 xs = np.arange(self._current_processed_slice.size, dtype=float)
+            try:
+                self.viewer.set_line_style(self._line_style, refresh=False)
+            except Exception:
+                pass
             self.viewer.set_line(xs, self._current_processed_slice, autorange=autorange)
             self.cmb_colormap.setEnabled(False)
         else:
@@ -1126,6 +1171,7 @@ class SequentialView(QtWidgets.QWidget):
             self._update_roi_curve()
         self._refresh_volume_window()
         self._apply_viewer_annotations()
+        self._update_line_style_button()
 
     def _on_autoscale_clicked(self):
         self.viewer.autoscale_levels()
@@ -1186,9 +1232,38 @@ class SequentialView(QtWidgets.QWidget):
         self._annotation_config = config
         self._apply_viewer_annotations()
 
+    def _open_line_style_dialog(self):
+        dialog = LineStyleDialog(self, initial=self._line_style)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        style = dialog.line_style()
+        if style is None:
+            return
+        self._line_style = style
+        try:
+            self.viewer.set_line_style(self._line_style, refresh=True)
+        except Exception:
+            pass
+        self._update_line_style_button()
+
+    def _update_line_style_button(self):
+        if not hasattr(self, "btn_line_style"):
+            return
+        has_line = bool(
+            self._line_mode
+            and self._current_processed_slice is not None
+            and np.ndim(self._current_processed_slice) <= 1
+        )
+        self.btn_line_style.setEnabled(has_line)
+
     # ---------- processing ----------
     def _choose_processing(self):
-        dialog = ProcessingSelectionDialog(self.processing_manager, self)
+        dims = self._current_processing_dims()
+        dialog = ProcessingSelectionDialog(
+            self.processing_manager,
+            self,
+            dims=dims if dims else None,
+        )
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         mode, params = dialog.selected_processing()

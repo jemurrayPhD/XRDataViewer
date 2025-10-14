@@ -180,6 +180,10 @@ class PlotAnnotationDialog(QtWidgets.QDialog):
     def annotation_config(self) -> Optional[PlotAnnotationConfig]:
         return self._result
 
+    def _update_legend_controls(self, enabled: bool):
+        self.cmb_legend_position.setEnabled(enabled)
+        self.edit_legend_entries.setEnabled(enabled)
+
     def accept(self):
         font = self.font_combo.currentFont()
         config = PlotAnnotationConfig(
@@ -218,6 +222,10 @@ class LineStyleDialog(QtWidgets.QDialog):
 
         self.btn_color = ColorButton(initial.color)
         form.addRow("Line color", self.btn_color)
+
+        self.chk_show_line = QtWidgets.QCheckBox("Show line")
+        self.chk_show_line.setChecked(bool(initial.show_line))
+        form.addRow(self.chk_show_line)
 
         self.spin_width = QtWidgets.QDoubleSpinBox()
         self.spin_width.setRange(0.1, 20.0)
@@ -292,11 +300,12 @@ class LineStyleDialog(QtWidgets.QDialog):
 
         layout.addLayout(form)
 
-        self.cmb_curve_mode.currentIndexChanged.connect(self._update_curve_controls)
+        self.cmb_curve_mode.currentIndexChanged.connect(self._update_line_controls)
         self.chk_markers.toggled.connect(self._update_marker_controls)
         self.sld_opacity.valueChanged.connect(self._update_opacity_label)
+        self.chk_show_line.toggled.connect(self._update_line_controls)
 
-        self._update_curve_controls()
+        self._update_line_controls()
         self._update_marker_controls(self.chk_markers.isChecked())
         self._update_opacity_label(self.sld_opacity.value())
 
@@ -305,9 +314,13 @@ class LineStyleDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def _update_curve_controls(self):
+    def _update_line_controls(self):
+        show_line = self.chk_show_line.isChecked()
+        self.spin_width.setEnabled(show_line)
+        self.cmb_pen_style.setEnabled(show_line)
+        self.cmb_curve_mode.setEnabled(show_line)
         mode = self.cmb_curve_mode.currentData()
-        self._smooth_row.setVisible(mode == "smooth")
+        self._smooth_row.setVisible(show_line and mode == "smooth")
 
     def _update_marker_controls(self, checked: bool):
         self.cmb_marker_style.setEnabled(checked)
@@ -330,10 +343,7 @@ class LineStyleDialog(QtWidgets.QDialog):
             markers=self.chk_markers.isChecked(),
             marker_style=self.cmb_marker_style.currentData(),
             marker_size=self.spin_marker_size.value(),
+            show_line=self.chk_show_line.isChecked(),
         )
         self._result = config
         super().accept()
-
-    def _update_legend_controls(self, enabled: bool):
-        self.cmb_legend_position.setEnabled(enabled)
-        self.edit_legend_entries.setEnabled(enabled)

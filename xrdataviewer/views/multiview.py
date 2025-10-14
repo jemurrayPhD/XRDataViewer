@@ -73,6 +73,12 @@ class ViewerFrame(QtWidgets.QFrame):
         # Header
         hdr = QtWidgets.QFrame(); hl = QtWidgets.QHBoxLayout(hdr); hl.setContentsMargins(6,3,6,3)
         self.lbl = QtWidgets.QLabel(title); hl.addWidget(self.lbl, 1)
+        self._line_style_btn = QtWidgets.QToolButton()
+        self._line_style_btn.setText("Style…")
+        self._line_style_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self._line_style_btn.clicked.connect(self._open_line_style_dialog)
+        self._line_style_btn.setVisible(False)
+        hl.addWidget(self._line_style_btn, 0)
         self._crosshair_btn = QtWidgets.QToolButton()
         self._crosshair_btn.setText("Crosshair")
         self._crosshair_btn.setCheckable(True)
@@ -143,6 +149,7 @@ class ViewerFrame(QtWidgets.QFrame):
         except Exception:
             pass
         self._update_histogram_visibility()
+        self._update_line_style_button()
 
     def _dataset_display_name(self) -> str:
         if self._dataset_path is not None:
@@ -208,6 +215,20 @@ class ViewerFrame(QtWidgets.QFrame):
             self.viewer.set_line_style(self._line_style, refresh=refresh)
         except Exception:
             pass
+
+    def _open_line_style_dialog(self):
+        dialog = LineStyleDialog(self, initial=self.line_style_config())
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        style = dialog.line_style()
+        if style is None:
+            return
+        self.set_line_style_config(style, refresh=True)
+        try:
+            name = self._dataset_display_name()
+        except Exception:
+            name = "viewer"
+        log_action(f"Updated line style for {name}")
 
     def is_line_display(self) -> bool:
         return self._display_mode == "line"
@@ -491,6 +512,7 @@ class ViewerFrame(QtWidgets.QFrame):
                 self.display_mode_changed.emit("line")
             except Exception:
                 pass
+            self._update_line_style_button()
             return
 
         if self._display_mode == "warped" and "X" in self._coords and "Y" in self._coords:
@@ -505,6 +527,7 @@ class ViewerFrame(QtWidgets.QFrame):
             self.display_mode_changed.emit(self._display_mode)
         except Exception:
             pass
+        self._update_line_style_button()
 
     def set_histogram_visible(self, on: bool):
         self._hist_master_enabled = bool(on)
@@ -598,8 +621,36 @@ class ViewerFrame(QtWidgets.QFrame):
             self.viewer.clear_mirrored_crosshair()
         except Exception:
             pass
+        self._update_line_style_button()
         if not preserve_header:
             self._set_header_text(None)
+
+    def _update_line_style_button(self):
+        try:
+            visible = self._display_mode == "line"
+        except Exception:
+            visible = False
+        btn = getattr(self, "_line_style_btn", None)
+        if not isinstance(btn, QtWidgets.QToolButton):
+            return
+        btn.setVisible(visible)
+        btn.setEnabled(visible)
+
+    def processing_dims(self) -> Tuple[str, ...]:
+        if self._display_mode == "line":
+            label = self._line_label or self._current_variable or "line"
+            return (str(label),)
+        if self._dataset is not None and self._current_variable in self._dataset:
+            try:
+                dims = getattr(self._dataset[self._current_variable], "dims", None)
+                if dims:
+                    return tuple(str(d) for d in dims[: np.ndim(self._raw_data)])
+            except Exception:
+                pass
+        data = self._processed_data if self._processed_data is not None else self._raw_data
+        if data is None:
+            return ()
+        return tuple(f"axis{i}" for i in range(np.ndim(data)))
 
     def annotation_defaults(self) -> PlotAnnotationConfig:
         return self.viewer.annotation_defaults()
@@ -653,56 +704,56 @@ class MultiViewGrid(QtWidgets.QWidget):
 
         # Toolbar
         bar = QtWidgets.QHBoxLayout()
-        bar.addWidget(QtWidgets.QLabel("Columns:"))
+        bar.setSpacing(10)
+
+        def _make_group(title: str, widgets: Iterable[QtWidgets.QWidget]) -> QtWidgets.QGroupBox:
+            box = QtWidgets.QGroupBox(title)
+            layout = QtWidgets.QHBoxLayout(box)
+            layout.setContentsMargins(8, 6, 8, 6)
+            layout.setSpacing(6)
+            for widget in widgets:
+                layout.addWidget(widget)
+            return box
+
+        lbl_columns = QtWidgets.QLabel("Columns:")
         self.col_spin = QtWidgets.QSpinBox()
         self.col_spin.setRange(1, 12)
         self.col_spin.setValue(3)
         self.col_spin.valueChanged.connect(self._reflow)
-        bar.addWidget(self.col_spin)
 
         self.chk_show_hist = QtWidgets.QCheckBox("Show histograms")
-        self.chk_show_hist.setChecked(True)        # set False if you prefer off-by-default
+        self.chk_show_hist.setChecked(True)  # set False if you prefer off-by-default
         self.chk_show_hist.toggled.connect(self._apply_histogram_visibility)
-        bar.addWidget(self.chk_show_hist)
 
         self.chk_link_levels = QtWidgets.QCheckBox("Lock colorscales")
         self.chk_link_levels.toggled.connect(self._on_link_levels_toggled)
-        bar.addWidget(self.chk_link_levels)
 
         self.chk_link_panzoom = QtWidgets.QCheckBox("Lock pan/zoom")
         self.chk_link_panzoom.toggled.connect(self._on_link_panzoom_toggled)
-        bar.addWidget(self.chk_link_panzoom)
 
         self.chk_cursor_mirror = QtWidgets.QCheckBox("Mirror cursor")
         self.chk_cursor_mirror.setChecked(False)
         self.chk_cursor_mirror.toggled.connect(self._on_link_cursor_toggled)
-        bar.addWidget(self.chk_cursor_mirror)
 
         self.btn_autoscale = QtWidgets.QPushButton("Autoscale colors")
         self.btn_autoscale.clicked.connect(self._autoscale_colors)
-        bar.addWidget(self.btn_autoscale)
 
         self.btn_autopan = QtWidgets.QPushButton("Auto pan/zoom")
         self.btn_autopan.clicked.connect(self._auto_panzoom)
-        bar.addWidget(self.btn_autopan)
 
         self.btn_equalize_rows = QtWidgets.QPushButton("Equalize rows")
         self.btn_equalize_rows.clicked.connect(self.equalize_rows)
-        bar.addWidget(self.btn_equalize_rows)
 
         self.btn_equalize_cols = QtWidgets.QPushButton("Equalize columns")
         self.btn_equalize_cols.clicked.connect(self.equalize_columns)
-        bar.addWidget(self.btn_equalize_cols)
 
         self.btn_select_all = QtWidgets.QPushButton("Select All Plots")
         self.btn_select_all.setEnabled(False)
         self.btn_select_all.clicked.connect(self._select_all_frames)
-        bar.addWidget(self.btn_select_all)
 
         self.btn_apply_processing = QtWidgets.QPushButton("Apply processing…")
         self.btn_apply_processing.setEnabled(False)
         self.btn_apply_processing.clicked.connect(self._on_apply_processing_clicked)
-        bar.addWidget(self.btn_apply_processing)
 
         self.btn_export = QtWidgets.QToolButton()
         self.btn_export.setText("Export")
@@ -716,17 +767,30 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.act_export_layout = export_menu.addAction("Save entire layout…")
         self.act_export_layout.triggered.connect(self._export_layout_image)
         self.btn_export.setMenu(export_menu)
-        bar.addWidget(self.btn_export)
 
         self.btn_line_style = QtWidgets.QPushButton("Line style…")
         self.btn_line_style.setEnabled(False)
         self.btn_line_style.clicked.connect(self._open_line_style_dialog)
-        bar.addWidget(self.btn_line_style)
 
         self.btn_annotations = QtWidgets.QPushButton("Set annotations…")
         self.btn_annotations.clicked.connect(self._open_annotation_dialog)
-        bar.addWidget(self.btn_annotations)
 
+        bar.addWidget(
+            _make_group(
+                "Layout",
+                (lbl_columns, self.col_spin, self.btn_equalize_rows, self.btn_equalize_cols, self.btn_select_all),
+            )
+        )
+        bar.addWidget(_make_group("Display", (self.chk_show_hist, self.chk_cursor_mirror)))
+        bar.addWidget(
+            _make_group(
+                "Scaling",
+                (self.chk_link_levels, self.chk_link_panzoom, self.btn_autoscale, self.btn_autopan),
+            )
+        )
+        bar.addWidget(_make_group("Processing", (self.btn_apply_processing,)))
+        bar.addWidget(_make_group("Style", (self.btn_line_style, self.btn_annotations)))
+        bar.addWidget(_make_group("Export", (self.btn_export,)))
         bar.addStretch(1)
         v.addLayout(bar)
 
@@ -1211,7 +1275,12 @@ class MultiViewGrid(QtWidgets.QWidget):
         frames = self.selected_frames()
         if not frames:
             return
-        dialog = ProcessingSelectionDialog(self.processing_manager, self)
+        dims = frames[0].processing_dims() if frames else ()
+        dialog = ProcessingSelectionDialog(
+            self.processing_manager,
+            self,
+            dims=dims if dims else None,
+        )
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         mode, params = dialog.selected_processing()

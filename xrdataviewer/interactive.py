@@ -23,7 +23,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
-from typing import Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
 
 import sys
 
@@ -816,6 +816,11 @@ class InteractivePreviewWidget(QtWidgets.QWidget):
         x_vals = np.asarray(list(x), dtype=float)
         y_vals = np.asarray(list(y), dtype=float)
         self._plot_widget.plot(x_vals, y_vals, pen=pg.mkPen("#1d72b8", width=2))
+        try:
+            self._plot_widget.enableAutoRange(x=True, y=True)
+            self._plot_widget.autoRange()
+        except Exception:
+            pass
         self._plot_widget.setLabel("bottom", xlabel)
         self._plot_widget.setLabel("left", ylabel)
         self._plot_widget.setTitle(title or "")
@@ -1239,11 +1244,13 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         library: DatasetsPane,
         bridge: Optional[InteractiveBridgeServer] = None,
         parent=None,
+        startup_callbacks: Optional[Dict[str, Callable[..., None]]] = None,
     ):
         super().__init__(parent)
         self.library = library
         self.bridge_server = bridge
         self._active_mode = "jupyter"
+        self._startup_callbacks: Dict[str, Callable[..., None]] = startup_callbacks or {}
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -1378,6 +1385,15 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             self._jupyter_manager.failed.connect(self._on_jupyter_failed)
             self._jupyter_manager.message.connect(log_action)
             self._jupyter_manager.message.connect(self._on_jupyter_message)
+            callback = self._startup_callbacks.get("message")
+            if callback:
+                self._jupyter_manager.message.connect(callback)
+            callback = self._startup_callbacks.get("failed")
+            if callback:
+                self._jupyter_manager.failed.connect(callback)
+            callback = self._startup_callbacks.get("ready")
+            if callback:
+                self._jupyter_manager.urlReady.connect(callback)
         self._jupyter_url: Optional[str] = None
         self._jupyter_js_seen: Set[str] = set()
         self._jupyter_js_warned = False
@@ -1416,6 +1432,10 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self._shutdown_called = False
         self.destroyed.connect(lambda *_: self.shutdown())
 
+    @property
+    def has_embedded_jupyter(self) -> bool:
+        return self._web_engine_available and self._jupyter_manager is not None
+
     def _on_mode_changed(self, index: int):
         mode = self.cmb_mode.itemData(index)
         self._active_mode = str(mode)
@@ -1437,6 +1457,9 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
                 )
             elif self._jupyter_manager:
                 if not self._jupyter_manager.is_running():
+                    starter = self._startup_callbacks.get("starting")
+                    if starter:
+                        starter()
                     self._set_status("Starting embedded JupyterLab server…")
                     self._jupyter_manager.start()
                 elif self._jupyter_manager.url():

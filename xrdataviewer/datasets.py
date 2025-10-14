@@ -325,6 +325,14 @@ class HighDimVarRef(QtCore.QObject):
             return self.path.name
         return self.var
 
+class _DatasetsTree(QtWidgets.QTreeWidget):
+    def startDrag(self, supported_actions: QtCore.Qt.DropActions) -> None:
+        # Allow click-and-drag row selection without immediately starting a drag
+        if self.state() == QtWidgets.QAbstractItemView.DragSelectingState:
+            return
+        super().startDrag(supported_actions)
+
+
 class DatasetsPane(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -370,12 +378,14 @@ class DatasetsPane(QtWidgets.QWidget):
         self._populate_examples()
 
     def _create_tree(self) -> QtWidgets.QTreeWidget:
-        tree = QtWidgets.QTreeWidget()
+        tree = _DatasetsTree()
         tree.setHeaderLabels(["Datasets / Variables"])
         tree.setDragEnabled(True)
         tree.setDefaultDropAction(QtCore.Qt.CopyAction)
         tree.setDropIndicatorShown(False)
         tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        tree.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        tree.setUniformRowHeights(True)
 
         def _mime_data(_items, *, _tree=tree):
             md = QtCore.QMimeData()
