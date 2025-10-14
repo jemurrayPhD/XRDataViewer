@@ -316,6 +316,12 @@ def main() -> None:
     app = QtWidgets.QApplication([])
     pg.setConfigOptions(imageAxisOrder="row-major")
     splash = StartupSplash()
+    splash_holder: Dict[str, Optional[StartupSplash]] = {"widget": splash}
+
+    def _clear_splash(*_args: object) -> None:
+        splash_holder["widget"] = None
+
+    splash.destroyed.connect(_clear_splash)
     splash.show()
     QtWidgets.QApplication.processEvents()
 
@@ -323,8 +329,9 @@ def main() -> None:
 
     def _finish_startup(*_args: object) -> None:
         nonlocal window
-        if splash.isVisible():
-            splash.close()
+        splash_widget = splash_holder["widget"]
+        if splash_widget is not None and splash_widget.isVisible():
+            splash_widget.close()
         if window is not None and not window.isVisible():
             window.show()
 
@@ -332,6 +339,7 @@ def main() -> None:
     QtCore.QTimer.singleShot(20000, _finish_startup)
 
     window = MainWindow(startup_splash=splash)
-    if not splash.isVisible():
+    splash_widget = splash_holder["widget"]
+    if splash_widget is None or not splash_widget.isVisible():
         window.show()
     app.exec_()
