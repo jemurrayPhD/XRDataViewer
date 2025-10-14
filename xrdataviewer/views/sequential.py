@@ -352,14 +352,35 @@ class SequentialView(QtWidgets.QWidget):
         self.btn_line_style.setEnabled(False)
         self.btn_line_style.clicked.connect(self._open_line_style_dialog)
 
-        def _make_group(title: str, widgets: Iterable[QtWidgets.QWidget]) -> QtWidgets.QGroupBox:
-            box = QtWidgets.QGroupBox(title)
-            layout = QtWidgets.QHBoxLayout(box)
-            layout.setContentsMargins(8, 6, 8, 6)
+        def _make_group(title: str, widgets: Iterable[QtWidgets.QWidget]) -> QtWidgets.QWidget:
+            items = tuple(widgets)
+            if not items:
+                spacer = QtWidgets.QWidget()
+                spacer.setVisible(False)
+                return spacer
+            if len(items) == 1:
+                widget = items[0]
+                if isinstance(widget, QtWidgets.QAbstractButton):
+                    widget.setToolTip(title)
+                return widget
+
+            frame = QtWidgets.QFrame()
+            frame.setProperty("modernSection", True)
+            layout = QtWidgets.QVBoxLayout(frame)
+            layout.setContentsMargins(10, 8, 10, 8)
             layout.setSpacing(6)
-            for widget in widgets:
-                layout.addWidget(widget)
-            return box
+
+            label = QtWidgets.QLabel(title)
+            label.setProperty("modernSectionTitle", True)
+            layout.addWidget(label)
+
+            row = QtWidgets.QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            for widget in items:
+                row.addWidget(widget)
+            layout.addLayout(row)
+            return frame
 
         controls_bar = QtWidgets.QHBoxLayout()
         controls_bar.setSpacing(10)

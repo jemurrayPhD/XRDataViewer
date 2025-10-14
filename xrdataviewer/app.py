@@ -188,6 +188,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Dataset Multi-Viewer")
 
         main = QtWidgets.QSplitter()
+        main.setChildrenCollapsible(False)
+        main.setHandleWidth(10)
         self.setCentralWidget(main)
 
         self.preferences = PreferencesManager()
@@ -220,11 +222,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.tab_multiview, "MultiView")
         self.tab_sequential = SequentialView(self.processing_manager, self.preferences)
         self.tabs.addTab(self.tab_sequential, "Sequential View")
-        self.tab_slice = SliceDataTab(self.datasets)
-        self.tabs.addTab(self.tab_slice, "Slice Data")
         self.tab_overlay = OverlayView(self.processing_manager, self.preferences)
         self.tabs.addTab(self.tab_overlay, "Overlay")
         self.tab_overlay.set_processing_manager(self.processing_manager)
+        self.tab_slice = SliceDataTab(self.datasets)
+        self.tabs.addTab(self.tab_slice, "Slice Data")
         startup_callbacks: Optional[Dict[str, Callable]] = None
         if self._startup_splash is not None:
             startup_callbacks = self._startup_splash.startup_callbacks()
@@ -242,6 +244,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_dock.resize(800, 200)
 
         self.resize(1500, 900)
+
+        self._apply_modern_styles()
 
         if self._startup_splash is not None and not self.tab_interactive.has_embedded_jupyter:
             self._startup_splash.notify_no_jupyter()
@@ -271,6 +275,178 @@ class MainWindow(QtWidgets.QMainWindow):
 
         act_save = prefs_menu.addAction("Save preferences…")
         act_save.triggered.connect(self._save_preferences)
+
+    def _apply_modern_styles(self) -> None:
+        """Apply a cohesive, modern visual style across the UI."""
+
+        palette = self.palette()
+        palette.setColor(QtGui.QPalette.Window, QtGui.QColor("#f4f6fb"))
+        palette.setColor(QtGui.QPalette.Base, QtGui.QColor("#ffffff"))
+        palette.setColor(QtGui.QPalette.AlternateBase, QtGui.QColor("#f0f3f9"))
+        palette.setColor(QtGui.QPalette.Button, QtGui.QColor("#4f6bed"))
+        palette.setColor(QtGui.QPalette.ButtonText, QtGui.QColor("#ffffff"))
+        palette.setColor(QtGui.QPalette.Highlight, QtGui.QColor("#4057d4"))
+        palette.setColor(QtGui.QPalette.HighlightedText, QtGui.QColor("#ffffff"))
+        palette.setColor(QtGui.QPalette.WindowText, QtGui.QColor("#1f2430"))
+        self.setPalette(palette)
+
+        # Use document mode tabs for a flatter appearance.
+        self.tabs.setDocumentMode(True)
+        self.tabs.setMovable(True)
+
+        # Centralised stylesheet for widgets used throughout the app.
+        self.setStyleSheet(
+            """
+            QWidget {
+                font-family: 'Segoe UI', 'Inter', 'Noto Sans', sans-serif;
+                font-size: 11pt;
+                color: #1f2430;
+            }
+            QMainWindow, QDialog {
+                background-color: #f4f6fb;
+            }
+            QSplitter::handle:horizontal, QSplitter::handle:vertical {
+                background: #d5dbeb;
+                border-radius: 4px;
+            }
+            QSplitter::handle:horizontal:hover, QSplitter::handle:vertical:hover {
+                background: #b9c2dd;
+            }
+            QTabWidget::pane {
+                border: 1px solid #d1d7e6;
+                border-radius: 8px;
+                padding: 6px;
+                background: #ffffff;
+            }
+            QTabBar::tab {
+                background: #e6eaf5;
+                border: 1px solid #d1d7e6;
+                border-bottom: none;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                padding: 8px 14px;
+                margin-right: 6px;
+                color: #4a5568;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff;
+                color: #1f2430;
+                border-color: #4057d4;
+            }
+            QTabBar::tab:hover {
+                background: #f2f4fb;
+            }
+            QFrame[modernSection="true"] {
+                background: #ffffff;
+                border: 1px solid #d1d7e6;
+                border-radius: 12px;
+                padding: 8px 12px;
+            }
+            QLabel[modernSectionTitle="true"] {
+                font-size: 10pt;
+                font-weight: 600;
+                color: #33415c;
+                padding-bottom: 4px;
+            }
+            QGroupBox {
+                border: 1px solid #d1d7e6;
+                border-radius: 10px;
+                margin-top: 12px;
+                padding: 10px;
+                background: #ffffff;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 16px;
+                padding: 0 8px;
+                color: #3a4b6c;
+                font-weight: 600;
+            }
+            QTreeWidget, QListWidget, QTextEdit, QPlainTextEdit, QTableView, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+                background: #ffffff;
+                border: 1px solid #c5ccde;
+                border-radius: 8px;
+                padding: 4px 6px;
+            }
+            QTreeWidget::item:selected, QListWidget::item:selected {
+                background: #d9e1ff;
+                color: #1f2430;
+            }
+            QPushButton, QToolButton {
+                background-color: #4f6bed;
+                color: #ffffff;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 14px;
+            }
+            QPushButton:disabled, QToolButton:disabled {
+                background-color: #a9b4d6;
+                color: #f5f6fb;
+            }
+            QPushButton:hover, QToolButton:hover {
+                background-color: #637cf2;
+            }
+            QPushButton:pressed, QToolButton:pressed {
+                background-color: #4057d4;
+            }
+            QToolButton[headerAction="true"] {
+                background: transparent;
+                color: #465575;
+                padding: 4px 8px;
+            }
+            QToolButton[headerAction="true"]:hover {
+                background: rgba(79, 107, 237, 0.12);
+                color: #2c3e75;
+            }
+            QDockWidget {
+                titlebar-close-icon: url();
+                titlebar-normal-icon: url();
+                font-size: 10pt;
+            }
+            QDockWidget::title {
+                text-align: center;
+                background: #e6ebf7;
+                border: 1px solid #d1d7e6;
+                border-radius: 8px 8px 0 0;
+                padding: 6px;
+            }
+            QHeaderView::section {
+                background: #e6ebf7;
+                border: none;
+                padding: 6px 10px;
+                font-weight: 600;
+                color: #3a4b6c;
+            }
+            QStatusBar {
+                background: #e6ebf7;
+                border-top: 1px solid #d1d7e6;
+            }
+            QWidget#datasetsPane {
+                background: #ffffff;
+                border: 1px solid #d1d7e6;
+                border-radius: 16px;
+            }
+            QWidget#processingContainer {
+                background: #ffffff;
+                border: 1px solid #d1d7e6;
+                border-radius: 16px;
+            }
+            QWidget#processingHeader {
+                border-bottom: 1px solid #e2e6f2;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f6f8fd, stop:1 #eceff9);
+                border-top-left-radius: 16px;
+                border-top-right-radius: 16px;
+            }
+            QWidget#processingContent {
+                border-bottom-left-radius: 16px;
+                border-bottom-right-radius: 16px;
+            }
+            QLabel#processingPlaceholder {
+                color: #5a6276;
+                padding: 16px;
+            }
+            """
+        )
 
     def _edit_preferences(self):
         dialog = PreferencesDialog(self.preferences, self)
