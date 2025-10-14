@@ -1267,17 +1267,39 @@ class OverlayView(QtWidgets.QWidget):
     def _ensure_legend_item(self) -> pg.LegendItem:
         if self._legend_item is None:
             legend = pg.LegendItem(offset=(10, 10))
-            legend.setParentItem(self.plot.graphicsItem())
+            try:
+                legend.setParentItem(self.plot.vb)
+            except Exception:
+                legend.setParentItem(self.plot.graphicsItem())
             self._legend_item = legend
         return self._legend_item
 
+    def _release_legend_item(self):
+        if self._legend_item is None:
+            return
+        legend = self._legend_item
+        self._legend_item = None
+        try:
+            legend.hide()
+        except Exception:
+            pass
+        try:
+            scene = legend.scene()
+        except Exception:
+            scene = None
+        if scene is not None:
+            try:
+                scene.removeItem(legend)
+            except Exception:
+                pass
+        try:
+            legend.setParentItem(None)
+        except Exception:
+            pass
+
     def _apply_legend_config(self, config: Optional[PlotAnnotationConfig]):
         if config is None or not config.legend_visible or not self.layers:
-            if self._legend_item is not None:
-                try:
-                    self._legend_item.hide()
-                except Exception:
-                    pass
+            self._release_legend_item()
             return
         legend = self._ensure_legend_item()
         try:
@@ -1311,6 +1333,13 @@ class OverlayView(QtWidgets.QWidget):
             legend.show()
         except Exception:
             pass
+
+    def closeEvent(self, event):
+        try:
+            self._release_legend_item()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     # ---------- data prep ----------
     def _prepare_layer(self, da, coords):
