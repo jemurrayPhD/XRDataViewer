@@ -12,6 +12,7 @@ from PySide2 import QtCore, QtGui, QtWidgets, QtUiTools
 from app_logging import ACTION_LOGGER, log_action
 
 from .appearance import build_stylesheet
+from .colormaps import register_scientific_colormaps
 from .datasets import DatasetsPane, SliceDataTab
 from .interactive import InteractiveBridgeServer, InteractiveProcessingTab
 from .logging.panel import LoggingDockWidget
@@ -193,6 +194,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_stylesheet = ""
         self.processing_manager = ProcessingManager()
         self._startup_splash = startup_splash
+
+        register_scientific_colormaps()
 
         placeholders = self._load_central_layout()
         dataset_host = placeholders["dataset_host"]

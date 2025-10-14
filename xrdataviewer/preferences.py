@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import pyqtgraph as pg
 from PySide2 import QtCore, QtWidgets
@@ -18,6 +18,7 @@ from .appearance import (
     sanitize_appearance,
     sanitize_profile_values,
 )
+from .colormaps import register_scientific_colormaps, scientific_colormap_names
 
 
 class PreferencesManager(QtCore.QObject):
@@ -282,12 +283,23 @@ class PreferencesDialog(QtWidgets.QDialog):
 
         self.cmb_default_cmap = QtWidgets.QComboBox()
         self.cmb_default_cmap.addItem("Use viewer default", "")
+        scientific_names = set(register_scientific_colormaps())
         try:
             maps = sorted(pg.colormap.listMaps())
         except Exception:
             maps = ["viridis", "plasma", "magma", "cividis", "gray"]
+        ordered: List[str] = []
+        for name in scientific_colormap_names():
+            if name in maps and name not in ordered:
+                ordered.append(name)
         for name in maps:
-            self.cmb_default_cmap.addItem(name, name)
+            if name not in ordered:
+                ordered.append(name)
+        for name in ordered:
+            label = name
+            if name in scientific_names:
+                label = f"{name} (Scientific)"
+            self.cmb_default_cmap.addItem(label, name)
         current_default = str(self._data.get("colormaps", {}).get("default", ""))
         idx = self.cmb_default_cmap.findData(current_default)
         if idx < 0:
