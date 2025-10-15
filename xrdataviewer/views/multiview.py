@@ -21,6 +21,11 @@ from xr_plot_widget import (
 )
 
 from ..annotations import LineStyleDialog, PlotAnnotationDialog
+from ..colormaps import (
+    available_colormap_names,
+    is_scientific_colormap,
+    resolve_colormap_assets,
+)
 from ..datasets import (
     DataSetRef,
     HighDimVarRef,
@@ -218,9 +223,15 @@ class ViewerFrame(QtWidgets.QFrame):
 
     def _open_line_style_dialog(self):
         dialog = LineStyleDialog(self, initial=self.line_style_config())
+        dialog.applied.connect(self._apply_line_style_dialog_result)
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         style = dialog.line_style()
+        if style is None:
+            return
+        self._apply_line_style_dialog_result(style)
+
+    def _apply_line_style_dialog_result(self, style: LineStyleConfig) -> None:
         if style is None:
             return
         self.set_line_style_config(style, refresh=True)
@@ -232,6 +243,16 @@ class ViewerFrame(QtWidgets.QFrame):
 
     def is_line_display(self) -> bool:
         return self._display_mode == "line"
+
+    def apply_colormap(self, name: str) -> bool:
+        if self._display_mode == "line":
+            return False
+        cmap, state, lut = resolve_colormap_assets(name)
+        if cmap is None and state is None and lut is None:
+            return False
+        return self.viewer.apply_colormap(
+            cmap, name=name, gradient_state=state, lookup_table=lut
+        )
 
     def set_dataset(self, dataset: xr.Dataset, path: Path, *, select: Optional[str] = None):
         self._dispose_dataset()
@@ -427,16 +448,15 @@ class ViewerFrame(QtWidgets.QFrame):
         prefs = self.preferences
         if prefs is None:
             return
+        try:
+            self.viewer.set_value_precision(prefs.value_precision())
+        except Exception:
+            pass
         if self._display_mode == "line":
             return
         cmap_name = prefs.preferred_colormap(self._current_variable)
         if cmap_name:
-            try:
-                cmap = pg.colormap.get(cmap_name)
-                self.viewer.lut.gradient.setColorMap(cmap)
-                self.viewer.lut.rehide_stops()
-            except Exception:
-                pass
+            self.apply_colormap(cmap_name)
         if prefs.autoscale_on_load():
             try:
                 self.viewer.autoscale_levels()
@@ -565,6 +585,10 @@ class ViewerFrame(QtWidgets.QFrame):
             hist_widget.setMinimumWidth(80)
             hist_widget.setMaximumWidth(16777215)
             hist_widget.show()
+            try:
+                self.center_split.setHandleWidth(4)
+            except Exception:
+                pass
             sizes = self._hist_last_split_sizes
             if sizes and len(sizes) >= 2 and sizes[1] > 0:
                 try:
@@ -597,6 +621,10 @@ class ViewerFrame(QtWidgets.QFrame):
             hist_widget.hide()
             hist_widget.setMinimumWidth(0)
             hist_widget.setMaximumWidth(0)
+            try:
+                self.center_split.setHandleWidth(1)
+            except Exception:
+                pass
 
     def _clear_display(self, *, preserve_header: bool = False):
         self._raw_data = None
@@ -652,6 +680,25 @@ class ViewerFrame(QtWidgets.QFrame):
             return ()
         return tuple(f"axis{i}" for i in range(np.ndim(data)))
 
+    def processing_state(self) -> Tuple[str, Dict[str, object]]:
+        """Return the current processing identifier and parameters."""
+
+        return self._current_processing, dict(self._processing_params)
+
+    def restore_processing(
+        self,
+        mode: str,
+        params: Dict[str, object],
+        manager: Optional["ProcessingManager"],
+    ) -> None:
+        """Reapply a previously captured processing state."""
+
+        mode = mode or "none"
+        if mode == "none":
+            self.reset_processing()
+            return
+        self.apply_processing(mode, dict(params or {}), manager)
+
     def annotation_defaults(self) -> PlotAnnotationConfig:
         return self.viewer.annotation_defaults()
 
@@ -693,6 +740,9 @@ class MultiViewGrid(QtWidgets.QWidget):
         self._mouse_down = False
         self._drag_select_active = False
         self._drag_select_add = True
+        self._processing_history: List[
+            List[Tuple[ViewerFrame, str, Dict[str, object]]]
+        ] = []
 
         app = QtWidgets.QApplication.instance()
         if app is not None:
@@ -702,23 +752,57 @@ class MultiViewGrid(QtWidgets.QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(6)
 
-        # Toolbar
-        bar = QtWidgets.QHBoxLayout()
-        bar.setSpacing(10)
-
-        def _make_group(title: str, widgets: Iterable[QtWidgets.QWidget]) -> QtWidgets.QGroupBox:
-            box = QtWidgets.QGroupBox(title)
-            layout = QtWidgets.QHBoxLayout(box)
-            layout.setContentsMargins(8, 6, 8, 6)
-            layout.setSpacing(6)
+        def _tag_compact_buttons(*widgets: QtWidgets.QWidget) -> None:
             for widget in widgets:
-                layout.addWidget(widget)
-            return box
+                if isinstance(widget, (QtWidgets.QPushButton, QtWidgets.QToolButton)):
+                    widget.setProperty("sizeVariant", "compact")
+                    widget.setMinimumWidth(0)
+                    widget.setMinimumHeight(0)
+                    widget.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+
+        # Toolbar
+        bar = QtWidgets.QGridLayout()
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.setHorizontalSpacing(8)
+        bar.setVerticalSpacing(6)
+
+        def _make_group(title: str, widgets: Iterable[QtWidgets.QWidget]) -> QtWidgets.QWidget:
+            items = tuple(widgets)
+            if not items:
+                spacer = QtWidgets.QWidget()
+                spacer.setVisible(False)
+                return spacer
+            if len(items) == 1:
+                widget = items[0]
+                if isinstance(widget, QtWidgets.QAbstractButton):
+                    widget.setToolTip(title)
+                    _tag_compact_buttons(widget)
+                return widget
+
+            frame = QtWidgets.QFrame()
+            frame.setProperty("toolbarGroup", True)
+            layout = QtWidgets.QVBoxLayout(frame)
+            layout.setContentsMargins(8, 6, 8, 6)
+            layout.setSpacing(4)
+
+            label = QtWidgets.QLabel(title)
+            label.setProperty("toolbarGroupLabel", True)
+            layout.addWidget(label)
+
+            row = QtWidgets.QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(4)
+            for widget in items:
+                _tag_compact_buttons(widget)
+                row.addWidget(widget)
+            layout.addLayout(row)
+            return frame
 
         lbl_columns = QtWidgets.QLabel("Columns:")
         self.col_spin = QtWidgets.QSpinBox()
         self.col_spin.setRange(1, 12)
         self.col_spin.setValue(3)
+        self.col_spin.setMaximumWidth(72)
         self.col_spin.valueChanged.connect(self._reflow)
 
         self.chk_show_hist = QtWidgets.QCheckBox("Show histograms")
@@ -755,6 +839,10 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.btn_apply_processing.setEnabled(False)
         self.btn_apply_processing.clicked.connect(self._on_apply_processing_clicked)
 
+        self.btn_undo_processing = QtWidgets.QPushButton("Undo processing")
+        self.btn_undo_processing.setEnabled(False)
+        self.btn_undo_processing.clicked.connect(self._on_undo_processing_clicked)
+
         self.btn_export = QtWidgets.QToolButton()
         self.btn_export.setText("Export")
         self.btn_export.setPopupMode(QtWidgets.QToolButton.InstantPopup)
@@ -775,23 +863,39 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.btn_annotations = QtWidgets.QPushButton("Set annotations…")
         self.btn_annotations.clicked.connect(self._open_annotation_dialog)
 
-        bar.addWidget(
+        self.btn_set_colormap = QtWidgets.QPushButton("Set colormap…")
+        self.btn_set_colormap.clicked.connect(self._open_colormap_dialog)
+
+        toolbar_groups = [
             _make_group(
                 "Layout",
                 (lbl_columns, self.col_spin, self.btn_equalize_rows, self.btn_equalize_cols, self.btn_select_all),
-            )
-        )
-        bar.addWidget(_make_group("Display", (self.chk_show_hist, self.chk_cursor_mirror)))
-        bar.addWidget(
+            ),
+            _make_group("Display", (self.chk_show_hist, self.chk_cursor_mirror)),
             _make_group(
                 "Scaling",
                 (self.chk_link_levels, self.chk_link_panzoom, self.btn_autoscale, self.btn_autopan),
-            )
+            ),
+            _make_group("Processing", (self.btn_apply_processing, self.btn_undo_processing)),
+            _make_group("Style", (self.btn_line_style, self.btn_annotations)),
+            _make_group("Color", (self.btn_set_colormap,)),
+            _make_group("Export", (self.btn_export,)),
+        ]
+
+        columns = 3
+        for index, widget in enumerate(toolbar_groups):
+            row = index // columns
+            column = index % columns
+            bar.addWidget(widget, row, column)
+
+        rows = max(1, (len(toolbar_groups) + columns - 1) // columns)
+        spacer = QtWidgets.QSpacerItem(
+            0,
+            0,
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Minimum,
         )
-        bar.addWidget(_make_group("Processing", (self.btn_apply_processing,)))
-        bar.addWidget(_make_group("Style", (self.btn_line_style, self.btn_annotations)))
-        bar.addWidget(_make_group("Export", (self.btn_export,)))
-        bar.addStretch(1)
+        bar.addItem(spacer, 0, columns, rows, 1)
         v.addLayout(bar)
 
         # A vertical splitter holds "rows" (each row is a horizontal splitter of tiles)
@@ -960,6 +1064,7 @@ class MultiViewGrid(QtWidgets.QWidget):
             fr.dispose()
         except Exception:
             pass
+        self._prune_processing_history()
         self._reflow()
         self._update_apply_button_state()
 
@@ -972,6 +1077,9 @@ class MultiViewGrid(QtWidgets.QWidget):
             self.btn_select_all.setEnabled(has_frames)
         if hasattr(self, "btn_apply_processing"):
             self.btn_apply_processing.setEnabled(bool(self._selected_frames))
+        self._prune_processing_history()
+        if hasattr(self, "btn_undo_processing"):
+            self.btn_undo_processing.setEnabled(bool(self._processing_history))
         if hasattr(self, "btn_line_style"):
             targets = self.selected_frames() or list(self.frames)
             has_line = any(fr.is_line_display() for fr in targets)
@@ -1124,15 +1232,108 @@ class MultiViewGrid(QtWidgets.QWidget):
         initial = frames[0].annotation_defaults()
         initial.apply_to_all = False
         dialog = PlotAnnotationDialog(self, initial=initial, allow_apply_all=True)
+        dialog.applied.connect(lambda config: self._apply_annotation_dialog_result(config, frames))
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         config = dialog.annotation_config()
+        if config is None:
+            return
+        self._apply_annotation_dialog_result(config, frames)
+
+    def _apply_annotation_dialog_result(
+        self, config: PlotAnnotationConfig, frames: List["ViewerFrame"]
+    ) -> None:
         if config is None:
             return
         targets = self.frames if config.apply_to_all else frames
         base = replace(config, apply_to_all=False)
         for frame in targets:
             frame.apply_annotation(base)
+
+    def _apply_line_style(self, style: LineStyleConfig, targets: List["ViewerFrame"]) -> None:
+        if style is None:
+            return
+        for fr in targets:
+            fr.set_line_style_config(style, refresh=True)
+        log_action(f"Updated line style for {len(targets)} plot(s)")
+        self._update_apply_button_state()
+
+    def _apply_processing_selection(
+        self, mode: str, params: Dict[str, object], frames: List["ViewerFrame"]
+    ) -> None:
+        if not frames:
+            return
+
+        snapshot: List[Tuple[ViewerFrame, str, Dict[str, object]]] = []
+        for frame in frames:
+            try:
+                state = frame.processing_state()
+            except Exception:
+                continue
+            snapshot.append((frame, state[0], dict(state[1])))
+
+        if snapshot:
+            self._processing_history.append(snapshot)
+
+        error: Optional[Exception] = None
+        for frame in frames:
+            try:
+                frame.apply_processing(mode, params, self.processing_manager)
+            except Exception as exc:
+                error = exc
+                break
+
+        if error is not None:
+            if snapshot:
+                self._restore_processing_snapshot(snapshot)
+                if self._processing_history and self._processing_history[-1] is snapshot:
+                    self._processing_history.pop()
+            QtWidgets.QMessageBox.warning(self, "Processing failed", str(error))
+            self._update_apply_button_state()
+            return
+
+        label = str(mode or "none")
+        if label.startswith("pipeline:"):
+            label = f"pipeline '{label.split(':', 1)[1]}'"
+        elif label == "none":
+            label = "no processing"
+        log_action(
+            f"Applied {label} to {len(frames)} MultiView plot(s)"
+        )
+        self._update_apply_button_state()
+
+    def _restore_processing_snapshot(
+        self, snapshot: List[Tuple[ViewerFrame, str, Dict[str, object]]]
+    ) -> int:
+        restored = 0
+        for frame, mode, params in snapshot:
+            if frame not in self.frames:
+                continue
+            try:
+                frame.restore_processing(mode, params, self.processing_manager)
+            except Exception:
+                continue
+            restored += 1
+        return restored
+
+    def _prune_processing_history(self) -> None:
+        if not self._processing_history:
+            return
+        pruned: List[List[Tuple[ViewerFrame, str, Dict[str, object]]]] = []
+        for snapshot in self._processing_history:
+            filtered = [entry for entry in snapshot if entry[0] in self.frames]
+            if filtered:
+                pruned.append(filtered)
+        self._processing_history = pruned
+
+    def _on_undo_processing_clicked(self):
+        if not self._processing_history:
+            return
+        snapshot = self._processing_history.pop()
+        restored = self._restore_processing_snapshot(snapshot)
+        if restored:
+            log_action(f"Undid processing on {restored} MultiView plot(s)")
+        self._update_apply_button_state()
 
     def _open_line_style_dialog(self):
         frames = self.selected_frames()
@@ -1148,15 +1349,67 @@ class MultiViewGrid(QtWidgets.QWidget):
             )
             return
         dialog = LineStyleDialog(self, initial=targets[0].line_style_config())
+        dialog.applied.connect(lambda style: self._apply_line_style(style, targets))
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         style = dialog.line_style()
         if style is None:
             return
-        for fr in targets:
-            fr.set_line_style_config(style, refresh=True)
-        log_action(f"Updated line style for {len(targets)} plot(s)")
-        self._update_apply_button_state()
+        self._apply_line_style(style, targets)
+
+    def _open_colormap_dialog(self):
+        frames = [fr for fr in self.selected_frames() if not fr.is_line_display()]
+        if not frames:
+            frames = [fr for fr in self.frames if not fr.is_line_display()]
+        if not frames:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No images",
+                "Select at least one 2D plot before setting a colormap.",
+            )
+            return
+        names = available_colormap_names()
+        if not names:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "No colormaps",
+                "No colormaps are available to apply.",
+            )
+            return
+        options = []
+        for name in names:
+            label = name.replace("_", " ").title()
+            if is_scientific_colormap(name):
+                label = f"{label} (Scientific)"
+            options.append((label, name))
+        labels = [label for label, _ in options]
+        selection, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "Select colormap",
+            "Colormap:",
+            labels,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        try:
+            index = labels.index(selection)
+        except ValueError:
+            return
+        chosen = options[index][1]
+        applied = 0
+        for frame in frames:
+            if frame.apply_colormap(chosen):
+                applied += 1
+        if applied:
+            log_action(f"Applied colormap '{chosen}' to {applied} plot(s)")
+        else:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Colormap",
+                "Unable to apply the selected colormap to the chosen plots.",
+            )
 
     # ---------- export helpers ----------
     def _on_preferences_changed(self, _data):
@@ -1281,15 +1534,11 @@ class MultiViewGrid(QtWidgets.QWidget):
             self,
             dims=dims if dims else None,
         )
+        dialog.applied.connect(lambda mode, params: self._apply_processing_selection(mode, params, frames))
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         mode, params = dialog.selected_processing()
-        for frame in frames:
-            try:
-                frame.apply_processing(mode, params, self.processing_manager)
-            except Exception as exc:
-                QtWidgets.QMessageBox.warning(self, "Processing failed", str(exc))
-                break
+        self._apply_processing_selection(mode, params, frames)
 
 
     def _reflow(self):

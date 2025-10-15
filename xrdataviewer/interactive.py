@@ -39,9 +39,11 @@ except Exception:  # pragma: no cover - QtWebEngine may be unavailable
 
 from app_logging import log_action
 from xr_plot_widget import ScientificAxisItem
+from .utils import default_documents_directory
 
 if TYPE_CHECKING:  # pragma: no cover - typing helpers
     from .datasets import DatasetsPane
+    from .preferences import PreferencesManager
 
 
 if QtWebEngineWidgets is not None:  # pragma: no cover - requires QtWebEngine
@@ -91,6 +93,7 @@ class EmbeddedJupyterManager(QtCore.QObject):
         self._settings_dir: Optional[str] = None
         self._ipython_dir: Optional[str] = None
         self._launch_env: Optional[Dict[str, str]] = None
+        self._root_dir: Optional[str] = None
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
@@ -120,6 +123,8 @@ class EmbeddedJupyterManager(QtCore.QObject):
         self._port = desired_port
         self._token = None
         self._url = f"http://127.0.0.1:{self._port}/lab"
+        root_dir = self._effective_root_dir()
+        self.message.emit(f"Launching embedded JupyterLab in {root_dir}.")
 
         args = list(command)
         args.extend(
@@ -133,7 +138,7 @@ class EmbeddedJupyterManager(QtCore.QObject):
                 "--ServerApp.open_browser=False",
                 "--ServerApp.allow_remote_access=False",
                 "--ServerApp.disable_check_xsrf=True",
-                f"--ServerApp.root_dir={os.getcwd()}",
+                f"--ServerApp.root_dir={root_dir}",
                 f"--ServerApp.default_kernel_name={self._kernel_name}",
             ]
         )
@@ -235,7 +240,7 @@ class EmbeddedJupyterManager(QtCore.QObject):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                cwd=os.getcwd(),
+                cwd=root_dir,
                 env=env,
             )
         except Exception as exc:
@@ -276,6 +281,29 @@ class EmbeddedJupyterManager(QtCore.QObject):
 
         self.message.emit("Starting JupyterLab server…")
         return True
+
+    def set_root_directory(self, path: Optional[str]) -> None:
+        candidate = str(path).strip() if path else ""
+        self._root_dir = candidate or None
+
+    def root_directory(self) -> str:
+        return self._effective_root_dir()
+
+    def _effective_root_dir(self) -> str:
+        candidate = self._root_dir
+        if candidate:
+            expanded = os.path.expanduser(os.path.expandvars(candidate))
+        else:
+            expanded = os.getcwd()
+        try:
+            path = Path(expanded).resolve()
+        except Exception:
+            path = Path(os.getcwd()).resolve()
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            path = Path(os.getcwd()).resolve()
+        return str(path)
 
     def run_diagnostics(self) -> None:
         """Collect environment information helpful for debugging imports."""
@@ -1243,18 +1271,26 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self,
         library: DatasetsPane,
         bridge: Optional[InteractiveBridgeServer] = None,
+        preferences: Optional["PreferencesManager"] = None,
         parent=None,
         startup_callbacks: Optional[Dict[str, Callable[..., None]]] = None,
     ):
         super().__init__(parent)
         self.library = library
         self.bridge_server = bridge
+        self.preferences = preferences
+        self._preferences_connected = False
         self._active_mode = "jupyter"
         self._startup_callbacks: Dict[str, Callable[..., None]] = startup_callbacks or {}
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        layout.setSpacing(8)
+
+        def _ensure_minimum(widget: QtWidgets.QWidget) -> None:
+            hint = widget.sizeHint()
+            if hint.isValid():
+                widget.setMinimumSize(hint)
 
         hint_text = (
             "Choose an interactive environment. The embedded JupyterLab session automatically mirrors any "
@@ -1278,6 +1314,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self.btn_toggle_instructions.setChecked(False)
         self.btn_toggle_instructions.setArrowType(QtCore.Qt.RightArrow)
         self.btn_toggle_instructions.toggled.connect(self._toggle_instructions)
+        _ensure_minimum(self.btn_toggle_instructions)
         toggle_row.addWidget(self.btn_toggle_instructions)
         toggle_row.addStretch(1)
         layout.addLayout(toggle_row)
@@ -1295,7 +1332,9 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self.instructions_container.setVisible(False)
 
         mode_row = QtWidgets.QHBoxLayout()
+        mode_row.setSpacing(8)
         lbl_mode = QtWidgets.QLabel("Environment:")
+        _ensure_minimum(lbl_mode)
         mode_row.addWidget(lbl_mode)
         self.cmb_mode = QtWidgets.QComboBox()
         self._web_engine_available = QtWebEngineWidgets is not None
@@ -1304,6 +1343,8 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         else:
             self.cmb_mode.addItem("JupyterLab placeholder", "jupyter")
         self.cmb_mode.addItem("Python console", "python")
+        self.cmb_mode.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        _ensure_minimum(self.cmb_mode)
         mode_row.addWidget(self.cmb_mode)
         mode_row.addStretch(1)
         layout.addLayout(mode_row)
@@ -1311,7 +1352,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self._jupyter_nav_widget = QtWidgets.QWidget()
         nav_layout = QtWidgets.QHBoxLayout(self._jupyter_nav_widget)
         nav_layout.setContentsMargins(0, 0, 0, 0)
-        nav_layout.setSpacing(4)
+        nav_layout.setSpacing(8)
         if self._web_engine_available:
             self.btn_jupyter_back = QtWidgets.QToolButton()
             self.btn_jupyter_back.setText("◀")
@@ -1319,6 +1360,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             self.btn_jupyter_back.setAutoRaise(True)
             self.btn_jupyter_back.setEnabled(False)
             self.btn_jupyter_back.clicked.connect(self._on_jupyter_back)
+            _ensure_minimum(self.btn_jupyter_back)
             nav_layout.addWidget(self.btn_jupyter_back)
 
             self.btn_jupyter_forward = QtWidgets.QToolButton()
@@ -1327,6 +1369,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             self.btn_jupyter_forward.setAutoRaise(True)
             self.btn_jupyter_forward.setEnabled(False)
             self.btn_jupyter_forward.clicked.connect(self._on_jupyter_forward)
+            _ensure_minimum(self.btn_jupyter_forward)
             nav_layout.addWidget(self.btn_jupyter_forward)
 
             self.btn_jupyter_reload = QtWidgets.QToolButton()
@@ -1335,6 +1378,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             self.btn_jupyter_reload.setAutoRaise(True)
             self.btn_jupyter_reload.setEnabled(False)
             self.btn_jupyter_reload.clicked.connect(self._on_jupyter_reload)
+            _ensure_minimum(self.btn_jupyter_reload)
             nav_layout.addWidget(self.btn_jupyter_reload)
 
             self.btn_jupyter_external = QtWidgets.QToolButton()
@@ -1343,6 +1387,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             self.btn_jupyter_external.setAutoRaise(True)
             self.btn_jupyter_external.setEnabled(False)
             self.btn_jupyter_external.clicked.connect(self._open_jupyter_external)
+            _ensure_minimum(self.btn_jupyter_external)
             nav_layout.addWidget(self.btn_jupyter_external)
 
             nav_layout.addStretch(1)
@@ -1394,6 +1439,15 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             callback = self._startup_callbacks.get("ready")
             if callback:
                 self._jupyter_manager.urlReady.connect(callback)
+            if self.preferences is not None:
+                try:
+                    self.preferences.changed.connect(self._on_preferences_changed)
+                    self._preferences_connected = True
+                except Exception:
+                    self._preferences_connected = False
+            self._apply_preferences()
+        else:
+            self._apply_preferences()
         self._jupyter_url: Optional[str] = None
         self._jupyter_js_seen: Set[str] = set()
         self._jupyter_js_warned = False
@@ -1428,6 +1482,25 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
     @property
     def has_embedded_jupyter(self) -> bool:
         return self._web_engine_available and self._jupyter_manager is not None
+
+    def _preferred_jupyter_root(self) -> str:
+        if self.preferences is not None:
+            try:
+                path = self.preferences.jupyter_root_directory()
+                if path:
+                    return path
+            except Exception:
+                pass
+        return str(default_documents_directory())
+
+    def _apply_preferences(self):
+        if self._jupyter_manager is None:
+            return
+        root = self._preferred_jupyter_root()
+        self._jupyter_manager.set_root_directory(root)
+
+    def _on_preferences_changed(self, _data):
+        self._apply_preferences()
 
     def _on_mode_changed(self, index: int):
         mode = self.cmb_mode.itemData(index)
@@ -1592,6 +1665,12 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         if self._shutdown_called:
             return
         self._shutdown_called = True
+        if self._preferences_connected and self.preferences is not None:
+            try:
+                self.preferences.changed.disconnect(self._on_preferences_changed)
+            except Exception:
+                pass
+            self._preferences_connected = False
         if self._jupyter_manager:
             self._jupyter_manager.stop()
         if self._web_engine_available and self._jupyter_view is not None:

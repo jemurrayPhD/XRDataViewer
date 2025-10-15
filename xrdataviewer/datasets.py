@@ -336,27 +336,36 @@ class _DatasetsTree(QtWidgets.QTreeWidget):
 class DatasetsPane(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        self.setObjectName("datasetsPane")
 
-        btn_row = QtWidgets.QHBoxLayout()
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
+
+        btn_frame = QtWidgets.QFrame()
+        btn_frame.setProperty("modernSection", True)
+        btn_layout = QtWidgets.QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(12, 8, 12, 8)
+        btn_layout.setSpacing(8)
+
         self.btn_open_netcdf = QtWidgets.QPushButton("Load NetCDF…")
         self.btn_open_netcdf.clicked.connect(self._open_netcdf)
-        btn_row.addWidget(self.btn_open_netcdf)
+        btn_layout.addWidget(self.btn_open_netcdf)
 
         self.btn_open_json = QtWidgets.QPushButton("Load JSON…")
         self.btn_open_json.clicked.connect(self._open_json)
-        btn_row.addWidget(self.btn_open_json)
+        btn_layout.addWidget(self.btn_open_json)
 
         self.btn_open_db = QtWidgets.QPushButton("Load Database…")
         self.btn_open_db.clicked.connect(self._open_database)
-        btn_row.addWidget(self.btn_open_db)
+        btn_layout.addWidget(self.btn_open_db)
 
-        btn_row.addStretch(1)
-        layout.addLayout(btn_row)
+        btn_layout.addStretch(1)
+        layout.addWidget(btn_frame)
 
         self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setProperty("compactTabs", True)
         layout.addWidget(self.tabs, 1)
 
         self._trees: Dict[str, QtWidgets.QTreeWidget] = {}
@@ -650,6 +659,8 @@ class DatasetsPane(QtWidgets.QWidget):
         )
 
 class DatabaseQueryDialog(QtWidgets.QDialog):
+    applied = QtCore.Signal(dict)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Database Query")
@@ -673,9 +684,14 @@ class DatabaseQueryDialog(QtWidgets.QDialog):
         self.lbl_status.setStyleSheet("color: #888;")
         layout.addWidget(self.lbl_status)
 
-        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel | QtWidgets.QDialogButtonBox.Apply
+        )
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
+        apply_btn = btns.button(QtWidgets.QDialogButtonBox.Apply)
+        if apply_btn is not None:
+            apply_btn.clicked.connect(self._on_apply_clicked)
         layout.addWidget(btns)
 
     def query(self) -> Dict[str, object]:
@@ -692,6 +708,12 @@ class DatabaseQueryDialog(QtWidgets.QDialog):
             return {}
         self.lbl_status.setText(" ")
         return payload
+
+    def _on_apply_clicked(self):
+        payload = self.query()
+        if payload:
+            self.lbl_status.setText("Query parsed successfully.")
+            self.applied.emit(payload)
 
 class DimSliceControl(QtWidgets.QWidget):
     def __init__(self, dim: str, size: int, parent=None):

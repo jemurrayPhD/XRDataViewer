@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import copy
 import html
 import re
 from dataclasses import dataclass, field
@@ -9,6 +10,14 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from PySide2 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
+
+from xrdataviewer.colormaps import (
+    apply_histogram_gradient,
+    apply_image_colormap,
+    colormap_gradient_state,
+    colormap_lookup_table,
+    resolve_colormap_assets,
+)
 
 FORCE_SOFT_RENDER = False
 if FORCE_SOFT_RENDER:
@@ -530,6 +539,10 @@ class ScientificAxisItem(pg.AxisItem):
 class MyHistogramLUT(pg.HistogramLUTItem):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        try:
+            self.vb.setDefaultPadding(0.0)
+        except Exception:
+            pass
         QtCore.QTimer.singleShot(0, self._suppress_all_stops)
 
     def mouseDoubleClickEvent(self, ev):
@@ -585,6 +598,17 @@ class CentralPlotWidget(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.glw = pg.GraphicsLayoutWidget()
+        try:
+            layout = self.glw.ci.layout
+        except Exception:
+            layout = None
+        if layout is not None:
+            try:
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setHorizontalSpacing(0)
+                layout.setVerticalSpacing(0)
+            except Exception:
+                pass
         axis_items = {
             "bottom": ScientificAxisItem("bottom"),
             "left": ScientificAxisItem("left"),
@@ -613,18 +637,26 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._line_plot_y: Optional[np.ndarray] = None
         self._mode: str = "image"
         self._line_style = LineStyleConfig()
+        self._value_precision: int = 6
 
         self._legend_item: Optional[pg.LegendItem] = None
         self._legend_sources: List[Tuple[pg.GraphicsObject, str]] = []
+        self._legend_proxies: List[pg.PlotDataItem] = []
 
         self._histogram_menu_getter = None
         self._histogram_menu_setter = None
         self._histogram_menu_enabled_getter = None
 
+        self._colormap_object: Optional["pg.ColorMap"] = None
+        self._colormap_state: Optional[dict] = None
+        self._colormap_lut: Optional[np.ndarray] = None
+        self._colormap_name: str = "viridis"
+
         lay = QtWidgets.QHBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.addWidget(self.glw)
         try:
-            cmap = pg.colormap.get("viridis"); self.lut.gradient.setColorMap(cmap)
-        except Exception: pass
+            self.apply_colormap_name("viridis")
+        except Exception:
+            pass
 
         try:
             self.lut.gradient.sigGradientChanged.connect(lambda *_: self.lut.rehide_stops())
@@ -683,6 +715,98 @@ class CentralPlotWidget(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def _apply_colormap_assets(
+        self,
+        cmap: Optional["pg.ColorMap"],
+        *,
+        name: Optional[str] = None,
+        gradient_state: Optional[dict] = None,
+        lookup_table: Optional[np.ndarray] = None,
+        remember: bool = False,
+    ) -> bool:
+        state = gradient_state if gradient_state is not None else None
+        if state is None and cmap is not None:
+            state = colormap_gradient_state(cmap, name=name)
+        lut = lookup_table if lookup_table is not None else None
+        if lut is None and cmap is not None:
+            lut = colormap_lookup_table(cmap, name=name)
+
+        histogram_applied = False
+        if getattr(self, "lut", None) is not None:
+            histogram_applied = apply_histogram_gradient(self.lut, cmap, state)
+
+        image_applied = apply_image_colormap(
+            self.img_item,
+            cmap,
+            name=name,
+            lookup_table=lut,
+        )
+
+        applied = histogram_applied or image_applied
+
+        if remember:
+            if cmap is not None or state is not None or lut is not None:
+                self._colormap_object = cmap
+                self._colormap_state = copy.deepcopy(state) if state is not None else None
+                if lut is not None:
+                    try:
+                        self._colormap_lut = np.array(lut, copy=True)
+                    except Exception:
+                        self._colormap_lut = None
+                else:
+                    self._colormap_lut = None
+            if name:
+                self._colormap_name = str(name)
+
+        return applied
+
+    def _reapply_cached_colormap(self) -> None:
+        if (
+            self._colormap_object is None
+            and self._colormap_state is None
+            and self._colormap_lut is None
+        ):
+            return
+        state = copy.deepcopy(self._colormap_state) if self._colormap_state is not None else None
+        lut = (
+            np.array(self._colormap_lut, copy=True)
+            if self._colormap_lut is not None
+            else None
+        )
+        self._apply_colormap_assets(
+            self._colormap_object,
+            name=self._colormap_name,
+            gradient_state=state,
+            lookup_table=lut,
+            remember=False,
+        )
+
+    def apply_colormap(
+        self,
+        cmap: Optional["pg.ColorMap"],
+        *,
+        name: Optional[str] = None,
+        gradient_state: Optional[dict] = None,
+        lookup_table: Optional[np.ndarray] = None,
+    ) -> bool:
+        """Apply *cmap* (or explicit gradient/LUT) to the viewer widgets."""
+
+        return self._apply_colormap_assets(
+            cmap,
+            name=name,
+            gradient_state=gradient_state,
+            lookup_table=lookup_table,
+            remember=True,
+        )
+
+    def apply_colormap_name(self, name: str) -> bool:
+        """Resolve and apply a colour map by *name*."""
+
+        cmap, state, lut = resolve_colormap_assets(name)
+        if cmap is None and state is None and lut is None:
+            return False
+        return self.apply_colormap(cmap, name=name, gradient_state=state, lookup_table=lut)
+
     # ---------- annotation helpers ----------
     def annotation_defaults(self) -> PlotAnnotationConfig:
         config = plotitem_annotation_state(self.plot, self._colorbar_label_widget)
@@ -714,11 +838,21 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._colorbar_label_widget.setVisible(bool(html_text))
 
     def set_legend_sources(self, items: Sequence[Tuple[object, str]]):
-        processed: List[Tuple[object, str]] = []
+        self._legend_proxies = []
+        processed: List[Tuple[pg.GraphicsObject, str]] = []
         for obj, label in items:
             if obj is None:
                 continue
-            processed.append((obj, str(label)))
+            sample = obj
+            if not hasattr(sample, "opts"):
+                proxy = pg.PlotDataItem([0], [0])
+                try:
+                    proxy.setPen(pg.mkPen((200, 200, 200)))
+                except Exception:
+                    pass
+                sample = proxy
+                self._legend_proxies.append(proxy)
+            processed.append((sample, str(label)))
         self._legend_sources = processed
 
     def _ensure_legend(self) -> pg.LegendItem:
@@ -806,6 +940,22 @@ class CentralPlotWidget(QtWidgets.QWidget):
     def set_labels(self, xlabel: str = "X", ylabel: str = "Y"):
         self.plot.setLabel("bottom", xlabel); self.plot.setLabel("left", ylabel)
 
+    def set_value_precision(self, digits: int):
+        try:
+            digits = int(digits)
+        except Exception:
+            digits = self._value_precision
+        digits = max(0, min(8, digits))
+        if self._value_precision == digits:
+            return
+        self._value_precision = digits
+        if self._last_local_crosshair:
+            x, y, value, _label = self._last_local_crosshair
+            label = self._format_crosshair_text(x, y, value)
+            self._set_last_local_crosshair(x, y, value, label)
+            if self._local_crosshair_visible or self._crosshair_is_mirrored:
+                self.show_crosshair(x, y, value, mirrored=self._crosshair_is_mirrored, label=label)
+
     def get_levels(self):
         try: return self.lut.getLevels()
         except Exception: return (0.0, 1.0)
@@ -885,7 +1035,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
                 container.setObjectName("HistogramContainer")
                 layout = QtWidgets.QVBoxLayout(container)
                 layout.setContentsMargins(0, 0, 0, 0)
-                layout.setSpacing(4)
+                layout.setSpacing(2)
                 label = QtWidgets.QLabel("")
                 label.setAlignment(QtCore.Qt.AlignCenter)
                 label.setWordWrap(True)
@@ -897,6 +1047,21 @@ class CentralPlotWidget(QtWidgets.QWidget):
                 glw.setSizePolicy(
                     QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
                 )
+                try:
+                    glw.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+                except Exception:
+                    pass
+                try:
+                    gl_layout = glw.ci.layout
+                except Exception:
+                    gl_layout = None
+                if gl_layout is not None:
+                    try:
+                        gl_layout.setContentsMargins(0, 0, 0, 0)
+                        gl_layout.setHorizontalSpacing(0)
+                        gl_layout.setVerticalSpacing(0)
+                    except Exception:
+                        pass
                 layout.addWidget(glw, 1)
                 self._colorbar_label_widget = label
                 self._hist_container = container
@@ -963,6 +1128,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
             self.lut.setVisible(True)
         except Exception:
             pass
+        self._reapply_cached_colormap()
         if autorange:
             try:
                 self.plot.enableAutoRange(x=True, y=True)
@@ -1258,7 +1424,9 @@ class CentralPlotWidget(QtWidgets.QWidget):
                 if isinstance(val, (float, int, np.floating, np.integer)):
                     if np.isnan(val):
                         return "nan"
-                    return f"{float(val):.4g}"
+                    precision = max(0, int(self._value_precision))
+                    fmt_spec = f".{precision}f" if precision > 0 else ".0f"
+                    return format(float(val), fmt_spec)
             except Exception:
                 pass
             return str(val)

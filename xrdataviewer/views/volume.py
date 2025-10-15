@@ -14,6 +14,12 @@ except Exception:  # pragma: no cover - optional dependency
 
 from app_logging import log_action
 
+from ..colormaps import (
+    available_colormap_names,
+    colormap_lookup_table,
+    is_scientific_colormap,
+    resolve_colormap_assets,
+)
 from ..preferences import PreferencesManager
 from ..utils import ask_layout_label, ensure_extension, image_with_label, save_snapshot
 
@@ -147,12 +153,25 @@ class VolumeAlphaCurveWidget(QtWidgets.QWidget):
         eff = self._effective_rect()
         w = int(width or max(2.0, eff.width()))
         h = int(height or max(2.0, eff.height()))
+        cmap, state, asset_lut = resolve_colormap_assets(self._colormap_name)
+        if cmap is None and state is None and asset_lut is None:
+            cmap, state, asset_lut = resolve_colormap_assets("viridis")
+        if cmap is None and state is None and asset_lut is None:
+            return
         try:
-            cmap = pg.colormap.get(self._colormap_name)
+            mapped = cmap.map(np.linspace(0.0, 1.0, max(2, w)), mode="byte") if cmap else None
         except Exception:
-            cmap = pg.colormap.get("viridis")
-        lut = cmap.map(np.linspace(0.0, 1.0, max(2, w)), mode="byte")
-        gradient = np.repeat(lut[np.newaxis, :, :3], max(2, h), axis=0)
+            mapped = None
+        if mapped is None:
+            table = asset_lut
+            if table is None:
+                table = colormap_lookup_table(cmap, name=self._colormap_name, size=max(2, w))
+            if table is None and state:
+                table = colormap_lookup_table(None, name=self._colormap_name, size=max(2, w))
+            if table is None:
+                return
+            mapped = table
+        gradient = np.repeat(mapped[np.newaxis, :, :3], max(2, h), axis=0)
         alpha = np.full((gradient.shape[0], gradient.shape[1], 1), 255, dtype=np.uint8)
         rgba = np.concatenate((gradient, alpha), axis=2)
         image = QtGui.QImage(
@@ -326,6 +345,13 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self.cmb_colormap = QtWidgets.QComboBox()
         self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
         self.cmb_colormap.currentIndexChanged.connect(self._on_colormap_combo_changed)
+        block_combo = self.cmb_colormap.blockSignals(True)
+        for name in available_colormap_names():
+            label = name.replace("_", " ").title()
+            if is_scientific_colormap(name):
+                label = f"{label} (Scientific)"
+            self.cmb_colormap.addItem(label, name)
+        self.cmb_colormap.blockSignals(block_combo)
         cmap_controls.addWidget(self.cmb_colormap, 0)
 
         cmap_controls.addStretch(1)
@@ -423,6 +449,8 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self.view.setBackgroundColor(QtGui.QColor(20, 20, 20))
         layout.addWidget(self.view, 1)
 
+        self.set_preferences(preferences)
+
     def set_preferences(self, preferences: Optional[PreferencesManager]):
         if self.preferences is preferences:
             return
@@ -472,8 +500,6 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             return str(Path(base) / filename)
         return filename
 
-        self.set_preferences(preferences)
-
     # ----- public API -----
     def set_volume(self, data: Optional[np.ndarray]):
         if data is None or data.size == 0:
@@ -509,7 +535,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             self._colormap_name = str(name)
         else:
             self._colormap_name = "viridis"
-        for widget in self._curve_widgets.values():
+        for widget in getattr(self, "_curve_widgets", {}).values():
             try:
                 widget.set_colormap(self._colormap_name)
             except Exception:
@@ -558,10 +584,11 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
     def _compute_rgba_volume(self, scalar: np.ndarray) -> np.ndarray:
         if scalar.size == 0:
             return np.zeros(scalar.shape + (4,), dtype=np.ubyte)
-        try:
-            cmap = pg.colormap.get(self._colormap_name)
-        except Exception:
-            cmap = pg.colormap.get("viridis")
+        cmap, state, lut = resolve_colormap_assets(self._colormap_name)
+        if cmap is None and state is None and lut is None:
+            cmap, state, lut = resolve_colormap_assets("viridis")
+        if cmap is None and state is None and lut is None:
+            return np.zeros(scalar.shape + (4,), dtype=np.ubyte)
         data_min = float(self._data_min)
         data_max = float(self._data_max)
         if not np.isfinite(data_min) or not np.isfinite(data_max) or data_min == data_max:
@@ -576,7 +603,26 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             scale = 1.0
         norm = (scalar - data_min) / scale
         norm = np.clip(norm, 0.0, 1.0)
-        rgba = cmap.map(norm.reshape(-1), mode="byte").reshape(scalar.shape + (4,))
+        rgba = None
+        if cmap is not None:
+            try:
+                rgba = cmap.map(norm.reshape(-1), mode="byte").reshape(
+                    scalar.shape + (4,)
+                )
+            except Exception:
+                rgba = None
+        if rgba is None:
+            table = lut or colormap_lookup_table(cmap, name=self._colormap_name)
+            if table is None:
+                table = colormap_lookup_table(cmap, name="viridis")
+            if table is None:
+                return np.zeros(scalar.shape + (4,), dtype=np.ubyte)
+            idx = np.clip(
+                np.round(norm * (table.shape[0] - 1)).astype(int),
+                0,
+                table.shape[0] - 1,
+            )
+            rgba = table[idx].reshape(scalar.shape + (4,))
 
         alpha_value = self._apply_alpha_scale(self._sample_alpha_curve("value", norm))
         alpha_total = alpha_value
@@ -653,26 +699,13 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self.view.update()
 
     def _populate_colormap_choices(self):
-        candidates = [
-            "gray",
-            "viridis",
-            "plasma",
-            "inferno",
-            "magma",
-            "cividis",
-            "turbo",
-            "thermal",
-            "blues",
-            "reds",
-        ]
         self.cmb_colormap.blockSignals(True)
         self.cmb_colormap.clear()
-        for name in candidates:
-            try:
-                pg.colormap.get(name)
-            except Exception:
-                continue
-            self.cmb_colormap.addItem(name.title(), name)
+        for name in available_colormap_names():
+            label = name.replace("_", " ").title()
+            if is_scientific_colormap(name):
+                label = f"{label} (Scientific)"
+            self.cmb_colormap.addItem(label, name)
         if self.cmb_colormap.count() == 0:
             self.cmb_colormap.addItem("Viridis", "viridis")
         self.cmb_colormap.blockSignals(False)
@@ -716,7 +749,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
 
     def _update_alpha_controls(self):
         has_data = self._data is not None
-        for widget in self._curve_widgets.values():
+        for widget in getattr(self, "_curve_widgets", {}).values():
             widget.setEnabled(has_data)
         self.btn_reset_curve.setEnabled(has_data)
         self.btn_reset_view.setEnabled(has_data and self._volume_item is not None)

@@ -30,6 +30,7 @@ from xr_plot_widget import (
 )
 
 from .annotations import PlotAnnotationDialog
+from .colormaps import available_colormap_names, get_colormap, is_scientific_colormap
 from .utils import _nan_aware_reducer
 from .utils import open_dataset
 
@@ -195,22 +196,10 @@ class PipelineEditorDialog(QtWidgets.QDialog):
         top_row.addWidget(cmap_label, 0)
         self.cmb_colormap = QtWidgets.QComboBox()
         self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
-        candidate_maps = [
-            "gray",
-            "viridis",
-            "plasma",
-            "inferno",
-            "magma",
-            "cividis",
-            "turbo",
-            "thermal",
-        ]
-        for name in candidate_maps:
-            try:
-                pg.colormap.get(name)
-            except Exception:
-                continue
-            label = name.title()
+        for name in available_colormap_names():
+            label = name.replace("_", " ").title()
+            if is_scientific_colormap(name):
+                label = f"{label} (Scientific)"
             self.cmb_colormap.addItem(label, name)
         if self.cmb_colormap.count() == 0:
             self.cmb_colormap.addItem("Default", "default")
@@ -299,8 +288,13 @@ class PipelineEditorDialog(QtWidgets.QDialog):
         self.steps_scroll.setWidget(self.steps_container)
         layout.addWidget(self.steps_scroll, 1)
 
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Close | QtWidgets.QDialogButtonBox.Apply
+        )
         buttons.rejected.connect(self.reject)
+        self._apply_button = buttons.button(QtWidgets.QDialogButtonBox.Apply)
+        if self._apply_button is not None:
+            self._apply_button.clicked.connect(self._on_apply_clicked)
         layout.addWidget(buttons)
 
         self._forms: List[tuple[ProcessingStep, ParameterForm]] = []
@@ -384,15 +378,18 @@ class PipelineEditorDialog(QtWidgets.QDialog):
             pass
         self._update_roi_preview()
 
+    def _on_apply_clicked(self):
+        self._update_steps_from_forms()
+        self._apply_pipeline()
+
     def _apply_selected_colormap(self):
         if not hasattr(self, "cmb_colormap"):
             return
         name = self.cmb_colormap.currentData()
         if not name or name == "default":
             return
-        try:
-            cmap = pg.colormap.get(str(name))
-        except Exception:
+        cmap = get_colormap(str(name))
+        if cmap is None:
             return
         try:
             self.image_view.setColorMap(cmap)
@@ -608,11 +605,14 @@ class ProcessingDockContainer(QtWidgets.QWidget):
         self._content_widget = widget
         self._floating_window: Optional[QtWidgets.QDialog] = None
 
+        self.setObjectName("processingContainer")
+
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         header = QtWidgets.QWidget()
+        header.setObjectName("processingHeader")
         header_layout = QtWidgets.QHBoxLayout(header)
         header_layout.setContentsMargins(6, 6, 6, 6)
         header_layout.setSpacing(6)
@@ -628,6 +628,7 @@ class ProcessingDockContainer(QtWidgets.QWidget):
         self.btn_float.setAutoRaise(True)
         self.btn_float.setToolTip("Undock processing pane to a floating window")
         self.btn_float.clicked.connect(self._on_float_clicked)
+        self.btn_float.setProperty("headerAction", True)
         header_layout.addWidget(self.btn_float)
 
         self.btn_toggle = QtWidgets.QToolButton()
@@ -637,11 +638,13 @@ class ProcessingDockContainer(QtWidgets.QWidget):
         self.btn_toggle.setArrowType(QtCore.Qt.DownArrow)
         self.btn_toggle.setToolTip("Hide processing pane")
         self.btn_toggle.toggled.connect(self._on_toggle_toggled)
+        self.btn_toggle.setProperty("headerAction", True)
         header_layout.addWidget(self.btn_toggle)
 
         layout.addWidget(header)
 
         self._content_frame = QtWidgets.QWidget()
+        self._content_frame.setObjectName("processingContent")
         self._content_layout = QtWidgets.QVBoxLayout(self._content_frame)
         self._content_layout.setContentsMargins(0, 0, 0, 0)
         self._content_layout.setSpacing(0)
@@ -654,6 +657,7 @@ class ProcessingDockContainer(QtWidgets.QWidget):
         self._placeholder.setAlignment(QtCore.Qt.AlignCenter)
         self._placeholder.setWordWrap(True)
         self._placeholder.hide()
+        self._placeholder.setObjectName("processingPlaceholder")
         layout.addWidget(self._placeholder, 1)
 
         self._update_toggle_visuals()
@@ -996,17 +1000,24 @@ class PipelineBuilderDialog(QtWidgets.QDialog):
             self.list_steps.setCurrentRow(0)
 
     def accept(self):
+        if self._commit_pipeline(close=True):
+            super().accept()
+
+    def result_pipeline(self) -> Optional[ProcessingPipeline]:
+        return self._result
+
+    def _commit_pipeline(self, *, close: bool) -> bool:
         if not self.steps:
             QtWidgets.QMessageBox.warning(
                 self, "Missing steps", "Add at least one processing step before saving."
             )
-            return
+            return False
         name = self.edit_name.text().strip()
         if not name:
             QtWidgets.QMessageBox.warning(
                 self, "Missing name", "Please enter a name for the pipeline."
             )
-            return
+            return False
         pipeline = ProcessingPipeline(
             name=name,
             steps=[ProcessingStep(step.key, dict(step.params)) for step in self.steps],
@@ -1015,13 +1026,10 @@ class PipelineBuilderDialog(QtWidgets.QDialog):
             self.manager.save_pipeline(pipeline)
         except ValueError as e:
             QtWidgets.QMessageBox.warning(self, "Save failed", str(e))
-            return
+            return False
         self._result = pipeline
         log_action(f"Saved processing pipeline '{pipeline.name}' with {len(self.steps)} step(s)")
-        super().accept()
-
-    def result_pipeline(self) -> Optional[ProcessingPipeline]:
-        return self._result
+        return True
 
 
 class ProcessingDockWidget(QtWidgets.QWidget):
@@ -1192,6 +1200,8 @@ class ProcessingDockWidget(QtWidgets.QWidget):
         self._select_pipeline(pipeline.name)
 
 class ProcessingSelectionDialog(QtWidgets.QDialog):
+    applied = QtCore.Signal(str, dict)
+
     def __init__(
         self,
         manager: Optional[ProcessingManager],
@@ -1250,9 +1260,14 @@ class ProcessingSelectionDialog(QtWidgets.QDialog):
         self.cmb_mode.currentIndexChanged.connect(self._on_mode_changed)
         self.stack.setCurrentIndex(self._none_index)
 
-        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel | QtWidgets.QDialogButtonBox.Apply
+        )
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
+        apply_btn = btns.button(QtWidgets.QDialogButtonBox.Apply)
+        if apply_btn is not None:
+            apply_btn.clicked.connect(self._on_apply_clicked)
         layout.addWidget(btns)
 
     def _add_mode_item(self, label: str, data: Dict[str, object]):
@@ -1295,3 +1310,7 @@ class ProcessingSelectionDialog(QtWidgets.QDialog):
             name = str(data.get("name", ""))
             return f"pipeline:{name}", {}
         return "none", {}
+
+    def _on_apply_clicked(self):
+        mode, params = self.selected_processing()
+        self.applied.emit(mode, params)
