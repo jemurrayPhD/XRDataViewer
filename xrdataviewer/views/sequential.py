@@ -515,6 +515,12 @@ class SequentialView(QtWidgets.QWidget):
             self.viewer.lut.rehide_stops()
         except Exception:
             pass
+        try:
+            if hasattr(cmap, "getLookupTable"):
+                lut = cmap.getLookupTable(0.0, 1.0, 256)
+                self.viewer.img_item.setLookupTable(lut)
+        except Exception:
+            pass
         self._update_volume_window_colormap()
 
     def set_processing_manager(self, manager: Optional[ProcessingManager]):

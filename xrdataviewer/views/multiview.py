@@ -249,6 +249,12 @@ class ViewerFrame(QtWidgets.QFrame):
         try:
             self.viewer.lut.gradient.setColorMap(cmap)
             self.viewer.lut.rehide_stops()
+            if hasattr(cmap, "getLookupTable"):
+                lut = cmap.getLookupTable(0.0, 1.0, 256)
+                try:
+                    self.viewer.img_item.setLookupTable(lut)
+                except Exception:
+                    pass
         except Exception:
             return False
         return True
@@ -671,6 +677,25 @@ class ViewerFrame(QtWidgets.QFrame):
             return ()
         return tuple(f"axis{i}" for i in range(np.ndim(data)))
 
+    def processing_state(self) -> Tuple[str, Dict[str, object]]:
+        """Return the current processing identifier and parameters."""
+
+        return self._current_processing, dict(self._processing_params)
+
+    def restore_processing(
+        self,
+        mode: str,
+        params: Dict[str, object],
+        manager: Optional["ProcessingManager"],
+    ) -> None:
+        """Reapply a previously captured processing state."""
+
+        mode = mode or "none"
+        if mode == "none":
+            self.reset_processing()
+            return
+        self.apply_processing(mode, dict(params or {}), manager)
+
     def annotation_defaults(self) -> PlotAnnotationConfig:
         return self.viewer.annotation_defaults()
 
@@ -712,6 +737,9 @@ class MultiViewGrid(QtWidgets.QWidget):
         self._mouse_down = False
         self._drag_select_active = False
         self._drag_select_add = True
+        self._processing_history: List[
+            List[Tuple[ViewerFrame, str, Dict[str, object]]]
+        ] = []
 
         app = QtWidgets.QApplication.instance()
         if app is not None:
@@ -808,6 +836,10 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.btn_apply_processing.setEnabled(False)
         self.btn_apply_processing.clicked.connect(self._on_apply_processing_clicked)
 
+        self.btn_undo_processing = QtWidgets.QPushButton("Undo processing")
+        self.btn_undo_processing.setEnabled(False)
+        self.btn_undo_processing.clicked.connect(self._on_undo_processing_clicked)
+
         self.btn_export = QtWidgets.QToolButton()
         self.btn_export.setText("Export")
         self.btn_export.setPopupMode(QtWidgets.QToolButton.InstantPopup)
@@ -841,7 +873,7 @@ class MultiViewGrid(QtWidgets.QWidget):
                 "Scaling",
                 (self.chk_link_levels, self.chk_link_panzoom, self.btn_autoscale, self.btn_autopan),
             ),
-            _make_group("Processing", (self.btn_apply_processing,)),
+            _make_group("Processing", (self.btn_apply_processing, self.btn_undo_processing)),
             _make_group("Style", (self.btn_line_style, self.btn_annotations)),
             _make_group("Color", (self.btn_set_colormap,)),
             _make_group("Export", (self.btn_export,)),
@@ -1029,6 +1061,7 @@ class MultiViewGrid(QtWidgets.QWidget):
             fr.dispose()
         except Exception:
             pass
+        self._prune_processing_history()
         self._reflow()
         self._update_apply_button_state()
 
@@ -1041,6 +1074,9 @@ class MultiViewGrid(QtWidgets.QWidget):
             self.btn_select_all.setEnabled(has_frames)
         if hasattr(self, "btn_apply_processing"):
             self.btn_apply_processing.setEnabled(bool(self._selected_frames))
+        self._prune_processing_history()
+        if hasattr(self, "btn_undo_processing"):
+            self.btn_undo_processing.setEnabled(bool(self._processing_history))
         if hasattr(self, "btn_line_style"):
             targets = self.selected_frames() or list(self.frames)
             has_line = any(fr.is_line_display() for fr in targets)
@@ -1222,12 +1258,79 @@ class MultiViewGrid(QtWidgets.QWidget):
     def _apply_processing_selection(
         self, mode: str, params: Dict[str, object], frames: List["ViewerFrame"]
     ) -> None:
+        if not frames:
+            return
+
+        snapshot: List[Tuple[ViewerFrame, str, Dict[str, object]]] = []
+        for frame in frames:
+            try:
+                state = frame.processing_state()
+            except Exception:
+                continue
+            snapshot.append((frame, state[0], dict(state[1])))
+
+        if snapshot:
+            self._processing_history.append(snapshot)
+
+        error: Optional[Exception] = None
         for frame in frames:
             try:
                 frame.apply_processing(mode, params, self.processing_manager)
             except Exception as exc:
-                QtWidgets.QMessageBox.warning(self, "Processing failed", str(exc))
+                error = exc
                 break
+
+        if error is not None:
+            if snapshot:
+                self._restore_processing_snapshot(snapshot)
+                if self._processing_history and self._processing_history[-1] is snapshot:
+                    self._processing_history.pop()
+            QtWidgets.QMessageBox.warning(self, "Processing failed", str(error))
+            self._update_apply_button_state()
+            return
+
+        label = str(mode or "none")
+        if label.startswith("pipeline:"):
+            label = f"pipeline '{label.split(':', 1)[1]}'"
+        elif label == "none":
+            label = "no processing"
+        log_action(
+            f"Applied {label} to {len(frames)} MultiView plot(s)"
+        )
+        self._update_apply_button_state()
+
+    def _restore_processing_snapshot(
+        self, snapshot: List[Tuple[ViewerFrame, str, Dict[str, object]]]
+    ) -> int:
+        restored = 0
+        for frame, mode, params in snapshot:
+            if frame not in self.frames:
+                continue
+            try:
+                frame.restore_processing(mode, params, self.processing_manager)
+            except Exception:
+                continue
+            restored += 1
+        return restored
+
+    def _prune_processing_history(self) -> None:
+        if not self._processing_history:
+            return
+        pruned: List[List[Tuple[ViewerFrame, str, Dict[str, object]]]] = []
+        for snapshot in self._processing_history:
+            filtered = [entry for entry in snapshot if entry[0] in self.frames]
+            if filtered:
+                pruned.append(filtered)
+        self._processing_history = pruned
+
+    def _on_undo_processing_clicked(self):
+        if not self._processing_history:
+            return
+        snapshot = self._processing_history.pop()
+        restored = self._restore_processing_snapshot(snapshot)
+        if restored:
+            log_action(f"Undid processing on {restored} MultiView plot(s)")
+        self._update_apply_button_state()
 
     def _open_line_style_dialog(self):
         frames = self.selected_frames()

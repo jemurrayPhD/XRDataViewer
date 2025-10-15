@@ -179,7 +179,6 @@ class PipelineEditorDialog(QtWidgets.QDialog):
         self._processed_data: Optional[np.ndarray] = None
         self.setWindowTitle(f"Edit Pipeline – {self.pipeline.name or 'Untitled'}")
         self.resize(800, 700)
-        self._apply_button: Optional[QtWidgets.QPushButton] = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -768,7 +767,6 @@ class PipelineBuilderDialog(QtWidgets.QDialog):
         self.steps: List[ProcessingStep] = []
         self._stack_indices: Dict[str, int] = {}
         self._result: Optional[ProcessingPipeline] = None
-        self._apply_button: Optional[QtWidgets.QPushButton] = None
 
         self.setWindowTitle("Pipeline builder")
         self.resize(520, 640)
@@ -844,13 +842,10 @@ class PipelineBuilderDialog(QtWidgets.QDialog):
         layout.addLayout(action_row)
 
         buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel | QtWidgets.QDialogButtonBox.Apply
+            QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        self._apply_button = buttons.button(QtWidgets.QDialogButtonBox.Apply)
-        if self._apply_button is not None:
-            self._apply_button.clicked.connect(lambda: self._commit_pipeline(close=False))
         layout.addWidget(buttons)
 
         initial = pipeline or ProcessingPipeline(name="", steps=[])
@@ -1034,8 +1029,6 @@ class PipelineBuilderDialog(QtWidgets.QDialog):
             return False
         self._result = pipeline
         log_action(f"Saved processing pipeline '{pipeline.name}' with {len(self.steps)} step(s)")
-        if not close:
-            self._refresh_step_list()
         return True
 
 
