@@ -736,6 +736,14 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
                     except Exception:
                         continue
 
+        # Some Qt/PyQtGraph combinations keep the histogram vertical even if the
+        # colour bar honours the requested orientation.  As a last resort,
+        # rotate the histogram viewbox so the bars render horizontally too.
+        if not horizontal:
+            horizontal = self._force_horizontal_histogram(self.hist_widget)
+        else:
+            self._force_horizontal_histogram(self.hist_widget)
+
         self.hist_widget.setMinimumHeight(80 if horizontal else 110)
         self.hist_widget.setMaximumHeight(120 if horizontal else 160)
         self.hist_widget.setSizePolicy(
@@ -953,6 +961,89 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         if self.hist_widget is None:
             return None
         return getattr(self.hist_widget, "item", None)
+
+    def _force_horizontal_histogram(self, widget: Optional[QtWidgets.QWidget]) -> bool:
+        """Rotate the histogram plot so bars render horizontally when needed."""
+
+        if widget is None:
+            return False
+        cached = widget.property("_xr_horizontal_hist_done")
+        if cached is not None:
+            return bool(cached)
+
+        def _reset_transform(target) -> None:
+            if target is None:
+                return
+            try:
+                target.resetTransform()  # type: ignore[attr-defined]
+                return
+            except Exception:
+                pass
+            try:
+                target.setTransform(QtGui.QTransform())  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+        def _rotate_target(target) -> bool:
+            if target is None:
+                return False
+            for angle in (-90, 90):
+                try:
+                    target.rotate(angle)  # type: ignore[attr-defined]
+                    return True
+                except Exception:
+                    try:
+                        target.setTransform(QtGui.QTransform().rotate(angle))  # type: ignore[attr-defined]
+                        return True
+                    except Exception:
+                        continue
+            return False
+
+        item = getattr(widget, "item", None)
+        view_box = getattr(item, "vb", None)
+
+        # Some builds expose the histogram PlotWidget via ui.histogram.
+        hist_plot = None
+        ui_obj = getattr(widget, "ui", None)
+        if ui_obj is not None:
+            hist_plot = getattr(ui_obj, "histogram", None)
+            if hist_plot is not None and view_box is None:
+                try:
+                    if hasattr(hist_plot, "getViewBox"):
+                        view_box = hist_plot.getViewBox()  # type: ignore[call-arg]
+                    elif hasattr(hist_plot, "plotItem"):
+                        view_box = hist_plot.plotItem.getViewBox()  # type: ignore[attr-defined]
+                except Exception:
+                    view_box = None
+
+        rotated = False
+        # Prefer rotating the underlying ViewBox; fall back to the item if needed.
+        target_candidates = [view_box, item]
+        for target in target_candidates:
+            if target is None:
+                continue
+            _reset_transform(target)
+            if _rotate_target(target):
+                rotated = True
+                break
+
+        if rotated and view_box is not None:
+            for func_name in ("setDefaultPadding", "setAspectLocked", "invertY", "setMouseEnabled"):
+                func = getattr(view_box, func_name, None)
+                if callable(func):
+                    try:
+                        if func_name == "setDefaultPadding":
+                            func(0.0)
+                        elif func_name == "setAspectLocked":
+                            func(False)
+                        elif func_name == "invertY":
+                            func(True)
+                        elif func_name == "setMouseEnabled":
+                            func(x=False, y=False)
+                    except Exception:
+                        pass
+        widget.setProperty("_xr_horizontal_hist_done", rotated)
+        return rotated
 
     def _connect_histogram_signal(self):
         if self._histogram_signal_connected or self.hist_widget is None:
