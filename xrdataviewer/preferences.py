@@ -357,7 +357,17 @@ class PreferencesDialog(QtWidgets.QDialog):
 
         self.table_colormaps = QtWidgets.QTableWidget(0, 2)
         self.table_colormaps.setHorizontalHeaderLabels(["Variable", "Colormap"])
-        self.table_colormaps.horizontalHeader().setStretchLastSection(True)
+        header = self.table_colormaps.horizontalHeader()
+        try:
+            if isinstance(header, QtWidgets.QHeaderView):
+                header.setStretchLastSection(True)
+            elif hasattr(header, "setStretchLastSection"):
+                header.setStretchLastSection(True)
+        except Exception:
+            # Some PySide2 builds have been observed to hand back placeholder
+            # QWidget instances here; fall back silently when the API is
+            # missing so the dialog still loads.
+            pass
         self.table_colormaps.verticalHeader().setVisible(False)
         self.table_colormaps.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table_colormaps.setEditTriggers(
