@@ -146,8 +146,8 @@ class PreferencesDialog(QtWidgets.QDialog):
     def __init__(self, manager: PreferencesManager, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Preferences")
-        self.resize(560, 440)
-        self.setMinimumSize(520, 420)
+        self.resize(600, 460)
+        self.setMinimumSize(560, 440)
         self._manager = manager
         self._data = manager.data()
         self._appearance_profiles = copy.deepcopy(

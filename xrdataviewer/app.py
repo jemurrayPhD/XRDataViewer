@@ -273,7 +273,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_dock.resize(800, 200)
         self.log_dock.setCollapsed(True)
 
-        self.setMinimumSize(820, 560)
+        self.setMinimumSize(860, 580)
         self._apply_initial_geometry()
 
         if self._startup_splash is not None and not self.tab_interactive.has_embedded_jupyter:
@@ -367,7 +367,7 @@ class MainWindow(QtWidgets.QMainWindow):
             raise RuntimeError(f"Failed to load UI from {ui_path}: {loader.errorString()}")
 
         self.setCentralWidget(central)
-        central.setMinimumSize(800, 520)
+        central.setMinimumSize(840, 540)
 
         main_splitter = central.findChild(QtWidgets.QSplitter, "mainSplitter")
         left_splitter = central.findChild(QtWidgets.QSplitter, "leftSplitter")
