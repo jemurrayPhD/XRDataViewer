@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import copy
 from functools import partial
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -1443,6 +1444,12 @@ class SequentialView(QtWidgets.QWidget):
         self._store_export_dir(directory)
         base_name = sanitize_filename(self.lbl_dataset.text()) or "slice"
         original = self._slice_index
+        saved_cmap = getattr(self.viewer, "_colormap_object", None)
+        saved_state = copy.deepcopy(getattr(self.viewer, "_colormap_state", None))
+        saved_lut = getattr(self.viewer, "_colormap_lut", None)
+        if isinstance(saved_lut, np.ndarray):
+            saved_lut = np.array(saved_lut, copy=True)
+        saved_name = getattr(self.viewer, "_colormap_name", None)
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
             count = 0
@@ -1459,6 +1466,18 @@ class SequentialView(QtWidgets.QWidget):
         finally:
             if self._slice_count > 0:
                 self._on_slice_changed(original)
+                if saved_cmap is not None or saved_state is not None or saved_lut is not None:
+                    state_copy = copy.deepcopy(saved_state) if saved_state is not None else None
+                    lut_copy = np.array(saved_lut, copy=True) if isinstance(saved_lut, np.ndarray) else None
+                    self.viewer.apply_colormap(
+                        saved_cmap,
+                        name=saved_name,
+                        gradient_state=state_copy,
+                        lookup_table=lut_copy,
+                    )
+                elif saved_name:
+                    self.viewer.apply_colormap_name(saved_name)
+                self._apply_selected_colormap()
             QtWidgets.QApplication.restoreOverrideCursor()
         QtWidgets.QMessageBox.information(
             self,

@@ -744,20 +744,19 @@ class CentralPlotWidget(QtWidgets.QWidget):
 
         applied = histogram_applied or image_applied
 
-        if applied and remember:
-            self._colormap_object = cmap
-            self._colormap_state = copy.deepcopy(state) if state is not None else None
-            if lut is not None:
-                try:
-                    self._colormap_lut = np.array(lut, copy=True)
-                except Exception:
+        if remember:
+            if cmap is not None or state is not None or lut is not None:
+                self._colormap_object = cmap
+                self._colormap_state = copy.deepcopy(state) if state is not None else None
+                if lut is not None:
+                    try:
+                        self._colormap_lut = np.array(lut, copy=True)
+                    except Exception:
+                        self._colormap_lut = None
+                else:
                     self._colormap_lut = None
-            else:
-                self._colormap_lut = None
             if name:
                 self._colormap_name = str(name)
-        elif remember and name:
-            self._colormap_name = str(name)
 
         return applied
 

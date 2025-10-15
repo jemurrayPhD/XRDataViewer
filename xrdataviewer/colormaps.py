@@ -460,7 +460,8 @@ def _normalize_lut(lut: object) -> Optional[np.ndarray]:
     if arr.shape[1] == 3:
         alpha = np.full((arr.shape[0], 1), 255.0)
         arr = np.hstack([arr, alpha])
-    return arr.astype(np.float32, copy=True)
+    arr = np.ascontiguousarray(arr.astype(np.uint8, copy=False))
+    return arr
 
 
 def colormap_gradient_state(cmap: "pg.ColorMap", *, name: Optional[str] = None) -> Optional[dict]:
@@ -729,19 +730,24 @@ def apply_histogram_gradient(
 
     applied = False
     gradient = getattr(histogram, "gradient", None)
-    if gradient is not None and state:
-        try:
-            gradient.restoreState(state)
-            applied = True
-        except Exception:
-            pass
-    setter = getattr(getattr(histogram, "gradient", None), "setColorMap", None)
+    if gradient is None:
+        return False
+
+    setter = getattr(gradient, "setColorMap", None)
     if callable(setter) and cmap is not None:
         try:
             setter(cmap)
             applied = True
         except Exception:
             pass
+
+    if state:
+        try:
+            gradient.restoreState(state)
+            applied = True
+        except Exception:
+            pass
+
     rehide = getattr(histogram, "rehide_stops", None)
     if callable(rehide):
         try:
@@ -762,31 +768,29 @@ def apply_image_colormap(
 
     if image_item is None:
         return False
+
     applied = False
     lut = lookup_table
     if lut is None and cmap is not None:
         lut = colormap_lookup_table(cmap, name=name)
+
     if lut is not None:
-        array = np.array(lut, dtype=np.float32, copy=False)
-        if array.ndim == 1:
-            array = array.reshape(-1, 1)
-        table = array
         try:
-            if np.nanmax(table) > 1.0:
-                table = table / 255.0
-        except Exception:
-            table = array
-        try:
+            table = np.array(lut, copy=False)
+            if table.ndim == 1:
+                table = table.reshape(-1, 1)
+            if table.shape[1] == 1:
+                table = np.repeat(table, 3, axis=1)
+            if table.shape[1] == 3:
+                alpha = np.full((table.shape[0], 1), 255, dtype=table.dtype)
+                table = np.hstack([table, alpha])
+            table = np.clip(np.rint(table), 0.0, 255.0).astype(np.uint8, copy=False)
+            table = np.ascontiguousarray(table)
             image_item.setLookupTable(table, update=True)
             applied = True
-            refresher = getattr(image_item, "updateImage", None)
-            if callable(refresher):
-                try:
-                    refresher()
-                except Exception:
-                    pass
         except Exception:
             pass
+
     setter = getattr(image_item, "setColorMap", None)
     if callable(setter) and cmap is not None:
         try:
@@ -794,5 +798,14 @@ def apply_image_colormap(
             applied = True
         except Exception:
             pass
+
+    if applied:
+        refresher = getattr(image_item, "updateImage", None)
+        if callable(refresher):
+            try:
+                refresher()
+            except Exception:
+                pass
+
     return applied
 
