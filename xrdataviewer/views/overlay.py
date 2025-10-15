@@ -675,6 +675,16 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         header.addWidget(self.btn_remove)
         lay.addLayout(header)
 
+        content_row = QtWidgets.QHBoxLayout()
+        content_row.setContentsMargins(0, 0, 0, 0)
+        content_row.setSpacing(8)
+        lay.addLayout(content_row)
+
+        controls_col = QtWidgets.QVBoxLayout()
+        controls_col.setContentsMargins(0, 0, 0, 0)
+        controls_col.setSpacing(6)
+        content_row.addLayout(controls_col, 1)
+
         # Colormap selection
         self._colormap_row = QtWidgets.QWidget()
         cmap_row = QtWidgets.QHBoxLayout(self._colormap_row)
@@ -692,42 +702,7 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
             self.cmb_colormap.addItem(label, name)
         self.cmb_colormap.currentTextChanged.connect(self._on_colormap)
         cmap_row.addWidget(self.cmb_colormap, 1)
-        lay.addWidget(self._colormap_row)
-
-        # Histogram / levels controls
-        self._histogram_row = QtWidgets.QWidget()
-        hist_row = QtWidgets.QHBoxLayout(self._histogram_row)
-        hist_row.setContentsMargins(0, 0, 0, 0)
-        hist_row.setSpacing(6)
-
-        controls_col = QtWidgets.QVBoxLayout()
-        controls_col.setContentsMargins(0, 0, 0, 0)
-        controls_col.setSpacing(4)
-
-        self.btn_autoscale = QtWidgets.QToolButton()
-        self.btn_autoscale.setText("Auto")
-        self.btn_autoscale.clicked.connect(self._on_autoscale)
-        controls_col.addWidget(self.btn_autoscale, alignment=QtCore.Qt.AlignRight)
-        controls_col.addStretch(1)
-
-        hist_row.addStretch(1)
-        hist_row.addLayout(controls_col, 0)
-
-        self.hist_widget = pg.HistogramLUTWidget()
-        self.hist_widget.setMinimumWidth(140)
-        self.hist_widget.setMinimumHeight(150)
-        self.hist_widget.setSizePolicy(
-            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
-        )
-        try:
-            self.hist_widget.vb.setMouseEnabled(x=False, y=False)
-        except Exception:
-            pass
-        self._connect_histogram_signal()
-        hist_row.addWidget(self.hist_widget, 0)
-        lay.addWidget(self._histogram_row)
-        self._histogram_row.setVisible(False)
-        self.hist_widget.setVisible(False)
+        controls_col.addWidget(self._colormap_row)
 
         # Opacity slider
         opacity_row = QtWidgets.QHBoxLayout()
@@ -739,7 +714,13 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         opacity_row.addWidget(self.sld_opacity, 1)
         self.lbl_opacity = QtWidgets.QLabel("100%")
         opacity_row.addWidget(self.lbl_opacity)
-        lay.addLayout(opacity_row)
+        controls_col.addLayout(opacity_row)
+
+        # Processing controls container
+        controls_body = QtWidgets.QVBoxLayout()
+        controls_body.setContentsMargins(0, 0, 0, 0)
+        controls_body.setSpacing(6)
+        controls_col.addLayout(controls_body)
 
         # Processing controls
         manager_ref = getattr(view, "processing_manager", None)
@@ -814,7 +795,42 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.btn_save_pipeline.clicked.connect(self._on_save_pipeline)
         history_buttons.addWidget(self.btn_save_pipeline)
         proc_layout.addLayout(history_buttons)
-        lay.addWidget(proc_box)
+        controls_body.addWidget(proc_box)
+        controls_col.addStretch(1)
+
+        # Histogram / levels controls on the right
+        self._histogram_container = QtWidgets.QWidget()
+        self._histogram_container.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+        )
+        hist_col = QtWidgets.QVBoxLayout(self._histogram_container)
+        hist_col.setContentsMargins(0, 0, 0, 0)
+        hist_col.setSpacing(6)
+
+        self.hist_widget = pg.HistogramLUTWidget()
+        self.hist_widget.setMinimumWidth(140)
+        self.hist_widget.setMinimumHeight(150)
+        self.hist_widget.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+        )
+        try:
+            self.hist_widget.vb.setMouseEnabled(x=False, y=False)
+        except Exception:
+            pass
+        self._connect_histogram_signal()
+        hist_col.addWidget(self.hist_widget, 1)
+
+        self.btn_autoscale = QtWidgets.QToolButton()
+        self.btn_autoscale.setText("Auto")
+        self.btn_autoscale.clicked.connect(self._on_autoscale)
+        hist_col.addWidget(self.btn_autoscale, 0, alignment=QtCore.Qt.AlignRight)
+        hist_col.addStretch(1)
+
+        content_row.addWidget(self._histogram_container, 0, QtCore.Qt.AlignTop)
+        self._histogram_container.setVisible(False)
+        self.hist_widget.setVisible(False)
+        # Backwards compatible alias for helper methods referencing the old row widget
+        self._histogram_row = self._histogram_container
         self.set_processing_manager(manager_ref)
 
         self._value_precision = -1
