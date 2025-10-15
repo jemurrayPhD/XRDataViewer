@@ -305,16 +305,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.setMenuBar(menubar)
         prefs_menu = menubar.addMenu("Preferences")
 
-        act_edit = prefs_menu.addAction("Edit preferences…")
+        act_edit = QtWidgets.QAction("Edit preferences…", self)
         act_edit.triggered.connect(self._edit_preferences)
+        prefs_menu.addAction(act_edit)
 
         prefs_menu.addSeparator()
 
-        act_load = prefs_menu.addAction("Load preferences…")
+        act_load = QtWidgets.QAction("Load preferences…", self)
         act_load.triggered.connect(self._load_preferences)
+        prefs_menu.addAction(act_load)
 
-        act_save = prefs_menu.addAction("Save preferences…")
+        act_save = QtWidgets.QAction("Save preferences…", self)
         act_save.triggered.connect(self._save_preferences)
+        prefs_menu.addAction(act_save)
 
     def _edit_preferences(self):
         dialog = PreferencesDialog(self.preferences, self)
