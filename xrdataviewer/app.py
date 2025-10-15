@@ -387,9 +387,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.setCentralWidget(central)
 
-        central.setMinimumSize(920, 600)
-        placeholders["tabs"].setMinimumSize(780, 520)
-        placeholders["right_pane"].setMinimumWidth(780)
+        self._apply_central_minimum_sizes(placeholders)
 
         return placeholders
 
@@ -406,9 +404,70 @@ class MainWindow(QtWidgets.QMainWindow):
         frame.moveCenter(available.center())
         self.move(frame.topLeft())
 
+    def _screen_width_scale(self) -> float:
+        screen = QtWidgets.QApplication.primaryScreen()
+        if not screen:
+            return 1.0
+        available = screen.availableGeometry()
+        width = available.width()
+        if width <= 0:
+            return 1.0
+        scale = width / 2560.0
+        return max(0.5, min(scale, 2.0))
+
+    def _apply_central_minimum_sizes(
+        self, placeholders: Dict[str, Optional[QtWidgets.QWidget]]
+    ) -> None:
+        scale = self._screen_width_scale()
+
+        def scaled(base: int, floor: int = 0) -> int:
+            value = int(round(base * scale))
+            if floor:
+                value = max(floor, value)
+            return value
+
+        central = placeholders.get("central")
+        tabs = placeholders.get("tabs")
+        right_pane = placeholders.get("right_pane")
+        left_splitter = placeholders.get("left_splitter")
+        main_splitter = placeholders.get("main_splitter")
+        dataset_host = placeholders.get("dataset_host")
+        processing_host = placeholders.get("processing_host")
+
+        left_min = scaled(400, 220)
+        right_min = scaled(1220, 680)
+        spacer = scaled(40)
+
+        if left_splitter is not None:
+            left_splitter.setMinimumWidth(left_min)
+
+        for host in (dataset_host, processing_host):
+            if host is not None:
+                host.setMinimumWidth(left_min)
+
+        if right_pane is not None:
+            right_pane.setMinimumWidth(right_min)
+
+        if tabs is not None:
+            tabs.setMinimumWidth(max(tabs.minimumWidth(), right_min))
+            tabs.setMinimumHeight(max(tabs.minimumHeight(), scaled(520, 360)))
+
+        if central is not None:
+            central_min_width = left_min + right_min + spacer
+            central_min_height = max(central.minimumHeight(), scaled(600, 420))
+            central.setMinimumSize(central_min_width, central_min_height)
+
+        if main_splitter is not None:
+            main_splitter.setMinimumWidth(left_min + right_min)
+
+        # Ensure the main window honors the computed minimums.
+        if central is not None:
+            self.setMinimumWidth(max(self.minimumWidth(), central.minimumWidth() + scaled(40)))
+            self.setMinimumHeight(max(self.minimumHeight(), central.minimumHeight() + scaled(40, 0)))
+
     def _extract_ui_placeholders(
         self, central: QtWidgets.QWidget
-    ) -> Dict[str, QtWidgets.QWidget]:
+    ) -> Dict[str, Optional[QtWidgets.QWidget]]:
         """Return important widgets declared in the designer UI."""
 
         return {
@@ -423,7 +482,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_fallback_central(self) -> (
         QtWidgets.QWidget,
-        Dict[str, QtWidgets.QWidget],
+        Dict[str, Optional[QtWidgets.QWidget]],
     ):
         """Construct a manual layout if the designer file is incomplete."""
 
