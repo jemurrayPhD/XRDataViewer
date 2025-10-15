@@ -367,6 +367,7 @@ class MainWindow(QtWidgets.QMainWindow):
             raise RuntimeError(f"Failed to load UI from {ui_path}: {loader.errorString()}")
 
         self.setCentralWidget(central)
+        central.setMinimumSize(800, 520)
 
         main_splitter = central.findChild(QtWidgets.QSplitter, "mainSplitter")
         left_splitter = central.findChild(QtWidgets.QSplitter, "leftSplitter")

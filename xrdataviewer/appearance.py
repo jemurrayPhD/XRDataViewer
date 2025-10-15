@@ -150,8 +150,8 @@ BACKGROUND_OPTIONS: Dict[str, BackgroundOption] = {
 
 
 BUTTON_SHAPE_OPTIONS: Dict[str, int] = {
-    "Rounded": 8,
-    "Pill": 18,
+    "Rounded": 6,
+    "Pill": 12,
     "Square": 2,
 }
 
@@ -311,20 +311,20 @@ def build_stylesheet(
     font = FONT_OPTIONS[settings["font_family"]]
     accent = ACCENT_OPTIONS[settings["accent"]]
     background = BACKGROUND_OPTIONS[settings["background"]]
-    button_radius = BUTTON_SHAPE_OPTIONS[settings["button_shape"]]
-    tab_radius = max(button_radius + 6, 10)
+    button_radius = max(3, min(12, BUTTON_SHAPE_OPTIONS[settings["button_shape"]]))
+    tab_radius = max(button_radius + 4, 8)
     control_radius = max(button_radius, 4)
 
-    tab_min_width = max(int(settings["font_size"] * 10.5), 152)
-    compact_tab_min_width = max(int(settings["font_size"] * 6.0), 84)
-    button_min_width = max(int(settings["font_size"] * 5.2), 88)
-    button_min_height = max(int(settings["font_size"] * 2.4), 30)
-    compact_button_min_width = max(int(settings["font_size"] * 3.8), 64)
-    compact_button_min_height = max(int(settings["font_size"] * 2.0), 26)
-    button_padding_y = max(int(settings["font_size"] * 0.55), 5)
-    button_padding_x = max(int(settings["font_size"] * 1.25), 12)
-    compact_button_padding_y = max(int(settings["font_size"] * 0.45), 4)
-    compact_button_padding_x = max(int(settings["font_size"] * 0.95), 9)
+    tab_min_width = max(int(settings["font_size"] * 8.0), 118)
+    compact_tab_min_width = max(int(settings["font_size"] * 5.4), 82)
+    button_min_width = max(int(settings["font_size"] * 4.2), 74)
+    button_min_height = max(int(settings["font_size"] * 2.0), 26)
+    compact_button_min_width = max(int(settings["font_size"] * 3.2), 58)
+    compact_button_min_height = max(int(settings["font_size"] * 1.8), 24)
+    button_padding_y = max(int(settings["font_size"] * 0.45), 4)
+    button_padding_x = max(int(settings["font_size"] * 1.05), 10)
+    compact_button_padding_y = max(int(settings["font_size"] * 0.35), 3)
+    compact_button_padding_x = max(int(settings["font_size"] * 0.8), 8)
     checkbox_min_height = max(int(settings["font_size"] * 2.2), 26)
     label_min_height = max(int(settings["font_size"] * 1.8), 20)
     label_min_width = max(int(settings["font_size"] * 6.0), 96)
@@ -397,8 +397,8 @@ QTabBar::tab {{
     border-bottom: none;
     border-top-left-radius: {tab_radius}px;
     border-top-right-radius: {tab_radius}px;
-    padding: 12px 32px;
-    margin: 0 8px;
+    padding: 10px 22px;
+    margin: 0 6px;
     min-width: {tab_min_width}px;
     color: {background.tab_text};
     font-weight: 500;
@@ -413,7 +413,7 @@ QTabBar::tab:hover {{
     background: {hover_surface};
 }}
 QTabWidget[compactTabs="true"] QTabBar::tab {{
-    padding: 8px 18px;
+    padding: 6px 14px;
     margin: 0 4px;
     min-width: {compact_tab_min_width}px;
 }}
