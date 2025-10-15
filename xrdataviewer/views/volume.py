@@ -14,12 +14,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 from app_logging import log_action
 
-from ..colormaps import (
-    available_colormap_names,
-    colormap_lookup_table,
-    is_scientific_colormap,
-    resolve_colormap_assets,
-)
+from ..colormaps import register_scientific_colormaps, scientific_colormap_names
 from ..preferences import PreferencesManager
 from ..utils import ask_layout_label, ensure_extension, image_with_label, save_snapshot
 
@@ -345,13 +340,27 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self.cmb_colormap = QtWidgets.QComboBox()
         self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
         self.cmb_colormap.currentIndexChanged.connect(self._on_colormap_combo_changed)
-        block_combo = self.cmb_colormap.blockSignals(True)
-        for name in available_colormap_names():
+        scientific_names = set(register_scientific_colormaps())
+        try:
+            available = sorted(pg.colormap.listMaps())
+        except Exception:
+            available = ["gray", "viridis", "plasma", "inferno", "magma", "cividis", "turbo"]
+        ordered: List[str] = []
+        for name in scientific_colormap_names():
+            if name in available and name not in ordered:
+                ordered.append(name)
+        for name in available:
+            if name not in ordered:
+                ordered.append(name)
+        for name in ordered:
+            try:
+                pg.colormap.get(name)
+            except Exception:
+                continue
             label = name.replace("_", " ").title()
-            if is_scientific_colormap(name):
+            if name in scientific_names:
                 label = f"{label} (Scientific)"
             self.cmb_colormap.addItem(label, name)
-        self.cmb_colormap.blockSignals(block_combo)
         cmap_controls.addWidget(self.cmb_colormap, 0)
 
         cmap_controls.addStretch(1)

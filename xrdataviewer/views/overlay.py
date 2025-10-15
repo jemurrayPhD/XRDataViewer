@@ -19,14 +19,7 @@ from xr_plot_widget import (
 )
 
 from ..annotations import LineStyleDialog, PlotAnnotationDialog
-from ..colormaps import (
-    apply_histogram_gradient,
-    apply_image_colormap,
-    available_colormap_names,
-    colormap_lookup_table,
-    is_scientific_colormap,
-    resolve_colormap_assets,
-)
+from ..colormaps import register_scientific_colormaps, scientific_colormap_names
 from ..datasets import (
     MemoryDatasetRegistry,
     MemorySliceRef,
@@ -685,78 +678,43 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.cmb_colormap.setMinimumContentsLength(12)
         self.cmb_colormap.setMinimumWidth(200)
-        for name in available_colormap_names():
+        scientific_names = set(register_scientific_colormaps())
+        try:
+            cmaps = sorted(pg.colormap.listMaps())
+        except Exception:
+            cmaps = ["viridis", "plasma", "magma", "cividis", "gray"]
+        ordered: List[str] = []
+        for name in scientific_colormap_names():
+            if name in cmaps and name not in ordered:
+                ordered.append(name)
+        for name in cmaps:
+            if name not in ordered:
+                ordered.append(name)
+        for name in ordered:
             label = name.replace("_", " ").title()
-            if is_scientific_colormap(name):
+            if name in scientific_names:
                 label = f"{label} (Scientific)"
             self.cmb_colormap.addItem(label, name)
         self.cmb_colormap.currentTextChanged.connect(self._on_colormap)
         cmap_row.addWidget(self.cmb_colormap, 1)
         lay.addWidget(self._colormap_row)
 
-        # Histogram / levels controls
-        self._histogram_row = QtWidgets.QWidget()
-        hist_row = QtWidgets.QHBoxLayout(self._histogram_row)
-        hist_row.setContentsMargins(0, 0, 0, 0)
-        hist_row.setSpacing(6)
-        hist_kwargs: Dict[str, object] = {}
-        try:
-            import inspect
-
-            sig = inspect.signature(pg.HistogramLUTWidget.__init__)
-            if "orientation" in sig.parameters:
-                hist_kwargs["orientation"] = "horizontal"
-        except Exception:  # pragma: no cover - best effort capability check
-            pass
-
-        self.hist_widget = pg.HistogramLUTWidget(**hist_kwargs)
-        # Force a horizontal presentation where supported.  PyQtGraph has used
-        # multiple APIs for this over time, so try them all until one succeeds.
-        horizontal = False
-        try:
-            if hasattr(self.hist_widget, "setOrientation"):
-                for candidate in ("horizontal", QtCore.Qt.Horizontal):
-                    try:
-                        self.hist_widget.setOrientation(candidate)  # type: ignore[arg-type]
-                        horizontal = True
-                        break
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-        if not horizontal:
-            gradient = getattr(self.hist_widget, "gradient", None)
-            setter = getattr(gradient, "setOrientation", None)
-            if callable(setter):
-                for candidate in ("bottom", "horizontal", QtCore.Qt.Horizontal):
-                    try:
-                        setter(candidate)  # type: ignore[arg-type]
-                        horizontal = True
-                        break
-                    except Exception:
-                        continue
-
-        # Some Qt/PyQtGraph combinations keep the histogram vertical even if the
-        # colour bar honours the requested orientation.  As a last resort,
-        # rotate the histogram viewbox so the bars render horizontally too.
-        if not horizontal:
-            horizontal = self._force_horizontal_histogram(self.hist_widget)
-        else:
-            self._force_horizontal_histogram(self.hist_widget)
-
-        self.hist_widget.setMinimumHeight(80 if horizontal else 110)
-        self.hist_widget.setMaximumHeight(120 if horizontal else 160)
-        self.hist_widget.setSizePolicy(
-            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        )
-        try:
-            self.hist_widget.vb.setMouseEnabled(x=False, y=False)
-        except Exception:
-            pass
-        self._connect_histogram_signal()
-        hist_row.addWidget(self.hist_widget, 1)
-        self.btn_autoscale = QtWidgets.QToolButton()
-        self.btn_autoscale.setText("Auto")
+        # Levels controls
+        self._levels_row = QtWidgets.QWidget()
+        lvl_row = QtWidgets.QHBoxLayout(self._levels_row)
+        lvl_row.setContentsMargins(0, 0, 0, 0)
+        lvl_row.setSpacing(6)
+        lvl_row.addWidget(QtWidgets.QLabel("Levels:"))
+        self.spin_min = QtWidgets.QDoubleSpinBox()
+        self.spin_min.setRange(-1e12, 1e12)
+        self.spin_min.valueChanged.connect(self._on_levels_changed)
+        lvl_row.addWidget(self.spin_min)
+        lvl_row.addWidget(QtWidgets.QLabel("→"))
+        self.spin_max = QtWidgets.QDoubleSpinBox()
+        self.spin_max.setRange(-1e12, 1e12)
+        self.spin_max.valueChanged.connect(self._on_levels_changed)
+        lvl_row.addWidget(self.spin_max)
+        self.btn_autoscale = QtWidgets.QPushButton("Auto")
         self.btn_autoscale.clicked.connect(self._on_autoscale)
         hist_row.addWidget(self.btn_autoscale, 0)
         lay.addWidget(self._histogram_row)
@@ -908,8 +866,21 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         try:
             digits = int(digits)
         except Exception:
+            digits = self._value_precision
+        digits = max(0, min(8, digits))
+        if getattr(self, "_value_precision", None) == digits:
             return
-        self._value_precision = max(0, min(8, digits))
+        self._value_precision = digits
+        step = 10 ** (-digits) if digits > 0 else 1.0
+        for spin in (self.spin_min, self.spin_max):
+            block = spin.blockSignals(True)
+            spin.setDecimals(digits)
+            spin.setSingleStep(step)
+            spin.setValue(spin.value())
+            spin.blockSignals(block)
+        if self.layer.supports_levels():
+            lo, hi = getattr(self.layer, "_levels", (0.0, 1.0))
+            self.update_level_spins(lo, hi)
 
     def _set_colormap_selection(self, name: str):
         if not self.layer.supports_colormap():

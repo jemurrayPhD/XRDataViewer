@@ -4,9 +4,9 @@ import copy
 import json
 import os
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional
 
-import fnmatch
+import pyqtgraph as pg
 from PySide2 import QtCore, QtWidgets
 
 from .appearance import (
@@ -19,7 +19,7 @@ from .appearance import (
     sanitize_appearance,
     sanitize_profile_values,
 )
-from .colormaps import available_colormap_names, is_scientific_colormap
+from .colormaps import register_scientific_colormaps, scientific_colormap_names
 from .utils import default_documents_directory
 
 
@@ -123,12 +123,6 @@ class PreferencesManager(QtCore.QObject):
             return int(self._data.get("general", {}).get("value_precision", 6))
         except Exception:
             return 6
-
-    def jupyter_root_directory(self) -> str:
-        path = str(self._data.get("interactive", {}).get("jupyter_root_dir", "")).strip()
-        if not path:
-            return str(default_documents_directory())
-        return path
 
     def preferred_colormap(self, variable: Optional[str]) -> Optional[str]:
         colormap_data = self._data.get("colormaps", {})
@@ -279,7 +273,6 @@ class PreferencesDialog(QtWidgets.QDialog):
         self.spn_value_precision.setToolTip(
             "Number of decimal places used for value readouts and controls."
         )
-        self.spn_value_precision.valueChanged.connect(self._on_field_modified)
         form.addRow("Value precision", self.spn_value_precision)
 
         export_row = QtWidgets.QHBoxLayout()
@@ -386,9 +379,21 @@ class PreferencesDialog(QtWidgets.QDialog):
 
         self.cmb_default_cmap = QtWidgets.QComboBox()
         self.cmb_default_cmap.addItem("Use viewer default", "")
-        for name in available_colormap_names():
+        scientific_names = set(register_scientific_colormaps())
+        try:
+            maps = sorted(pg.colormap.listMaps())
+        except Exception:
+            maps = ["viridis", "plasma", "magma", "cividis", "gray"]
+        ordered: List[str] = []
+        for name in scientific_colormap_names():
+            if name in maps and name not in ordered:
+                ordered.append(name)
+        for name in maps:
+            if name not in ordered:
+                ordered.append(name)
+        for name in ordered:
             label = name
-            if is_scientific_colormap(name):
+            if name in scientific_names:
                 label = f"{name} (Scientific)"
             self.cmb_default_cmap.addItem(label, name)
         current_default = str(self._data.get("colormaps", {}).get("default", ""))

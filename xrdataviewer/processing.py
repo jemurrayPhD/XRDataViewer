@@ -30,7 +30,7 @@ from xr_plot_widget import (
 )
 
 from .annotations import PlotAnnotationDialog
-from .colormaps import available_colormap_names, get_colormap, is_scientific_colormap
+from .colormaps import register_scientific_colormaps, scientific_colormap_names
 from .utils import _nan_aware_reducer
 from .utils import open_dataset
 
@@ -196,9 +196,37 @@ class PipelineEditorDialog(QtWidgets.QDialog):
         top_row.addWidget(cmap_label, 0)
         self.cmb_colormap = QtWidgets.QComboBox()
         self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
-        for name in available_colormap_names():
+        scientific_names = set(register_scientific_colormaps())
+        try:
+            available = sorted(pg.colormap.listMaps())
+        except Exception:
+            available = [
+                "gray",
+                "viridis",
+                "plasma",
+                "inferno",
+                "magma",
+                "cividis",
+                "turbo",
+            ]
+        ordered: List[str] = []
+        for name in scientific_colormap_names():
+            if name in available and name not in ordered:
+                ordered.append(name)
+        fallbacks = ["gray", "viridis", "plasma", "inferno", "magma", "cividis", "turbo"]
+        for name in fallbacks:
+            if name in available and name not in ordered:
+                ordered.append(name)
+        for name in available:
+            if name not in ordered:
+                ordered.append(name)
+        for name in ordered:
+            try:
+                pg.colormap.get(name)
+            except Exception:
+                continue
             label = name.replace("_", " ").title()
-            if is_scientific_colormap(name):
+            if name in scientific_names:
                 label = f"{label} (Scientific)"
             self.cmb_colormap.addItem(label, name)
         if self.cmb_colormap.count() == 0:

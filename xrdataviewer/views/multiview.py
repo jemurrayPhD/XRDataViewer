@@ -760,12 +760,6 @@ class MultiViewGrid(QtWidgets.QWidget):
                     widget.setMinimumHeight(0)
                     widget.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
 
-        # Toolbar
-        bar = QtWidgets.QGridLayout()
-        bar.setContentsMargins(0, 0, 0, 0)
-        bar.setHorizontalSpacing(8)
-        bar.setVerticalSpacing(6)
-
         def _make_group(title: str, widgets: Iterable[QtWidgets.QWidget]) -> QtWidgets.QWidget:
             items = tuple(widgets)
             if not items:
@@ -776,24 +770,22 @@ class MultiViewGrid(QtWidgets.QWidget):
                 widget = items[0]
                 if isinstance(widget, QtWidgets.QAbstractButton):
                     widget.setToolTip(title)
-                    _tag_compact_buttons(widget)
                 return widget
 
             frame = QtWidgets.QFrame()
-            frame.setProperty("toolbarGroup", True)
+            frame.setProperty("modernSection", True)
             layout = QtWidgets.QVBoxLayout(frame)
-            layout.setContentsMargins(8, 6, 8, 6)
-            layout.setSpacing(4)
+            layout.setContentsMargins(10, 8, 10, 8)
+            layout.setSpacing(6)
 
             label = QtWidgets.QLabel(title)
-            label.setProperty("toolbarGroupLabel", True)
+            label.setProperty("modernSectionTitle", True)
             layout.addWidget(label)
 
             row = QtWidgets.QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(4)
+            row.setSpacing(6)
             for widget in items:
-                _tag_compact_buttons(widget)
                 row.addWidget(widget)
             layout.addLayout(row)
             return frame
@@ -863,9 +855,6 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.btn_annotations = QtWidgets.QPushButton("Set annotations…")
         self.btn_annotations.clicked.connect(self._open_annotation_dialog)
 
-        self.btn_set_colormap = QtWidgets.QPushButton("Set colormap…")
-        self.btn_set_colormap.clicked.connect(self._open_colormap_dialog)
-
         toolbar_groups = [
             _make_group(
                 "Layout",
@@ -876,9 +865,8 @@ class MultiViewGrid(QtWidgets.QWidget):
                 "Scaling",
                 (self.chk_link_levels, self.chk_link_panzoom, self.btn_autoscale, self.btn_autopan),
             ),
-            _make_group("Processing", (self.btn_apply_processing, self.btn_undo_processing)),
+            _make_group("Processing", (self.btn_apply_processing,)),
             _make_group("Style", (self.btn_line_style, self.btn_annotations)),
-            _make_group("Color", (self.btn_set_colormap,)),
             _make_group("Export", (self.btn_export,)),
         ]
 
