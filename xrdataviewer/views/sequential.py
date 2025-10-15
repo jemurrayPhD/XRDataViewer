@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import copy
 from functools import partial
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -523,22 +524,22 @@ class SequentialView(QtWidgets.QWidget):
         if not hasattr(self, "viewer"):
             return
         name = self.cmb_colormap.currentData()
-        if not name or name == "default":
-            target = "viridis"
-        else:
+        target = None
+        if name and name != "default":
             target = str(name)
-        try:
-            cmap = pg.colormap.get(target)
-        except Exception:
+        elif self.preferences is not None:
+            target = self.preferences.preferred_colormap(self._current_variable)
+            if not target:
+                target = self.preferences.preferred_colormap(None)
+        if not target:
+            target = "viridis"
+        cmap, state, lut = resolve_colormap_assets(str(target))
+        if cmap is None and state is None and lut is None:
             return
-        try:
-            self.viewer.lut.gradient.setColorMap(cmap)
-        except Exception:
+        if not self.viewer.apply_colormap(
+            cmap, name=str(target), gradient_state=state, lookup_table=lut
+        ):
             return
-        try:
-            self.viewer.lut.rehide_stops()
-        except Exception:
-            pass
         self._update_volume_window_colormap()
 
     def set_processing_manager(self, manager: Optional[ProcessingManager]):
@@ -779,6 +780,7 @@ class SequentialView(QtWidgets.QWidget):
         self._current_processed_slice = None
         self._rebuild_axis_controls()
         self._update_slice_widgets()
+        self._apply_preference_colormap()
         self._update_slice_display(autorange=True)
         self._update_roi_axis_options()
         self.btn_annotations.setEnabled(True)
@@ -1193,7 +1195,6 @@ class SequentialView(QtWidgets.QWidget):
             else:
                 self.viewer.set_image(processed, autorange=autorange)
             self.cmb_colormap.setEnabled(True)
-            self._apply_preference_colormap()
             self._apply_selected_colormap()
         if autorange:
             try:
@@ -1262,6 +1263,7 @@ class SequentialView(QtWidgets.QWidget):
             allow_apply_all=False,
             template_hint=hint,
         )
+        dialog.applied.connect(lambda config: self._apply_annotation_from_dialog(config))
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         config = dialog.annotation_config()
@@ -1271,11 +1273,28 @@ class SequentialView(QtWidgets.QWidget):
         self._annotation_config = config
         self._apply_viewer_annotations()
 
+    def _apply_annotation_from_dialog(self, config: PlotAnnotationConfig) -> None:
+        if config is None:
+            return
+        self._annotation_config = replace(config, apply_to_all=False)
+        self._apply_viewer_annotations()
+
     def _open_line_style_dialog(self):
         dialog = LineStyleDialog(self, initial=self._line_style)
+        dialog.applied.connect(self._apply_line_style_from_dialog)
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         style = dialog.line_style()
+        if style is None:
+            return
+        self._line_style = style
+        try:
+            self.viewer.set_line_style(self._line_style, refresh=True)
+        except Exception:
+            pass
+        self._update_line_style_button()
+
+    def _apply_line_style_from_dialog(self, style: LineStyleConfig) -> None:
         if style is None:
             return
         self._line_style = style
@@ -1303,6 +1322,7 @@ class SequentialView(QtWidgets.QWidget):
             self,
             dims=dims if dims else None,
         )
+        dialog.applied.connect(self._apply_processing_selection)
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         mode, params = dialog.selected_processing()
@@ -1316,6 +1336,12 @@ class SequentialView(QtWidgets.QWidget):
         self._processing_params = {}
         self._invalidate_volume_cache()
         self._update_slice_display(autorange=True)
+
+    def _apply_processing_selection(self, mode: str, params: Dict[str, object]) -> None:
+        self._processing_mode = mode
+        self._processing_params = dict(params)
+        self._invalidate_volume_cache()
+        self._update_slice_display()
 
     def _default_layout_label(self) -> str:
         if self.preferences:
@@ -1442,6 +1468,12 @@ class SequentialView(QtWidgets.QWidget):
         self._store_export_dir(directory)
         base_name = sanitize_filename(self.lbl_dataset.text()) or "slice"
         original = self._slice_index
+        saved_cmap = getattr(self.viewer, "_colormap_object", None)
+        saved_state = copy.deepcopy(getattr(self.viewer, "_colormap_state", None))
+        saved_lut = getattr(self.viewer, "_colormap_lut", None)
+        if isinstance(saved_lut, np.ndarray):
+            saved_lut = np.array(saved_lut, copy=True)
+        saved_name = getattr(self.viewer, "_colormap_name", None)
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
             count = 0
@@ -1458,6 +1490,18 @@ class SequentialView(QtWidgets.QWidget):
         finally:
             if self._slice_count > 0:
                 self._on_slice_changed(original)
+                if saved_cmap is not None or saved_state is not None or saved_lut is not None:
+                    state_copy = copy.deepcopy(saved_state) if saved_state is not None else None
+                    lut_copy = np.array(saved_lut, copy=True) if isinstance(saved_lut, np.ndarray) else None
+                    self.viewer.apply_colormap(
+                        saved_cmap,
+                        name=saved_name,
+                        gradient_state=state_copy,
+                        lookup_table=lut_copy,
+                    )
+                elif saved_name:
+                    self.viewer.apply_colormap_name(saved_name)
+                self._apply_selected_colormap()
             QtWidgets.QApplication.restoreOverrideCursor()
         QtWidgets.QMessageBox.information(
             self,

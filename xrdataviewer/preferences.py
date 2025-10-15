@@ -39,7 +39,7 @@ class PreferencesManager(QtCore.QObject):
             },
             "colormaps": {
                 "default": "viridis",
-                "variables": {},
+                "variables": [],
             },
             "misc": {
                 "default_export_dir": "",
@@ -66,18 +66,35 @@ class PreferencesManager(QtCore.QObject):
             digits = max(0, min(8, digits))
             normalized["general"]["value_precision"] = digits
         colormaps = data.get("colormaps", {}) if isinstance(data, dict) else {}
+        normalized_variables: List[Dict[str, str]] = []
         if isinstance(colormaps, dict):
-            normalized["colormaps"].update({k: v for k, v in colormaps.items() if k in ("default", "variables")})
-            variables = (
-                colormaps.get("variables", {})
-                if isinstance(colormaps.get("variables"), dict)
-                else {}
-            )
-            normalized["colormaps"]["variables"] = {
-                str(var): str(cmap)
-                for var, cmap in variables.items()
-                if str(var).strip() and str(cmap).strip()
-            }
+            default_map = colormaps.get("default")
+            if default_map is not None:
+                normalized["colormaps"]["default"] = str(default_map)
+            raw_variables = colormaps.get("variables", [])
+        else:
+            raw_variables = []
+
+        items: List[Tuple[object, object]] = []
+        if isinstance(raw_variables, dict):
+            items.extend(raw_variables.items())
+        elif isinstance(raw_variables, Iterable):
+            for entry in raw_variables:
+                if isinstance(entry, dict):
+                    pattern = entry.get("pattern") or entry.get("variable")
+                    cmap = entry.get("colormap") or entry.get("map")
+                    items.append((pattern, cmap))
+
+        for pattern, cmap in items:
+            if pattern is None or cmap is None:
+                continue
+            pat_str = str(pattern).strip()
+            cmap_str = str(cmap).strip()
+            if not pat_str or not cmap_str:
+                continue
+            normalized_variables.append({"pattern": pat_str, "colormap": cmap_str})
+
+        normalized["colormaps"]["variables"] = normalized_variables
         misc = data.get("misc", {}) if isinstance(data, dict) else {}
         if isinstance(misc, dict):
             normalized["misc"].update(misc)
@@ -108,12 +125,54 @@ class PreferencesManager(QtCore.QObject):
             return 6
 
     def preferred_colormap(self, variable: Optional[str]) -> Optional[str]:
-        variables = self._data.get("colormaps", {}).get("variables", {})
-        if isinstance(variables, dict) and variable:
-            cmap = variables.get(variable)
-            if cmap:
-                return str(cmap)
-        default = self._data.get("colormaps", {}).get("default")
+        colormap_data = self._data.get("colormaps", {})
+        variables = colormap_data.get("variables", [])
+
+        entries: List[Tuple[str, str]] = []
+        if isinstance(variables, dict):
+            for key, value in variables.items():
+                if key is None or value is None:
+                    continue
+                entries.append((str(key), str(value)))
+        elif isinstance(variables, Iterable):
+            for entry in variables:
+                if not isinstance(entry, dict):
+                    continue
+                pattern = entry.get("pattern") or entry.get("variable")
+                cmap = entry.get("colormap") or entry.get("map")
+                if pattern is None or cmap is None:
+                    continue
+                entries.append((str(pattern), str(cmap)))
+
+        value = str(variable) if variable is not None else ""
+        if variable:
+            for pattern, cmap in entries:
+                if pattern == value or pattern.lower() == value.lower():
+                    return cmap
+
+        if variable:
+            lowered = value.lower()
+            for pattern, cmap in entries:
+                pat = pattern or ""
+                try:
+                    if fnmatch.fnmatchcase(value, pat):
+                        return cmap
+                except Exception:
+                    pass
+                try:
+                    if fnmatch.fnmatchcase(lowered, pat.lower()):
+                        return cmap
+                except Exception:
+                    pass
+                if pat and lowered and pat.lower() in lowered:
+                    return cmap
+        else:
+            for pattern, cmap in entries:
+                pat = pattern.strip()
+                if pat in ("*", ""):
+                    return cmap
+
+        default = colormap_data.get("default")
         if default:
             return str(default)
         return None
@@ -381,13 +440,24 @@ class PreferencesDialog(QtWidgets.QDialog):
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
-        variables = self._data.get("colormaps", {}).get("variables", {})
+        variables = self._data.get("colormaps", {}).get("variables", [])
+        entries: List[Tuple[str, str]] = []
         if isinstance(variables, dict):
-            for var, cmap in sorted(variables.items()):
-                row = self.table_colormaps.rowCount()
-                self.table_colormaps.insertRow(row)
-                self.table_colormaps.setItem(row, 0, QtWidgets.QTableWidgetItem(str(var)))
-                self.table_colormaps.setItem(row, 1, QtWidgets.QTableWidgetItem(str(cmap)))
+            entries.extend((str(k), str(v)) for k, v in variables.items())
+        elif isinstance(variables, Iterable):
+            for entry in variables:
+                if not isinstance(entry, dict):
+                    continue
+                pattern = entry.get("pattern") or entry.get("variable")
+                cmap = entry.get("colormap") or entry.get("map")
+                if pattern is None or cmap is None:
+                    continue
+                entries.append((str(pattern), str(cmap)))
+        for pattern, cmap in entries:
+            row = self.table_colormaps.rowCount()
+            self.table_colormaps.insertRow(row)
+            self.table_colormaps.setItem(row, 0, QtWidgets.QTableWidgetItem(pattern))
+            self.table_colormaps.setItem(row, 1, QtWidgets.QTableWidgetItem(cmap))
 
         self.tabs.addTab(tab, "Colormaps")
 
@@ -475,7 +545,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         }
         colormaps = {
             "default": self.cmb_default_cmap.currentData() or "",
-            "variables": {},
+            "variables": [],
         }
         for row in range(self.table_colormaps.rowCount()):
             var_item = self.table_colormaps.item(row, 0)
@@ -485,7 +555,7 @@ class PreferencesDialog(QtWidgets.QDialog):
             var = var_item.text().strip()
             cmap = cmap_item.text().strip()
             if var and cmap:
-                colormaps["variables"][var] = cmap
+                colormaps["variables"].append({"pattern": var, "colormap": cmap})
         misc = {
             "default_export_dir": self.txt_export_dir.text().strip(),
         }

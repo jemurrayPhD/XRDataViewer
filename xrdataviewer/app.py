@@ -17,11 +17,27 @@ from .datasets import DatasetsPane, SliceDataTab
 from .interactive import InteractiveBridgeServer, InteractiveProcessingTab
 from .logging.panel import LoggingDockWidget
 from .preferences import PreferencesDialog, PreferencesManager
+from .qt_compat import ensure_header_resize_compat
 from .processing import ProcessingDockContainer, ProcessingDockWidget, ProcessingManager
 from .views.multiview import MultiViewGrid
 from .views.overlay import OverlayView
 from .views.sequential import SequentialView
 from .widget_sizes import enable_widget_size_overlays
+
+def _supports_button_word_wrap() -> bool:
+    """Return True if the Qt build exposes a wordWrap property on buttons."""
+
+    checkbox = QtWidgets.QCheckBox()
+    radio = QtWidgets.QRadioButton()
+    try:
+        has_checkbox = checkbox.metaObject().indexOfProperty("wordWrap") >= 0
+        has_radio = radio.metaObject().indexOfProperty("wordWrap") >= 0
+    finally:
+        checkbox.deleteLater()
+        radio.deleteLater()
+    return has_checkbox and has_radio
+
+ensure_header_resize_compat()
 
 def _supports_button_word_wrap() -> bool:
     """Return True if the Qt build exposes a wordWrap property on buttons."""

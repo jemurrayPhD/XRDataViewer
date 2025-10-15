@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -102,6 +103,9 @@ class OverlayLayer(QtCore.QObject):
         self._levels: Tuple[float, float]
         self._line_style = clone_line_style(line_style)
         self._line_x = np.array([], dtype=float)
+        self._colormap_object: Optional["pg.ColorMap"] = None
+        self._colormap_state: Optional[dict] = None
+        self._colormap_lut: Optional[np.ndarray] = None
 
         if self.is_line_layer():
             self.base_data = np.asarray(data, float).reshape(-1)
@@ -316,9 +320,34 @@ class OverlayLayer(QtCore.QObject):
                 self.graphics_item.setImage(self.processed_data, autoLevels=False)
             except Exception:
                 pass
+            if self.widget:
+                self.widget.attach_histogram_source()
+            self._reapply_colormap()
             self.auto_levels()
 
     # ---------- layer controls ----------
+    def _reapply_colormap(self):
+        if not self.supports_colormap():
+            return
+        if (
+            self._colormap_object is None
+            and self._colormap_state is None
+            and self._colormap_lut is None
+        ):
+            return
+        state = copy.deepcopy(self._colormap_state) if self._colormap_state is not None else None
+        lut = (
+            np.array(self._colormap_lut, copy=True)
+            if self._colormap_lut is not None
+            else None
+        )
+        apply_image_colormap(
+            self.graphics_item,
+            self._colormap_object,
+            name=self.colormap_name,
+            lookup_table=lut,
+        )
+
     def set_visible(self, on: bool):
         """Toggle whether the layer's graphics item is shown."""
 
@@ -350,13 +379,37 @@ class OverlayLayer(QtCore.QObject):
         self.colormap_name = name or "viridis"
         if not self.supports_colormap():
             return
-        try:
-            cmap = pg.colormap.get(self.colormap_name)
-            if hasattr(cmap, "getLookupTable"):
-                lut = cmap.getLookupTable(0.0, 1.0, 256)
-                self.graphics_item.setLookupTable(lut)
-        except Exception:
-            pass
+        cmap, state, lut = resolve_colormap_assets(self.colormap_name)
+        if cmap is None and state is None and lut is None:
+            return
+        applied = apply_image_colormap(
+            self.graphics_item,
+            cmap,
+            name=self.colormap_name,
+            lookup_table=lut,
+        )
+        if not applied and cmap is not None and lut is None:
+            fallback = colormap_lookup_table(cmap, name=self.colormap_name)
+            apply_image_colormap(
+                self.graphics_item,
+                cmap,
+                name=self.colormap_name,
+                lookup_table=fallback,
+            )
+            if fallback is not None:
+                lut = fallback
+        self._colormap_object = cmap
+        self._colormap_state = copy.deepcopy(state) if state is not None else None
+        if lut is not None:
+            try:
+                self._colormap_lut = np.array(lut, copy=True)
+            except Exception:
+                self._colormap_lut = None
+        else:
+            current = getattr(self.graphics_item, "lookupTable", None)
+            self._colormap_lut = np.array(current, copy=True) if isinstance(current, np.ndarray) else None
+        if self.widget:
+            self.widget.update_histogram_colormap(cmap, state)
 
     def set_levels(self, lo: float, hi: float, *, update_widget: bool = True):
         """Apply manual intensity levels to the image layer."""
@@ -373,7 +426,7 @@ class OverlayLayer(QtCore.QObject):
         except Exception:
             pass
         if update_widget and self.widget:
-            self.widget.update_level_spins(self._levels[0], self._levels[1])
+            self.widget.update_histogram_levels(self._levels[0], self._levels[1])
 
     def auto_levels(self):
         """Auto-scale image intensity using the processed array."""
@@ -577,6 +630,9 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.layer = layer
         self._ready = False
         self._active = False
+        self._value_precision = 3
+        self._block_histogram_updates = False
+        self._histogram_signal_connected = False
 
         self.setSizePolicy(
             QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
@@ -660,8 +716,10 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         lvl_row.addWidget(self.spin_max)
         self.btn_autoscale = QtWidgets.QPushButton("Auto")
         self.btn_autoscale.clicked.connect(self._on_autoscale)
-        lvl_row.addWidget(self.btn_autoscale)
-        lay.addWidget(self._levels_row)
+        hist_row.addWidget(self.btn_autoscale, 0)
+        lay.addWidget(self._histogram_row)
+        self._histogram_row.setVisible(False)
+        self.hist_widget.setVisible(False)
 
         # Opacity slider
         opacity_row = QtWidgets.QHBoxLayout()
@@ -771,15 +829,17 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self._colormap_row.setVisible(supports_cmap)
         self.cmb_colormap.setEnabled(supports_cmap)
         supports_levels = self.layer.supports_levels()
-        self._levels_row.setVisible(supports_levels)
-        self.spin_min.setEnabled(supports_levels)
-        self.spin_max.setEnabled(supports_levels)
+        has_hist = supports_levels and self.hist_widget is not None
+        self._histogram_row.setVisible(has_hist)
+        if self.hist_widget is not None:
+            self.hist_widget.setVisible(has_hist)
         self.btn_autoscale.setEnabled(supports_levels)
         if supports_cmap:
             self._set_colormap_selection(self.layer.colormap_name)
+        self.attach_histogram_source()
         if supports_levels:
             lo, hi = getattr(self.layer, "_levels", (0.0, 1.0))
-            self.update_level_spins(lo, hi)
+            self.update_histogram_levels(lo, hi)
         self.update_opacity_label(self.layer.opacity)
         block = self.sld_opacity.blockSignals(True)
         self.sld_opacity.setValue(int(round(self.layer.opacity * 100)))
@@ -833,15 +893,208 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
             self.cmb_colormap.setCurrentIndex(idx)
             self.cmb_colormap.blockSignals(block)
 
-    def update_level_spins(self, lo: float, hi: float):
-        if not self.layer.supports_levels():
+    def update_histogram_levels(self, lo: float, hi: float):
+        if self.hist_widget is None or not self.layer.supports_levels():
             return
-        block = self.spin_min.blockSignals(True)
-        self.spin_min.setValue(float(lo))
-        self.spin_min.blockSignals(block)
-        block = self.spin_max.blockSignals(True)
-        self.spin_max.setValue(float(hi))
-        self.spin_max.blockSignals(block)
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            return
+        if hi <= lo:
+            hi = lo + max(abs(lo) * 1e-6, 1e-6)
+        self._set_histogram_levels(float(lo), float(hi))
+
+    def attach_histogram_source(self):
+        supports_levels = self.layer.supports_levels()
+        has_hist = supports_levels and self.hist_widget is not None
+        self._histogram_row.setVisible(has_hist)
+        if self.hist_widget is None:
+            return
+        self.hist_widget.setVisible(has_hist)
+        if not has_hist:
+            return
+        try:
+            self.hist_widget.setImageItem(self.layer.graphics_item)
+        except Exception:
+            pass
+        self._connect_histogram_signal()
+        self.update_histogram_colormap(
+            getattr(self.layer, "_colormap_object", None),
+            getattr(self.layer, "_colormap_state", None),
+        )
+
+    def update_histogram_colormap(self, cmap: Optional["pg.ColorMap"], state: Optional[dict]):
+        if self.hist_widget is None or not self.layer.supports_levels():
+            return
+        item = self._histogram_item()
+        if item is not None:
+            apply_histogram_gradient(item, cmap, state)
+
+    def _histogram_item(self):
+        if self.hist_widget is None:
+            return None
+        return getattr(self.hist_widget, "item", None)
+
+    def _force_horizontal_histogram(self, widget: Optional[QtWidgets.QWidget]) -> bool:
+        """Rotate the histogram plot so bars render horizontally when needed."""
+
+        if widget is None:
+            return False
+        cached = widget.property("_xr_horizontal_hist_done")
+        if cached is not None:
+            return bool(cached)
+
+        def _reset_transform(target) -> None:
+            if target is None:
+                return
+            try:
+                target.resetTransform()  # type: ignore[attr-defined]
+                return
+            except Exception:
+                pass
+            try:
+                target.setTransform(QtGui.QTransform())  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+        def _rotate_target(target) -> bool:
+            if target is None:
+                return False
+            for angle in (-90, 90):
+                try:
+                    target.rotate(angle)  # type: ignore[attr-defined]
+                    return True
+                except Exception:
+                    try:
+                        target.setTransform(QtGui.QTransform().rotate(angle))  # type: ignore[attr-defined]
+                        return True
+                    except Exception:
+                        continue
+            return False
+
+        item = getattr(widget, "item", None)
+        view_box = getattr(item, "vb", None)
+
+        # Some builds expose the histogram PlotWidget via ui.histogram.
+        hist_plot = None
+        ui_obj = getattr(widget, "ui", None)
+        if ui_obj is not None:
+            hist_plot = getattr(ui_obj, "histogram", None)
+            if hist_plot is not None and view_box is None:
+                try:
+                    if hasattr(hist_plot, "getViewBox"):
+                        view_box = hist_plot.getViewBox()  # type: ignore[call-arg]
+                    elif hasattr(hist_plot, "plotItem"):
+                        view_box = hist_plot.plotItem.getViewBox()  # type: ignore[attr-defined]
+                except Exception:
+                    view_box = None
+
+        rotated = False
+        # Prefer rotating the underlying ViewBox; fall back to the item if needed.
+        target_candidates = [view_box, item]
+        for target in target_candidates:
+            if target is None:
+                continue
+            _reset_transform(target)
+            if _rotate_target(target):
+                rotated = True
+                break
+
+        if rotated and view_box is not None:
+            for func_name in ("setDefaultPadding", "setAspectLocked", "invertY", "setMouseEnabled"):
+                func = getattr(view_box, func_name, None)
+                if callable(func):
+                    try:
+                        if func_name == "setDefaultPadding":
+                            func(0.0)
+                        elif func_name == "setAspectLocked":
+                            func(False)
+                        elif func_name == "invertY":
+                            func(True)
+                        elif func_name == "setMouseEnabled":
+                            func(x=False, y=False)
+                    except Exception:
+                        pass
+        widget.setProperty("_xr_horizontal_hist_done", rotated)
+        return rotated
+
+    def _connect_histogram_signal(self):
+        if self._histogram_signal_connected or self.hist_widget is None:
+            return
+        connected = False
+        signal = getattr(self.hist_widget, "sigLevelsChanged", None)
+        if signal is not None:
+            try:
+                signal.connect(self._on_histogram_levels_changed)
+                connected = True
+            except Exception:
+                connected = False
+        if not connected:
+            item = self._histogram_item()
+            if item is not None:
+                signal = getattr(item, "sigLevelsChanged", None)
+                if signal is not None:
+                    try:
+                        signal.connect(self._on_histogram_levels_changed)
+                        connected = True
+                    except Exception:
+                        connected = False
+        self._histogram_signal_connected = connected
+
+    def _set_histogram_levels(self, lo: float, hi: float) -> None:
+        funcs: List = []
+        if self.hist_widget is not None:
+            setter = getattr(self.hist_widget, "setLevels", None)
+            if callable(setter):
+                funcs.append(setter)
+        item = self._histogram_item()
+        if item is not None:
+            setter = getattr(item, "setLevels", None)
+            if callable(setter):
+                funcs.append(setter)
+        for func in funcs:
+            if self._invoke_histogram_set_levels(func, lo, hi):
+                break
+
+    def _invoke_histogram_set_levels(self, func, lo: float, hi: float) -> bool:
+        try:
+            self._block_histogram_updates = True
+            func((lo, hi))
+            return True
+        except TypeError:
+            pass
+        except Exception:
+            return False
+        finally:
+            self._block_histogram_updates = False
+        try:
+            self._block_histogram_updates = True
+            func(lo, hi)
+            return True
+        except Exception:
+            return False
+        finally:
+            self._block_histogram_updates = False
+
+    def _current_histogram_levels(self) -> Optional[Tuple[float, float]]:
+        if self.hist_widget is None:
+            return None
+        getter = getattr(self.hist_widget, "getLevels", None)
+        if callable(getter):
+            try:
+                levels = getter()
+            except Exception:
+                levels = None
+            if isinstance(levels, (tuple, list)) and len(levels) >= 2:
+                return float(levels[0]), float(levels[1])
+        item = self._histogram_item()
+        getter = getattr(item, "getLevels", None) if item is not None else None
+        if callable(getter):
+            try:
+                levels = getter()
+            except Exception:
+                return None
+            if isinstance(levels, (tuple, list)) and len(levels) >= 2:
+                return float(levels[0]), float(levels[1])
+        return None
 
     def update_opacity_label(self, alpha: float):
         pct = int(round(float(alpha) * 100))
@@ -1083,16 +1336,13 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
             return
         self.layer.set_colormap(name)
 
-    def _on_levels_changed(self):
-        if not self._ready or not self.layer.supports_levels():
+    def _on_histogram_levels_changed(self, *_args):
+        if not self._ready or self._block_histogram_updates:
             return
-        lo = self.spin_min.value()
-        hi = self.spin_max.value()
-        if hi <= lo:
-            hi = lo + max(abs(lo) * 1e-6, 1e-6)
-            block = self.spin_max.blockSignals(True)
-            self.spin_max.setValue(hi)
-            self.spin_max.blockSignals(block)
+        levels = self._current_histogram_levels()
+        if not levels:
+            return
+        lo, hi = levels
         self.layer.set_levels(lo, hi, update_widget=False)
 
     def _on_autoscale(self):
@@ -1108,9 +1358,15 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         if not self.layer.is_line_layer():
             return
         dialog = LineStyleDialog(self, initial=self.layer.line_style_config())
+        dialog.applied.connect(self._apply_line_style_from_dialog)
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         style = dialog.line_style()
+        if style is None:
+            return
+        self._apply_line_style_from_dialog(style)
+
+    def _apply_line_style_from_dialog(self, style: LineStyleConfig) -> None:
         if style is None:
             return
         self.layer.set_line_style(style)
@@ -1550,6 +1806,7 @@ class OverlayView(QtWidgets.QWidget):
         if self._annotation_config is not None:
             initial = replace(self._annotation_config, apply_to_all=False)
         dialog = PlotAnnotationDialog(self, initial=initial, allow_apply_all=False)
+        dialog.applied.connect(self._apply_annotation_from_dialog)
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         config = dialog.annotation_config()
@@ -1562,6 +1819,14 @@ class OverlayView(QtWidgets.QWidget):
             config,
             background_widget=self.glw,
         )
+        self._apply_legend_config(config)
+
+    def _apply_annotation_from_dialog(self, config: PlotAnnotationConfig) -> None:
+        if config is None:
+            return
+        config = replace(config, apply_to_all=False)
+        self._annotation_config = config
+        apply_plotitem_annotation(self.plot, config, background_widget=self.glw)
         self._apply_legend_config(config)
 
     def set_preferences(self, preferences: Optional[PreferencesManager]):

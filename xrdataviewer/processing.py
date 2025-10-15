@@ -316,8 +316,13 @@ class PipelineEditorDialog(QtWidgets.QDialog):
         self.steps_scroll.setWidget(self.steps_container)
         layout.addWidget(self.steps_scroll, 1)
 
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Close | QtWidgets.QDialogButtonBox.Apply
+        )
         buttons.rejected.connect(self.reject)
+        self._apply_button = buttons.button(QtWidgets.QDialogButtonBox.Apply)
+        if self._apply_button is not None:
+            self._apply_button.clicked.connect(self._on_apply_clicked)
         layout.addWidget(buttons)
 
         self._forms: List[tuple[ProcessingStep, ParameterForm]] = []
@@ -401,15 +406,18 @@ class PipelineEditorDialog(QtWidgets.QDialog):
             pass
         self._update_roi_preview()
 
+    def _on_apply_clicked(self):
+        self._update_steps_from_forms()
+        self._apply_pipeline()
+
     def _apply_selected_colormap(self):
         if not hasattr(self, "cmb_colormap"):
             return
         name = self.cmb_colormap.currentData()
         if not name or name == "default":
             return
-        try:
-            cmap = pg.colormap.get(str(name))
-        except Exception:
+        cmap = get_colormap(str(name))
+        if cmap is None:
             return
         try:
             self.image_view.setColorMap(cmap)
@@ -1020,17 +1028,24 @@ class PipelineBuilderDialog(QtWidgets.QDialog):
             self.list_steps.setCurrentRow(0)
 
     def accept(self):
+        if self._commit_pipeline(close=True):
+            super().accept()
+
+    def result_pipeline(self) -> Optional[ProcessingPipeline]:
+        return self._result
+
+    def _commit_pipeline(self, *, close: bool) -> bool:
         if not self.steps:
             QtWidgets.QMessageBox.warning(
                 self, "Missing steps", "Add at least one processing step before saving."
             )
-            return
+            return False
         name = self.edit_name.text().strip()
         if not name:
             QtWidgets.QMessageBox.warning(
                 self, "Missing name", "Please enter a name for the pipeline."
             )
-            return
+            return False
         pipeline = ProcessingPipeline(
             name=name,
             steps=[ProcessingStep(step.key, dict(step.params)) for step in self.steps],
@@ -1039,13 +1054,10 @@ class PipelineBuilderDialog(QtWidgets.QDialog):
             self.manager.save_pipeline(pipeline)
         except ValueError as e:
             QtWidgets.QMessageBox.warning(self, "Save failed", str(e))
-            return
+            return False
         self._result = pipeline
         log_action(f"Saved processing pipeline '{pipeline.name}' with {len(self.steps)} step(s)")
-        super().accept()
-
-    def result_pipeline(self) -> Optional[ProcessingPipeline]:
-        return self._result
+        return True
 
 
 class ProcessingDockWidget(QtWidgets.QWidget):
@@ -1216,6 +1228,8 @@ class ProcessingDockWidget(QtWidgets.QWidget):
         self._select_pipeline(pipeline.name)
 
 class ProcessingSelectionDialog(QtWidgets.QDialog):
+    applied = QtCore.Signal(str, dict)
+
     def __init__(
         self,
         manager: Optional[ProcessingManager],
@@ -1274,9 +1288,14 @@ class ProcessingSelectionDialog(QtWidgets.QDialog):
         self.cmb_mode.currentIndexChanged.connect(self._on_mode_changed)
         self.stack.setCurrentIndex(self._none_index)
 
-        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel | QtWidgets.QDialogButtonBox.Apply
+        )
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
+        apply_btn = btns.button(QtWidgets.QDialogButtonBox.Apply)
+        if apply_btn is not None:
+            apply_btn.clicked.connect(self._on_apply_clicked)
         layout.addWidget(btns)
 
     def _add_mode_item(self, label: str, data: Dict[str, object]):
@@ -1319,3 +1338,7 @@ class ProcessingSelectionDialog(QtWidgets.QDialog):
             name = str(data.get("name", ""))
             return f"pipeline:{name}", {}
         return "none", {}
+
+    def _on_apply_clicked(self):
+        mode, params = self.selected_processing()
+        self.applied.emit(mode, params)
