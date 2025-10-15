@@ -699,64 +699,32 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         hist_row = QtWidgets.QHBoxLayout(self._histogram_row)
         hist_row.setContentsMargins(0, 0, 0, 0)
         hist_row.setSpacing(6)
-        hist_kwargs: Dict[str, object] = {}
-        try:
-            import inspect
 
-            sig = inspect.signature(pg.HistogramLUTWidget.__init__)
-            if "orientation" in sig.parameters:
-                hist_kwargs["orientation"] = "horizontal"
-        except Exception:  # pragma: no cover - best effort capability check
-            pass
+        controls_col = QtWidgets.QVBoxLayout()
+        controls_col.setContentsMargins(0, 0, 0, 0)
+        controls_col.setSpacing(4)
 
-        self.hist_widget = pg.HistogramLUTWidget(**hist_kwargs)
-        # Force a horizontal presentation where supported.  PyQtGraph has used
-        # multiple APIs for this over time, so try them all until one succeeds.
-        horizontal = False
-        try:
-            if hasattr(self.hist_widget, "setOrientation"):
-                for candidate in ("horizontal", QtCore.Qt.Horizontal):
-                    try:
-                        self.hist_widget.setOrientation(candidate)  # type: ignore[arg-type]
-                        horizontal = True
-                        break
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-        if not horizontal:
-            gradient = getattr(self.hist_widget, "gradient", None)
-            setter = getattr(gradient, "setOrientation", None)
-            if callable(setter):
-                for candidate in ("bottom", "horizontal", QtCore.Qt.Horizontal):
-                    try:
-                        setter(candidate)  # type: ignore[arg-type]
-                        horizontal = True
-                        break
-                    except Exception:
-                        continue
+        self.btn_autoscale = QtWidgets.QToolButton()
+        self.btn_autoscale.setText("Auto")
+        self.btn_autoscale.clicked.connect(self._on_autoscale)
+        controls_col.addWidget(self.btn_autoscale, alignment=QtCore.Qt.AlignRight)
+        controls_col.addStretch(1)
 
-        # Some Qt/PyQtGraph combinations keep the histogram vertical even if the
-        # colour bar honours the requested orientation.  As a last resort,
-        # rotate the histogram viewbox so the bars render horizontally too.
-        if not horizontal:
-            horizontal = self._force_horizontal_histogram(self.hist_widget)
+        hist_row.addStretch(1)
+        hist_row.addLayout(controls_col, 0)
 
-        self.hist_widget.setMinimumHeight(80 if horizontal else 110)
-        self.hist_widget.setMaximumHeight(120 if horizontal else 160)
+        self.hist_widget = pg.HistogramLUTWidget()
+        self.hist_widget.setMinimumWidth(140)
+        self.hist_widget.setMinimumHeight(150)
         self.hist_widget.setSizePolicy(
-            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         )
         try:
             self.hist_widget.vb.setMouseEnabled(x=False, y=False)
         except Exception:
             pass
         self._connect_histogram_signal()
-        hist_row.addWidget(self.hist_widget, 1)
-        self.btn_autoscale = QtWidgets.QToolButton()
-        self.btn_autoscale.setText("Auto")
-        self.btn_autoscale.clicked.connect(self._on_autoscale)
-        hist_row.addWidget(self.btn_autoscale, 0)
+        hist_row.addWidget(self.hist_widget, 0)
         lay.addWidget(self._histogram_row)
         self._histogram_row.setVisible(False)
         self.hist_widget.setVisible(False)
@@ -959,89 +927,6 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         if self.hist_widget is None:
             return None
         return getattr(self.hist_widget, "item", None)
-
-    def _force_horizontal_histogram(self, widget: Optional[QtWidgets.QWidget]) -> bool:
-        """Rotate the histogram plot so bars render horizontally when needed."""
-
-        if widget is None:
-            return False
-        cached = widget.property("_xr_horizontal_hist_done")
-        if cached is not None:
-            return bool(cached)
-
-        def _reset_transform(target) -> None:
-            if target is None:
-                return
-            try:
-                target.resetTransform()  # type: ignore[attr-defined]
-                return
-            except Exception:
-                pass
-            try:
-                target.setTransform(QtGui.QTransform())  # type: ignore[attr-defined]
-            except Exception:
-                pass
-
-        def _rotate_target(target) -> bool:
-            if target is None:
-                return False
-            for angle in (-90, 90):
-                try:
-                    target.rotate(angle)  # type: ignore[attr-defined]
-                    return True
-                except Exception:
-                    try:
-                        target.setTransform(QtGui.QTransform().rotate(angle))  # type: ignore[attr-defined]
-                        return True
-                    except Exception:
-                        continue
-            return False
-
-        item = getattr(widget, "item", None)
-        view_box = getattr(item, "vb", None)
-
-        # Some builds expose the histogram PlotWidget via ui.histogram.
-        hist_plot = None
-        ui_obj = getattr(widget, "ui", None)
-        if ui_obj is not None:
-            hist_plot = getattr(ui_obj, "histogram", None)
-            if hist_plot is not None and view_box is None:
-                try:
-                    if hasattr(hist_plot, "getViewBox"):
-                        view_box = hist_plot.getViewBox()  # type: ignore[call-arg]
-                    elif hasattr(hist_plot, "plotItem"):
-                        view_box = hist_plot.plotItem.getViewBox()  # type: ignore[attr-defined]
-                except Exception:
-                    view_box = None
-
-        rotated = False
-        # Prefer rotating the underlying ViewBox; fall back to the item if needed.
-        target_candidates = [view_box, item]
-        for target in target_candidates:
-            if target is None:
-                continue
-            _reset_transform(target)
-            if _rotate_target(target):
-                rotated = True
-                break
-
-        if rotated and view_box is not None:
-            for func_name in ("setDefaultPadding", "setAspectLocked", "invertY", "setMouseEnabled"):
-                func = getattr(view_box, func_name, None)
-                if callable(func):
-                    try:
-                        if func_name == "setDefaultPadding":
-                            func(0.0)
-                        elif func_name == "setAspectLocked":
-                            func(False)
-                        elif func_name == "invertY":
-                            func(True)
-                        elif func_name == "setMouseEnabled":
-                            func(x=False, y=False)
-                    except Exception:
-                        pass
-        widget.setProperty("_xr_horizontal_hist_done", rotated)
-        return rotated
 
     def _connect_histogram_signal(self):
         if self._histogram_signal_connected or self.hist_widget is None:
