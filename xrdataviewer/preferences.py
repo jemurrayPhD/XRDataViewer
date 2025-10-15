@@ -146,7 +146,8 @@ class PreferencesDialog(QtWidgets.QDialog):
     def __init__(self, manager: PreferencesManager, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Preferences")
-        self.resize(520, 420)
+        self.resize(560, 440)
+        self.setMinimumSize(520, 420)
         self._manager = manager
         self._data = manager.data()
         self._appearance_profiles = copy.deepcopy(
@@ -155,6 +156,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._appearance_active_profile = str(
             self._data.get("appearance", {}).get("active_profile", "")
         )
+        self._apply_button: Optional[QtWidgets.QPushButton] = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -177,10 +179,20 @@ class PreferencesDialog(QtWidgets.QDialog):
         controls.addStretch(1)
         layout.addLayout(controls)
 
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok
+            | QtWidgets.QDialogButtonBox.Cancel
+            | QtWidgets.QDialogButtonBox.Apply
+        )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        self._apply_button = buttons.button(QtWidgets.QDialogButtonBox.Apply)
+        if self._apply_button is not None:
+            self._apply_button.clicked.connect(self._apply_preferences)
+            self._apply_button.setEnabled(False)
         layout.addWidget(buttons)
+
+        self._update_apply_button_state()
 
     def _build_general_tab(self):
         tab = QtWidgets.QWidget()
@@ -190,11 +202,13 @@ class PreferencesDialog(QtWidgets.QDialog):
 
         self.chk_autoscale = QtWidgets.QCheckBox("Autoscale images on load")
         self.chk_autoscale.setChecked(bool(self._data.get("general", {}).get("autoscale_on_load", True)))
+        self.chk_autoscale.toggled.connect(self._on_field_modified)
         form.addRow(self.chk_autoscale)
 
         self.txt_layout_label = QtWidgets.QLineEdit(
             str(self._data.get("general", {}).get("default_layout_label", ""))
         )
+        self.txt_layout_label.textChanged.connect(self._on_field_modified)
         form.addRow("Default layout label", self.txt_layout_label)
 
         self.spn_value_precision = QtWidgets.QSpinBox()
@@ -206,12 +220,14 @@ class PreferencesDialog(QtWidgets.QDialog):
         self.spn_value_precision.setToolTip(
             "Number of decimal places used for value readouts and controls."
         )
+        self.spn_value_precision.valueChanged.connect(self._on_field_modified)
         form.addRow("Value precision", self.spn_value_precision)
 
         export_row = QtWidgets.QHBoxLayout()
         self.txt_export_dir = QtWidgets.QLineEdit(
             str(self._data.get("misc", {}).get("default_export_dir", ""))
         )
+        self.txt_export_dir.textChanged.connect(self._on_field_modified)
         export_row.addWidget(self.txt_export_dir, 1)
         btn_browse = QtWidgets.QPushButton("Browse…")
         btn_browse.clicked.connect(self._browse_export_dir)
@@ -222,6 +238,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         self.txt_jupyter_root = QtWidgets.QLineEdit(
             str(self._data.get("interactive", {}).get("jupyter_root_dir", ""))
         )
+        self.txt_jupyter_root.textChanged.connect(self._on_field_modified)
         jupyter_row.addWidget(self.txt_jupyter_root, 1)
         btn_jupyter = QtWidgets.QPushButton("Browse…")
         btn_jupyter.clicked.connect(self._browse_jupyter_root)
@@ -331,7 +348,10 @@ class PreferencesDialog(QtWidgets.QDialog):
         idx = self.cmb_default_cmap.findData(current_default)
         if idx < 0:
             idx = 0
+        block = self.cmb_default_cmap.blockSignals(True)
         self.cmb_default_cmap.setCurrentIndex(idx)
+        self.cmb_default_cmap.blockSignals(block)
+        self.cmb_default_cmap.currentIndexChanged.connect(self._on_field_modified)
         layout.addWidget(QtWidgets.QLabel("Default colormap"))
         layout.addWidget(self.cmb_default_cmap)
 
@@ -340,7 +360,11 @@ class PreferencesDialog(QtWidgets.QDialog):
         self.table_colormaps.horizontalHeader().setStretchLastSection(True)
         self.table_colormaps.verticalHeader().setVisible(False)
         self.table_colormaps.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.table_colormaps.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked | QtWidgets.QAbstractItemView.EditKeyPressed)
+        self.table_colormaps.setEditTriggers(
+            QtWidgets.QAbstractItemView.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditKeyPressed
+        )
+        self.table_colormaps.itemChanged.connect(self._on_field_modified)
         layout.addWidget(QtWidgets.QLabel("Variable-specific colormaps"))
         layout.addWidget(self.table_colormaps, 1)
 
@@ -399,11 +423,14 @@ class PreferencesDialog(QtWidgets.QDialog):
         self.table_colormaps.insertRow(row)
         self.table_colormaps.setItem(row, 0, QtWidgets.QTableWidgetItem(str(var).strip()))
         self.table_colormaps.setItem(row, 1, QtWidgets.QTableWidgetItem(str(cmap).strip()))
+        self._update_apply_button_state()
 
     def _remove_colormap_mapping(self):
         rows = sorted({idx.row() for idx in self.table_colormaps.selectedIndexes()}, reverse=True)
         for row in rows:
             self.table_colormaps.removeRow(row)
+        if rows:
+            self._update_apply_button_state()
 
     def _on_load_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -496,7 +523,10 @@ class PreferencesDialog(QtWidgets.QDialog):
         idx = self.cmb_default_cmap.findData(default_cmap)
         if idx < 0:
             idx = 0
+        block = self.cmb_default_cmap.blockSignals(True)
         self.cmb_default_cmap.setCurrentIndex(idx)
+        self.cmb_default_cmap.blockSignals(block)
+        block_table = self.table_colormaps.blockSignals(True)
         self.table_colormaps.setRowCount(0)
         variables = data.get("colormaps", {}).get("variables", {})
         if isinstance(variables, dict):
@@ -505,6 +535,7 @@ class PreferencesDialog(QtWidgets.QDialog):
                 self.table_colormaps.insertRow(row)
                 self.table_colormaps.setItem(row, 0, QtWidgets.QTableWidgetItem(str(var)))
                 self.table_colormaps.setItem(row, 1, QtWidgets.QTableWidgetItem(str(cmap)))
+        self.table_colormaps.blockSignals(block_table)
         self._appearance_profiles = copy.deepcopy(
             data.get("appearance", {}).get("profiles", {})
         )
@@ -512,6 +543,7 @@ class PreferencesDialog(QtWidgets.QDialog):
             data.get("appearance", {}).get("active_profile", "")
         )
         self._apply_appearance_tab()
+        self._update_apply_button_state()
 
     # ---------- appearance helpers ----------
 
@@ -525,6 +557,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._set_combobox_value(self.cmb_background, appearance.get("background"))
         self._set_combobox_value(self.cmb_button_shape, appearance.get("button_shape"))
         self._refresh_profile_combo()
+        self._update_apply_button_state()
 
     def _set_combobox_value(self, combo: QtWidgets.QComboBox, value):
         idx = combo.findData(value)
@@ -574,6 +607,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         if kind == "custom":
             self._appearance_active_profile = ""
             self._update_profile_buttons()
+            self._update_apply_button_state()
             return
         if kind == "builtin":
             values = BUILTIN_PROFILES.get(name, {})
@@ -588,6 +622,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._set_combobox_value(self.cmb_button_shape, values.get("button_shape"))
         self._appearance_active_profile = name
         self._update_profile_buttons()
+        self._update_apply_button_state()
 
     def _on_appearance_modified(self):
         self._appearance_active_profile = ""
@@ -595,6 +630,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         self.cmb_profiles.setCurrentIndex(0)
         self.cmb_profiles.blockSignals(block)
         self._update_profile_buttons()
+        self._update_apply_button_state()
 
     def _current_appearance(self) -> Dict[str, object]:
         return {
@@ -616,6 +652,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._appearance_profiles[key] = values
         self._appearance_active_profile = key
         self._refresh_profile_combo()
+        self._update_apply_button_state()
 
     def _delete_profile(self):
         info = self.cmb_profiles.currentData()
@@ -626,6 +663,7 @@ class PreferencesDialog(QtWidgets.QDialog):
             del self._appearance_profiles[name]
         self._appearance_active_profile = ""
         self._refresh_profile_combo()
+        self._update_apply_button_state()
 
     def _export_profile(self):
         info = self.cmb_profiles.currentData()
@@ -698,11 +736,37 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._set_combobox_value(self.cmb_background, values.get("background"))
         self._set_combobox_value(self.cmb_button_shape, values.get("button_shape"))
         self._refresh_profile_combo()
+        self._update_apply_button_state()
 
 
     def accept(self):
-        self._data = self._collect_data()
+        self._data = copy.deepcopy(self._collect_data())
+        self._update_apply_button_state()
         super().accept()
 
     def result_data(self) -> Dict[str, object]:
         return self._collect_data()
+
+    def _apply_preferences(self):
+        new_data = self._collect_data()
+        if new_data == self._data:
+            self._update_apply_button_state()
+            return
+        self._data = copy.deepcopy(new_data)
+        self._manager.update(new_data)
+        self._update_apply_button_state()
+
+    def _on_field_modified(self, *_args):
+        self._update_apply_button_state()
+
+    def _update_apply_button_state(self):
+        if self._apply_button is None:
+            return
+        if not hasattr(self, "cmb_default_cmap") or not hasattr(self, "table_colormaps"):
+            self._apply_button.setEnabled(False)
+            return
+        try:
+            dirty = self._collect_data() != self._data
+        except Exception:
+            dirty = True
+        self._apply_button.setEnabled(dirty)
