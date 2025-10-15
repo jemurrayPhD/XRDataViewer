@@ -17,7 +17,7 @@ from .datasets import DatasetsPane, SliceDataTab
 from .interactive import InteractiveBridgeServer, InteractiveProcessingTab
 from .logging.panel import LoggingDockWidget
 from .preferences import PreferencesDialog, PreferencesManager
-from .qt_compat import ensure_header_resize_compat
+from .qt_compat import ensure_header_resize_compat, ensure_messagebox_sizing
 from .processing import ProcessingDockContainer, ProcessingDockWidget, ProcessingManager
 from .views.multiview import MultiViewGrid
 from .views.overlay import OverlayView
@@ -203,6 +203,7 @@ class StartupSplash(QtWidgets.QWidget):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, startup_splash: Optional[StartupSplash] = None):
         super().__init__()
+        ensure_messagebox_sizing()
         self.setWindowTitle("Dataset Multi-Viewer")
 
         self.preferences = PreferencesManager()
