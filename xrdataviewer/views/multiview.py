@@ -246,18 +246,7 @@ class ViewerFrame(QtWidgets.QFrame):
         cmap = get_colormap(name)
         if cmap is None:
             return False
-        try:
-            self.viewer.lut.gradient.setColorMap(cmap)
-            self.viewer.lut.rehide_stops()
-            if hasattr(cmap, "getLookupTable"):
-                lut = cmap.getLookupTable(0.0, 1.0, 256)
-                try:
-                    self.viewer.img_item.setLookupTable(lut)
-                except Exception:
-                    pass
-        except Exception:
-            return False
-        return True
+        return self.viewer.apply_colormap(cmap, name=name)
 
     def set_dataset(self, dataset: xr.Dataset, path: Path, *, select: Optional[str] = None):
         self._dispose_dataset()
@@ -590,6 +579,10 @@ class ViewerFrame(QtWidgets.QFrame):
             hist_widget.setMinimumWidth(80)
             hist_widget.setMaximumWidth(16777215)
             hist_widget.show()
+            try:
+                self.center_split.setHandleWidth(4)
+            except Exception:
+                pass
             sizes = self._hist_last_split_sizes
             if sizes and len(sizes) >= 2 and sizes[1] > 0:
                 try:
@@ -622,6 +615,10 @@ class ViewerFrame(QtWidgets.QFrame):
             hist_widget.hide()
             hist_widget.setMinimumWidth(0)
             hist_widget.setMaximumWidth(0)
+            try:
+                self.center_split.setHandleWidth(1)
+            except Exception:
+                pass
 
     def _clear_display(self, *, preserve_header: bool = False):
         self._raw_data = None

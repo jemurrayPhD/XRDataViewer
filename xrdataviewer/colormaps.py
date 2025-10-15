@@ -371,6 +371,152 @@ _DEFAULT_FALLBACKS: Tuple[str, ...] = (
 _REGISTERED_MAP_OBJECTS: Dict[str, "pg.ColorMap"] = {}
 
 
+def _normalize_stop_color(color: Sequence[float]) -> Tuple[int, int, int, int]:
+    """Convert a colour stop tuple to 0-255 RGBA integers."""
+
+    arr = np.array(color, dtype=float).ravel()
+    if arr.size == 0:
+        arr = np.array([0.0, 0.0, 0.0, 255.0], dtype=float)
+    if arr.size < 3:
+        padded = np.zeros(4, dtype=float)
+        padded[: arr.size] = arr
+        padded[3] = 1.0
+        arr = padded
+    if arr.size == 3:
+        arr = np.concatenate([arr, [1.0]])
+    if arr.size > 4:
+        arr = arr[:4]
+    try:
+        max_val = np.nanmax(np.abs(arr))
+    except ValueError:
+        max_val = 0.0
+    if max_val <= 1.0:
+        arr = arr * 255.0
+    arr = np.nan_to_num(arr, nan=0.0, posinf=255.0, neginf=0.0)
+    arr = np.clip(np.round(arr), 0.0, 255.0)
+    if arr.size < 4:
+        arr = np.pad(arr, (0, 4 - arr.size), constant_values=255.0)
+    return tuple(int(v) for v in arr[:4])
+
+
+def _normalize_lut(lut: object) -> Optional[np.ndarray]:
+    """Normalise lookup tables to an ``Nx4`` ``uint8`` array."""
+
+    if lut is None:
+        return None
+    arr = np.array(lut, dtype=float)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    if arr.size == 0:
+        return None
+    if arr.shape[1] == 1:
+        arr = np.repeat(arr, 3, axis=1)
+    if arr.shape[1] == 2:
+        arr = np.concatenate([arr, arr[:, :1]], axis=1)
+    if arr.shape[1] == 3:
+        alpha = np.full((arr.shape[0], 1), 255.0)
+        arr = np.hstack([arr, alpha])
+    elif arr.shape[1] > 4:
+        arr = arr[:, :4]
+    try:
+        max_val = np.nanmax(np.abs(arr))
+    except ValueError:
+        max_val = 0.0
+    if max_val <= 1.0:
+        arr = arr * 255.0
+    arr = np.nan_to_num(arr, nan=0.0, posinf=255.0, neginf=0.0)
+    arr = np.clip(np.round(arr), 0.0, 255.0).astype(np.uint8)
+    if arr.shape[1] == 3:
+        alpha = np.full((arr.shape[0], 1), 255, dtype=np.uint8)
+        arr = np.hstack([arr, alpha])
+    return arr
+
+
+def colormap_gradient_state(cmap: "pg.ColorMap", *, name: Optional[str] = None) -> Optional[dict]:
+    """Return a gradient state dictionary for *cmap* if possible."""
+
+    stops: Optional[Sequence[Tuple[float, Sequence[float]]]] = None
+    getter = getattr(cmap, "getStops", None)
+    if callable(getter):
+        try:
+            stops = list(getter())
+        except Exception:
+            stops = None
+    if not stops and name:
+        spec = _SCIENTIFIC_BY_NAME.get(name)
+        if spec is not None:
+            positions = np.linspace(0.0, 1.0, num=len(spec.stops))
+            stops = [
+                (float(pos), _hex_to_rgb_stop(stop) + (255,))
+                for pos, stop in zip(positions, spec.stops)
+            ]
+    if not stops:
+        return None
+    ticks: List[Tuple[float, Tuple[int, int, int, int]]] = []
+    for entry in stops:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            continue
+        pos, colour = entry[0], entry[1]
+        try:
+            pos_f = float(pos)
+        except Exception:
+            continue
+        rgba = _normalize_stop_color(colour)
+        ticks.append((pos_f, rgba))
+    if not ticks:
+        return None
+    ticks.sort(key=lambda item: item[0])
+    first = ticks[0][0]
+    last = ticks[-1][0]
+    span = last - first
+    if span <= 1e-9:
+        normalized = [(0.0, ticks[0][1]), (1.0, ticks[-1][1])]
+    else:
+        normalized = [((pos - first) / span, rgba) for pos, rgba in ticks]
+    return {"mode": "rgb", "ticks": normalized}
+
+
+def colormap_lookup_table(
+    cmap: "pg.ColorMap", *, name: Optional[str] = None, size: int = 256
+) -> Optional[np.ndarray]:
+    """Return a lookup table suitable for :class:`~pyqtgraph.ImageItem`."""
+
+    if cmap is None:
+        return None
+    getter = getattr(cmap, "getLookupTable", None)
+    if callable(getter):
+        attempts: Tuple[Tuple[object, ...], ...] = (
+            (0.0, 1.0, size, True),
+            (0.0, 1.0, size),
+            (size,),
+        )
+        for args in attempts:
+            try:
+                lut = getter(*args)
+            except TypeError:
+                continue
+            except Exception:
+                lut = None
+            normalized = _normalize_lut(lut)
+            if normalized is not None:
+                return normalized
+    state = colormap_gradient_state(cmap, name=name)
+    if not state:
+        return None
+    ticks = state.get("ticks", [])
+    if len(ticks) < 2:
+        return None
+    positions = np.array([pos for pos, _ in ticks], dtype=float)
+    colours = np.array([rgba[:3] for _, rgba in ticks], dtype=float)
+    alphas = np.array([rgba[3] for _, rgba in ticks], dtype=float)
+    xs = np.linspace(0.0, 1.0, max(2, int(size)))
+    lut = np.empty((xs.size, 4), dtype=float)
+    for channel in range(3):
+        lut[:, channel] = np.interp(xs, positions, colours[:, channel])
+    lut[:, 3] = np.interp(xs, positions, alphas)
+    return _normalize_lut(lut)
+
+
 _REGISTERED = False
 
 

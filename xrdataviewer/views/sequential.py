@@ -507,20 +507,8 @@ class SequentialView(QtWidgets.QWidget):
         cmap = get_colormap(str(target))
         if cmap is None:
             return
-        try:
-            self.viewer.lut.gradient.setColorMap(cmap)
-        except Exception:
+        if not self.viewer.apply_colormap(cmap, name=str(target)):
             return
-        try:
-            self.viewer.lut.rehide_stops()
-        except Exception:
-            pass
-        try:
-            if hasattr(cmap, "getLookupTable"):
-                lut = cmap.getLookupTable(0.0, 1.0, 256)
-                self.viewer.img_item.setLookupTable(lut)
-        except Exception:
-            pass
         self._update_volume_window_colormap()
 
     def set_processing_manager(self, manager: Optional[ProcessingManager]):

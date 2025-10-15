@@ -18,7 +18,12 @@ from xr_plot_widget import (
 )
 
 from ..annotations import LineStyleDialog, PlotAnnotationDialog
-from ..colormaps import available_colormap_names, get_colormap, is_scientific_colormap
+from ..colormaps import (
+    available_colormap_names,
+    colormap_lookup_table,
+    get_colormap,
+    is_scientific_colormap,
+)
 from ..datasets import (
     MemoryDatasetRegistry,
     MemorySliceRef,
@@ -353,12 +358,18 @@ class OverlayLayer(QtCore.QObject):
         cmap = get_colormap(self.colormap_name)
         if cmap is None:
             return
-        try:
-            if hasattr(cmap, "getLookupTable"):
-                lut = cmap.getLookupTable(0.0, 1.0, 256)
+        lut = colormap_lookup_table(cmap, name=self.colormap_name)
+        if lut is not None:
+            try:
                 self.graphics_item.setLookupTable(lut)
-        except Exception:
-            pass
+            except Exception:
+                pass
+        setter = getattr(self.graphics_item, "setColorMap", None)
+        if callable(setter):
+            try:
+                setter(cmap)
+            except Exception:
+                pass
 
     def set_levels(self, lo: float, hi: float, *, update_widget: bool = True):
         """Apply manual intensity levels to the image layer."""

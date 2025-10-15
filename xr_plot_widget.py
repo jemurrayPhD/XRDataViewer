@@ -10,6 +10,12 @@ import numpy as np
 from PySide2 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 
+from xrdataviewer.colormaps import (
+    colormap_gradient_state,
+    colormap_lookup_table,
+    get_colormap,
+)
+
 FORCE_SOFT_RENDER = False
 if FORCE_SOFT_RENDER:
     pg.setConfigOptions(useOpenGL=False, antialias=False)
@@ -640,8 +646,9 @@ class CentralPlotWidget(QtWidgets.QWidget):
 
         lay = QtWidgets.QHBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.addWidget(self.glw)
         try:
-            cmap = pg.colormap.get("viridis"); self.lut.gradient.setColorMap(cmap)
-        except Exception: pass
+            self.apply_colormap_name("viridis")
+        except Exception:
+            pass
 
         try:
             self.lut.gradient.sigGradientChanged.connect(lambda *_: self.lut.rehide_stops())
@@ -699,6 +706,55 @@ class CentralPlotWidget(QtWidgets.QWidget):
             self.plot.scene().sigMouseClicked.connect(self._on_scene_mouse_clicked)
         except Exception:
             pass
+
+    def apply_colormap(
+        self, cmap: Optional["pg.ColorMap"], *, name: Optional[str] = None
+    ) -> bool:
+        """Apply *cmap* to both the histogram and image items."""
+
+        if cmap is None:
+            return False
+        applied = False
+        state = colormap_gradient_state(cmap, name=name)
+        if state:
+            try:
+                self.lut.gradient.restoreState(state)
+                applied = True
+            except Exception:
+                pass
+        if not applied:
+            try:
+                self.lut.gradient.setColorMap(cmap)
+                applied = True
+            except Exception:
+                pass
+        try:
+            self.lut.rehide_stops()
+        except Exception:
+            pass
+        lut = colormap_lookup_table(cmap, name=name)
+        if lut is not None:
+            try:
+                self.img_item.setLookupTable(lut)
+                applied = True
+            except Exception:
+                pass
+        setter = getattr(self.img_item, "setColorMap", None)
+        if callable(setter):
+            try:
+                setter(cmap)
+                applied = True
+            except Exception:
+                pass
+        return applied
+
+    def apply_colormap_name(self, name: str) -> bool:
+        """Resolve and apply a colour map by *name*."""
+
+        cmap = get_colormap(name)
+        if cmap is None:
+            return False
+        return self.apply_colormap(cmap, name=name)
 
     # ---------- annotation helpers ----------
     def annotation_defaults(self) -> PlotAnnotationConfig:
@@ -940,6 +996,10 @@ class CentralPlotWidget(QtWidgets.QWidget):
                 glw.setSizePolicy(
                     QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
                 )
+                try:
+                    glw.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+                except Exception:
+                    pass
                 try:
                     gl_layout = glw.ci.layout
                 except Exception:
