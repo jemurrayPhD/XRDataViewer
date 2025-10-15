@@ -31,6 +31,7 @@ from ..colormaps import (
     is_scientific_colormap,
     resolve_colormap_assets,
 )
+from ..colormaps import register_scientific_colormaps, scientific_colormap_names
 from ..datasets import DataSetRef, HighDimVarRef, MemoryDatasetRef, VarRef
 from ..preferences import PreferencesManager
 from ..processing import apply_processing_step, ProcessingManager, ProcessingSelectionDialog
@@ -476,6 +477,39 @@ class SequentialView(QtWidgets.QWidget):
         for name in available_colormap_names():
             label = name.replace("_", " ").title()
             if is_scientific_colormap(name):
+        scientific_names = set(register_scientific_colormaps())
+        try:
+            available = sorted(pg.colormap.listMaps())
+        except Exception:
+            available = [
+                "gray",
+                "viridis",
+                "plasma",
+                "inferno",
+                "magma",
+                "cividis",
+                "turbo",
+            ]
+        ordered: List[str] = []
+        for name in scientific_colormap_names():
+            if name in available and name not in ordered:
+                ordered.append(name)
+        fallbacks = ["gray", "viridis", "plasma", "inferno", "magma", "cividis", "turbo", "thermal"]
+        for name in fallbacks:
+            if name in available and name not in ordered:
+                ordered.append(name)
+        for name in available:
+            if name not in ordered:
+                ordered.append(name)
+        self.cmb_colormap.blockSignals(True)
+        self.cmb_colormap.clear()
+        for name in ordered:
+            try:
+                pg.colormap.get(name)
+            except Exception:
+                continue
+            label = name.replace("_", " ").title()
+            if name in scientific_names:
                 label = f"{label} (Scientific)"
             self.cmb_colormap.addItem(label, name)
         if self.cmb_colormap.count() == 0:

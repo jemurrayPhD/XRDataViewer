@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import fnmatch
+from typing import Dict, List, Optional
+
+import pyqtgraph as pg
 from PySide2 import QtCore, QtWidgets
 
 from .appearance import (
@@ -20,6 +23,7 @@ from .appearance import (
     sanitize_profile_values,
 )
 from .colormaps import available_colormap_names, is_scientific_colormap
+from .colormaps import register_scientific_colormaps, scientific_colormap_names
 from .utils import default_documents_directory
 
 
@@ -389,6 +393,21 @@ class PreferencesDialog(QtWidgets.QDialog):
         for name in available_colormap_names():
             label = name
             if is_scientific_colormap(name):
+        scientific_names = set(register_scientific_colormaps())
+        try:
+            maps = sorted(pg.colormap.listMaps())
+        except Exception:
+            maps = ["viridis", "plasma", "magma", "cividis", "gray"]
+        ordered: List[str] = []
+        for name in scientific_colormap_names():
+            if name in maps and name not in ordered:
+                ordered.append(name)
+        for name in maps:
+            if name not in ordered:
+                ordered.append(name)
+        for name in ordered:
+            label = name
+            if name in scientific_names:
                 label = f"{name} (Scientific)"
             self.cmb_default_cmap.addItem(label, name)
         current_default = str(self._data.get("colormaps", {}).get("default", ""))

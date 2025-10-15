@@ -6,6 +6,11 @@ try:  # pragma: no cover - depends on runtime Qt binding
     from PySide2 import QtCore, QtWidgets
 except Exception:  # pragma: no cover - PySide2 missing in tests
     QtCore = None  # type: ignore[assignment]
+from typing import Any
+
+try:  # pragma: no cover - depends on runtime Qt binding
+    from PySide2 import QtWidgets
+except Exception:  # pragma: no cover - PySide2 missing in tests
     QtWidgets = None  # type: ignore[assignment]
 
 
@@ -120,3 +125,4 @@ def ensure_messagebox_sizing(min_width: int = 520, min_height: int = 200) -> Non
 
 
 __all__ = ["ensure_header_resize_compat", "ensure_messagebox_sizing"]
+__all__ = ["ensure_header_resize_compat"]

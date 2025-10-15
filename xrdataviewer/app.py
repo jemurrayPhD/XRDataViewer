@@ -17,11 +17,40 @@ from .datasets import DatasetsPane, SliceDataTab
 from .interactive import InteractiveBridgeServer, InteractiveProcessingTab
 from .logging.panel import LoggingDockWidget
 from .preferences import PreferencesDialog, PreferencesManager
-from .qt_compat import ensure_header_resize_compat, ensure_messagebox_sizing
+from .qt_compat import ensure_header_resize_compat
 from .processing import ProcessingDockContainer, ProcessingDockWidget, ProcessingManager
 from .views.multiview import MultiViewGrid
 from .views.overlay import OverlayView
 from .views.sequential import SequentialView
+from .widget_sizes import enable_widget_size_overlays
+
+def _supports_button_word_wrap() -> bool:
+    """Return True if the Qt build exposes a wordWrap property on buttons."""
+
+    checkbox = QtWidgets.QCheckBox()
+    radio = QtWidgets.QRadioButton()
+    try:
+        has_checkbox = checkbox.metaObject().indexOfProperty("wordWrap") >= 0
+        has_radio = radio.metaObject().indexOfProperty("wordWrap") >= 0
+    finally:
+        checkbox.deleteLater()
+        radio.deleteLater()
+    return has_checkbox and has_radio
+
+ensure_header_resize_compat()
+
+def _supports_button_word_wrap() -> bool:
+    """Return True if the Qt build exposes a wordWrap property on buttons."""
+
+    checkbox = QtWidgets.QCheckBox()
+    radio = QtWidgets.QRadioButton()
+    try:
+        has_checkbox = checkbox.metaObject().indexOfProperty("wordWrap") >= 0
+        has_radio = radio.metaObject().indexOfProperty("wordWrap") >= 0
+    finally:
+        checkbox.deleteLater()
+        radio.deleteLater()
+    return has_checkbox and has_radio
 
 ensure_header_resize_compat()
 
@@ -213,8 +242,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.processing_manager = ProcessingManager()
         self._startup_splash = startup_splash
 
-        register_scientific_colormaps()
-
         placeholders = self._load_central_layout()
         dataset_host = placeholders["dataset_host"]
         processing_host = placeholders["processing_host"]
@@ -277,16 +304,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_dock.resize(800, 200)
         self.log_dock.setCollapsed(True)
 
-        # Guard against collapsing the main interface into an unreadable layout.
-        self.setMinimumSize(
-            max(self.minimumWidth(), 980), max(self.minimumHeight(), 640)
-        )
-        self._apply_initial_geometry()
+        self.resize(1220, 780)
+        self.setMinimumSize(920, 640)
 
         if self._startup_splash is not None and not self.tab_interactive.has_embedded_jupyter:
             self._startup_splash.notify_no_jupyter()
 
         self._on_preferences_changed(self.preferences.data())
+        try:
+            enable_widget_size_overlays()
+        except RuntimeError:
+            pass
 
     def closeEvent(self, event: QtGui.QCloseEvent):  # type: ignore[override]
         try:
@@ -380,214 +408,32 @@ class MainWindow(QtWidgets.QMainWindow):
         if central is None:
             raise RuntimeError(f"Failed to load UI from {ui_path}: {loader.errorString()}")
 
-        placeholders = self._extract_ui_placeholders(central)
-        missing = [name for name, widget in placeholders.items() if widget is None]
-        if missing:
-            central.deleteLater()
-            central, placeholders = self._build_fallback_central()
-
         self.setCentralWidget(central)
 
-        self._apply_central_minimum_sizes(placeholders)
+        main_splitter = central.findChild(QtWidgets.QSplitter, "mainSplitter")
+        left_splitter = central.findChild(QtWidgets.QSplitter, "leftSplitter")
+        tabs = central.findChild(QtWidgets.QTabWidget, "mainTabs")
+        dataset_host = central.findChild(QtWidgets.QWidget, "datasetsHost")
+        processing_host = central.findChild(QtWidgets.QWidget, "processingHost")
 
-        return placeholders
-
-    def _apply_initial_geometry(self) -> None:
-        screen = QtWidgets.QApplication.primaryScreen()
-        if not screen:
-            self.resize(1100, 720)
-            return
-        available = screen.availableGeometry()
-        width = max(int(available.width() * 0.8), self.minimumWidth())
-        height = max(int(available.height() * 0.8), self.minimumHeight())
-        self.resize(width, height)
-        frame = self.frameGeometry()
-        frame.moveCenter(available.center())
-        self.move(frame.topLeft())
-
-    def _screen_width_scale(self) -> float:
-        screen = QtWidgets.QApplication.primaryScreen()
-        if not screen:
-            return 1.0
-        available = screen.availableGeometry()
-        width = available.width()
-        if width <= 0:
-            return 1.0
-        scale = width / 2560.0
-        return max(0.5, min(scale, 2.0))
-
-    def _apply_central_minimum_sizes(
-        self, placeholders: Dict[str, Optional[QtWidgets.QWidget]]
-    ) -> None:
-        scale = self._screen_width_scale()
-
-        def scaled(base: int, floor: int = 0) -> int:
-            value = int(round(base * scale))
-            if floor:
-                value = max(floor, value)
-            return value
-
-        central = placeholders.get("central")
-        tabs = placeholders.get("tabs")
-        right_pane = placeholders.get("right_pane")
-        left_splitter = placeholders.get("left_splitter")
-        main_splitter = placeholders.get("main_splitter")
-        dataset_host = placeholders.get("dataset_host")
-        processing_host = placeholders.get("processing_host")
-
-        left_min = scaled(400, 260)
-        right_min = scaled(1220, 760)
-        spacer = scaled(60)
-
-        if left_splitter is not None:
-            left_splitter.setMinimumWidth(left_min)
-
-        for host in (dataset_host, processing_host):
-            if host is not None:
-                host.setMinimumWidth(left_min)
-
-        if right_pane is not None:
-            right_pane.setMinimumWidth(right_min)
-
-        if tabs is not None:
-            tabs.setMinimumWidth(max(tabs.minimumWidth(), right_min))
-            tabs.setMinimumHeight(max(tabs.minimumHeight(), scaled(520, 360)))
-
-        if central is not None:
-            central_min_width = left_min + right_min + spacer
-            central_min_height = max(central.minimumHeight(), scaled(640, 480))
-            central.setMinimumSize(central_min_width, central_min_height)
-
-        if main_splitter is not None:
-            main_splitter.setMinimumWidth(left_min + right_min)
-
-        # Ensure the main window honors the computed minimums.
-        if central is not None:
-            window_min_width = central.minimumWidth() + scaled(160)
-            window_min_height = central.minimumHeight() + scaled(160, 120)
-            self.setMinimumWidth(max(self.minimumWidth(), window_min_width))
-            self.setMinimumHeight(max(self.minimumHeight(), window_min_height))
-
-    def _extract_ui_placeholders(
-        self, central: QtWidgets.QWidget
-    ) -> Dict[str, Optional[QtWidgets.QWidget]]:
-        """Return important widgets declared in the designer UI."""
+        if None in (main_splitter, left_splitter, tabs, dataset_host, processing_host):
+            raise RuntimeError("Main window UI is missing required widgets")
 
         return {
-            "central": central,
-            "main_splitter": central.findChild(QtWidgets.QSplitter, "mainSplitter"),
-            "left_splitter": central.findChild(QtWidgets.QSplitter, "leftSplitter"),
-            "tabs": central.findChild(QtWidgets.QTabWidget, "mainTabs"),
-            "dataset_host": central.findChild(QtWidgets.QWidget, "datasetsHost"),
-            "processing_host": central.findChild(QtWidgets.QWidget, "processingHost"),
-            "right_pane": central.findChild(QtWidgets.QWidget, "rightPane"),
-        }
-
-    def _build_fallback_central(self) -> (
-        QtWidgets.QWidget,
-        Dict[str, Optional[QtWidgets.QWidget]],
-    ):
-        """Construct a manual layout if the designer file is incomplete."""
-
-        central = QtWidgets.QWidget(self)
-        central.setObjectName("MainWindowCentral")
-
-        outer_layout = QtWidgets.QVBoxLayout(central)
-        outer_layout.setObjectName("outerLayout")
-        outer_layout.setContentsMargins(12, 12, 12, 12)
-        outer_layout.setSpacing(12)
-
-        main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal, central)
-        main_splitter.setObjectName("mainSplitter")
-        main_splitter.setChildrenCollapsible(False)
-        main_splitter.setHandleWidth(10)
-        outer_layout.addWidget(main_splitter)
-
-        left_pane = QtWidgets.QWidget(main_splitter)
-        left_pane.setObjectName("leftPane")
-        left_layout = QtWidgets.QVBoxLayout(left_pane)
-        left_layout.setObjectName("leftPaneLayout")
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(12)
-
-        left_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical, left_pane)
-        left_splitter.setObjectName("leftSplitter")
-        left_splitter.setChildrenCollapsible(False)
-        left_splitter.setHandleWidth(8)
-        left_layout.addWidget(left_splitter)
-
-        datasets_section = QtWidgets.QWidget(left_splitter)
-        datasets_section.setObjectName("datasetsSection")
-        datasets_layout = QtWidgets.QVBoxLayout(datasets_section)
-        datasets_layout.setObjectName("datasetsSectionLayout")
-        datasets_layout.setContentsMargins(0, 0, 0, 0)
-        datasets_layout.setSpacing(0)
-
-        dataset_host = QtWidgets.QWidget(datasets_section)
-        dataset_host.setObjectName("datasetsHost")
-        dataset_host_layout = QtWidgets.QVBoxLayout(dataset_host)
-        dataset_host_layout.setObjectName("datasetsHostLayout")
-        dataset_host_layout.setContentsMargins(0, 0, 0, 0)
-        dataset_host_layout.setSpacing(0)
-        datasets_layout.addWidget(dataset_host)
-
-        processing_section = QtWidgets.QWidget(left_splitter)
-        processing_section.setObjectName("processingSection")
-        processing_layout = QtWidgets.QVBoxLayout(processing_section)
-        processing_layout.setObjectName("processingSectionLayout")
-        processing_layout.setContentsMargins(0, 0, 0, 0)
-        processing_layout.setSpacing(0)
-
-        processing_host = QtWidgets.QWidget(processing_section)
-        processing_host.setObjectName("processingHost")
-        processing_host_layout = QtWidgets.QVBoxLayout(processing_host)
-        processing_host_layout.setObjectName("processingHostLayout")
-        processing_host_layout.setContentsMargins(0, 0, 0, 0)
-        processing_host_layout.setSpacing(0)
-        processing_layout.addWidget(processing_host)
-
-        right_pane = QtWidgets.QWidget(main_splitter)
-        right_pane.setObjectName("rightPane")
-        right_layout = QtWidgets.QVBoxLayout(right_pane)
-        right_layout.setObjectName("rightPaneLayout")
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(0)
-
-        tabs = QtWidgets.QTabWidget(right_pane)
-        tabs.setObjectName("mainTabs")
-        tabs.setDocumentMode(True)
-        tabs.setMovable(True)
-        right_layout.addWidget(tabs)
-
-        placeholders = {
             "central": central,
             "main_splitter": main_splitter,
             "left_splitter": left_splitter,
             "tabs": tabs,
             "dataset_host": dataset_host,
             "processing_host": processing_host,
-            "right_pane": right_pane,
         }
-
-        return central, placeholders
-
-    def _on_preferences_changed(self, data: Optional[dict]):
-        appearance = data.get("appearance") if isinstance(data, dict) else None
-        stylesheet = build_stylesheet(
-            appearance, support_checkable_wordwrap=self._button_word_wrap_supported
-        )
-        if stylesheet == self._current_stylesheet:
-            return
-        self._current_stylesheet = stylesheet
-        app = QtWidgets.QApplication.instance()
-        if app is not None:
-            app.setStyleSheet(stylesheet)
 
 
 def main() -> None:
     """Start the Qt application with the splash screen and main window."""
 
     app = QtWidgets.QApplication([])
+    enable_widget_size_overlays()
     pg.setConfigOptions(imageAxisOrder="row-major")
     splash = StartupSplash()
     splash_holder: Dict[str, Optional[StartupSplash]] = {"widget": splash}

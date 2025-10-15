@@ -20,6 +20,7 @@ from ..colormaps import (
     is_scientific_colormap,
     resolve_colormap_assets,
 )
+from ..colormaps import register_scientific_colormaps, scientific_colormap_names
 from ..preferences import PreferencesManager
 from ..utils import ask_layout_label, ensure_extension, image_with_label, save_snapshot
 
@@ -352,6 +353,27 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
                 label = f"{label} (Scientific)"
             self.cmb_colormap.addItem(label, name)
         self.cmb_colormap.blockSignals(block_combo)
+        scientific_names = set(register_scientific_colormaps())
+        try:
+            available = sorted(pg.colormap.listMaps())
+        except Exception:
+            available = ["gray", "viridis", "plasma", "inferno", "magma", "cividis", "turbo"]
+        ordered: List[str] = []
+        for name in scientific_colormap_names():
+            if name in available and name not in ordered:
+                ordered.append(name)
+        for name in available:
+            if name not in ordered:
+                ordered.append(name)
+        for name in ordered:
+            try:
+                pg.colormap.get(name)
+            except Exception:
+                continue
+            label = name.replace("_", " ").title()
+            if name in scientific_names:
+                label = f"{label} (Scientific)"
+            self.cmb_colormap.addItem(label, name)
         cmap_controls.addWidget(self.cmb_colormap, 0)
 
         cmap_controls.addStretch(1)

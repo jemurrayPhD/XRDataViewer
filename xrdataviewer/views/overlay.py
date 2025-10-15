@@ -27,6 +27,7 @@ from ..colormaps import (
     is_scientific_colormap,
     resolve_colormap_assets,
 )
+from ..colormaps import register_scientific_colormaps, scientific_colormap_names
 from ..datasets import (
     MemoryDatasetRegistry,
     MemorySliceRef,
@@ -698,11 +699,49 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         for name in available_colormap_names():
             label = name.replace("_", " ").title()
             if is_scientific_colormap(name):
+        scientific_names = set(register_scientific_colormaps())
+        try:
+            cmaps = sorted(pg.colormap.listMaps())
+        except Exception:
+            cmaps = ["viridis", "plasma", "magma", "cividis", "gray"]
+        ordered: List[str] = []
+        for name in scientific_colormap_names():
+            if name in cmaps and name not in ordered:
+                ordered.append(name)
+        for name in cmaps:
+            if name not in ordered:
+                ordered.append(name)
+        for name in ordered:
+            label = name.replace("_", " ").title()
+            if name in scientific_names:
                 label = f"{label} (Scientific)"
             self.cmb_colormap.addItem(label, name)
         self.cmb_colormap.currentTextChanged.connect(self._on_colormap)
         cmap_row.addWidget(self.cmb_colormap, 1)
         controls_col.addWidget(self._colormap_row)
+        lay.addWidget(self._colormap_row)
+
+        # Levels controls
+        self._levels_row = QtWidgets.QWidget()
+        lvl_row = QtWidgets.QHBoxLayout(self._levels_row)
+        lvl_row.setContentsMargins(0, 0, 0, 0)
+        lvl_row.setSpacing(6)
+        lvl_row.addWidget(QtWidgets.QLabel("Levels:"))
+        self.spin_min = QtWidgets.QDoubleSpinBox()
+        self.spin_min.setRange(-1e12, 1e12)
+        self.spin_min.valueChanged.connect(self._on_levels_changed)
+        lvl_row.addWidget(self.spin_min)
+        lvl_row.addWidget(QtWidgets.QLabel("→"))
+        self.spin_max = QtWidgets.QDoubleSpinBox()
+        self.spin_max.setRange(-1e12, 1e12)
+        self.spin_max.valueChanged.connect(self._on_levels_changed)
+        lvl_row.addWidget(self.spin_max)
+        self.btn_autoscale = QtWidgets.QPushButton("Auto")
+        self.btn_autoscale.clicked.connect(self._on_autoscale)
+        hist_row.addWidget(self.btn_autoscale, 0)
+        lay.addWidget(self._histogram_row)
+        self._histogram_row.setVisible(False)
+        self.hist_widget.setVisible(False)
 
         # Opacity slider
         opacity_row = QtWidgets.QHBoxLayout()
@@ -891,6 +930,21 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         except Exception:
             return
         self._value_precision = max(0, min(8, digits))
+            digits = self._value_precision
+        digits = max(0, min(8, digits))
+        if getattr(self, "_value_precision", None) == digits:
+            return
+        self._value_precision = digits
+        step = 10 ** (-digits) if digits > 0 else 1.0
+        for spin in (self.spin_min, self.spin_max):
+            block = spin.blockSignals(True)
+            spin.setDecimals(digits)
+            spin.setSingleStep(step)
+            spin.setValue(spin.value())
+            spin.blockSignals(block)
+        if self.layer.supports_levels():
+            lo, hi = getattr(self.layer, "_levels", (0.0, 1.0))
+            self.update_level_spins(lo, hi)
 
     def _set_colormap_selection(self, name: str):
         if not self.layer.supports_colormap():
@@ -942,6 +996,128 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         if self.hist_widget is None:
             return None
         return getattr(self.hist_widget, "item", None)
+
+    def _connect_histogram_signal(self):
+        if self._histogram_signal_connected or self.hist_widget is None:
+            return
+            return
+        if hi <= lo:
+            hi = lo + max(abs(lo) * 1e-6, 1e-6)
+        self._set_histogram_levels(float(lo), float(hi))
+
+    def attach_histogram_source(self):
+        supports_levels = self.layer.supports_levels()
+        has_hist = supports_levels and self.hist_widget is not None
+        self._histogram_row.setVisible(has_hist)
+        if self.hist_widget is None:
+            return
+        self.hist_widget.setVisible(has_hist)
+        if not has_hist:
+            return
+        try:
+            self.hist_widget.setImageItem(self.layer.graphics_item)
+        except Exception:
+            pass
+        self._connect_histogram_signal()
+        self.update_histogram_colormap(
+            getattr(self.layer, "_colormap_object", None),
+            getattr(self.layer, "_colormap_state", None),
+        )
+
+    def update_histogram_colormap(self, cmap: Optional["pg.ColorMap"], state: Optional[dict]):
+        if self.hist_widget is None or not self.layer.supports_levels():
+            return
+        item = self._histogram_item()
+        if item is not None:
+            apply_histogram_gradient(item, cmap, state)
+
+    def _histogram_item(self):
+        if self.hist_widget is None:
+            return None
+        return getattr(self.hist_widget, "item", None)
+
+    def _force_horizontal_histogram(self, widget: Optional[QtWidgets.QWidget]) -> bool:
+        """Rotate the histogram plot so bars render horizontally when needed."""
+
+        if widget is None:
+            return False
+        cached = widget.property("_xr_horizontal_hist_done")
+        if cached is not None:
+            return bool(cached)
+
+        def _reset_transform(target) -> None:
+            if target is None:
+                return
+            try:
+                target.resetTransform()  # type: ignore[attr-defined]
+                return
+            except Exception:
+                pass
+            try:
+                target.setTransform(QtGui.QTransform())  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+        def _rotate_target(target) -> bool:
+            if target is None:
+                return False
+            for angle in (-90, 90):
+                try:
+                    target.rotate(angle)  # type: ignore[attr-defined]
+                    return True
+                except Exception:
+                    try:
+                        target.setTransform(QtGui.QTransform().rotate(angle))  # type: ignore[attr-defined]
+                        return True
+                    except Exception:
+                        continue
+            return False
+
+        item = getattr(widget, "item", None)
+        view_box = getattr(item, "vb", None)
+
+        # Some builds expose the histogram PlotWidget via ui.histogram.
+        hist_plot = None
+        ui_obj = getattr(widget, "ui", None)
+        if ui_obj is not None:
+            hist_plot = getattr(ui_obj, "histogram", None)
+            if hist_plot is not None and view_box is None:
+                try:
+                    if hasattr(hist_plot, "getViewBox"):
+                        view_box = hist_plot.getViewBox()  # type: ignore[call-arg]
+                    elif hasattr(hist_plot, "plotItem"):
+                        view_box = hist_plot.plotItem.getViewBox()  # type: ignore[attr-defined]
+                except Exception:
+                    view_box = None
+
+        rotated = False
+        # Prefer rotating the underlying ViewBox; fall back to the item if needed.
+        target_candidates = [view_box, item]
+        for target in target_candidates:
+            if target is None:
+                continue
+            _reset_transform(target)
+            if _rotate_target(target):
+                rotated = True
+                break
+
+        if rotated and view_box is not None:
+            for func_name in ("setDefaultPadding", "setAspectLocked", "invertY", "setMouseEnabled"):
+                func = getattr(view_box, func_name, None)
+                if callable(func):
+                    try:
+                        if func_name == "setDefaultPadding":
+                            func(0.0)
+                        elif func_name == "setAspectLocked":
+                            func(False)
+                        elif func_name == "invertY":
+                            func(True)
+                        elif func_name == "setMouseEnabled":
+                            func(x=False, y=False)
+                    except Exception:
+                        pass
+        widget.setProperty("_xr_horizontal_hist_done", rotated)
+        return rotated
 
     def _connect_histogram_signal(self):
         if self._histogram_signal_connected or self.hist_widget is None:
@@ -1003,6 +1179,9 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
                 pass
             finally:
                 self._block_histogram_updates = False
+        for func in funcs:
+            if self._invoke_histogram_set_levels(func, lo, hi):
+                break
 
     def _invoke_histogram_set_levels(self, func, lo: float, hi: float) -> bool:
         try:
