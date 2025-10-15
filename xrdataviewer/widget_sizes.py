@@ -113,6 +113,9 @@ class WidgetSizeOverlayManager(QtCore.QObject):
         if getattr(widget, _HELPER_ATTRIBUTE, None) is not None:
             return
 
+        if isinstance(widget, (QtWidgets.QMenu, QtWidgets.QMenuBar)):
+            return
+
         try:
             flags = widget.windowFlags()
         except RuntimeError:
@@ -120,8 +123,12 @@ class WidgetSizeOverlayManager(QtCore.QObject):
         try:
             is_menu = widget.inherits("QMenu")
         except RuntimeError:
-            return
-        if is_menu or flags & QtCore.Qt.ToolTip:
+            is_menu = False
+        try:
+            is_menu_bar = widget.inherits("QMenuBar")
+        except RuntimeError:
+            is_menu_bar = False
+        if is_menu or is_menu_bar or flags & QtCore.Qt.ToolTip:
             return
 
         helper = _WidgetSizeHelper(widget)
