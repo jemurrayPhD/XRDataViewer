@@ -779,6 +779,7 @@ class SequentialView(QtWidgets.QWidget):
         self._current_processed_slice = None
         self._rebuild_axis_controls()
         self._update_slice_widgets()
+        self._apply_preference_colormap()
         self._update_slice_display(autorange=True)
         self._update_roi_axis_options()
         self.btn_annotations.setEnabled(True)
@@ -1193,7 +1194,6 @@ class SequentialView(QtWidgets.QWidget):
             else:
                 self.viewer.set_image(processed, autorange=autorange)
             self.cmb_colormap.setEnabled(True)
-            self._apply_preference_colormap()
             self._apply_selected_colormap()
         if autorange:
             try:

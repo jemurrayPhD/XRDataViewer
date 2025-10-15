@@ -327,6 +327,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self.cmb_colormap = QtWidgets.QComboBox()
         self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
         self.cmb_colormap.currentIndexChanged.connect(self._on_colormap_combo_changed)
+        block_combo = self.cmb_colormap.blockSignals(True)
         scientific_names = set(register_scientific_colormaps())
         try:
             available = sorted(pg.colormap.listMaps())
@@ -348,6 +349,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             if name in scientific_names:
                 label = f"{label} (Scientific)"
             self.cmb_colormap.addItem(label, name)
+        self.cmb_colormap.blockSignals(block_combo)
         cmap_controls.addWidget(self.cmb_colormap, 0)
 
         cmap_controls.addStretch(1)
@@ -445,6 +447,8 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self.view.setBackgroundColor(QtGui.QColor(20, 20, 20))
         layout.addWidget(self.view, 1)
 
+        self.set_preferences(preferences)
+
     def set_preferences(self, preferences: Optional[PreferencesManager]):
         if self.preferences is preferences:
             return
@@ -494,8 +498,6 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             return str(Path(base) / filename)
         return filename
 
-        self.set_preferences(preferences)
-
     # ----- public API -----
     def set_volume(self, data: Optional[np.ndarray]):
         if data is None or data.size == 0:
@@ -531,7 +533,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             self._colormap_name = str(name)
         else:
             self._colormap_name = "viridis"
-        for widget in self._curve_widgets.values():
+        for widget in getattr(self, "_curve_widgets", {}).values():
             try:
                 widget.set_colormap(self._colormap_name)
             except Exception:
@@ -738,7 +740,7 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
 
     def _update_alpha_controls(self):
         has_data = self._data is not None
-        for widget in self._curve_widgets.values():
+        for widget in getattr(self, "_curve_widgets", {}).values():
             widget.setEnabled(has_data)
         self.btn_reset_curve.setEnabled(has_data)
         self.btn_reset_view.setEnabled(has_data and self._volume_item is not None)
