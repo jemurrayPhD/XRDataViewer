@@ -311,6 +311,13 @@ def build_stylesheet(appearance: Mapping[str, object] | None) -> str:
     tab_radius = max(button_radius + 6, 10)
     control_radius = max(button_radius, 4)
 
+    tab_min_width = max(int(settings["font_size"] * 9.5), 140)
+    button_min_width = max(int(settings["font_size"] * 7.5), 120)
+    button_min_height = max(int(settings["font_size"] * 2.8), 34)
+    checkbox_min_height = max(int(settings["font_size"] * 2.2), 26)
+    label_min_height = max(int(settings["font_size"] * 1.8), 20)
+    label_min_width = max(int(settings["font_size"] * 6.0), 96)
+
     accent_disabled = _mix(accent.base, background.panel, 0.55)
     accent_border = _mix(accent.base, background.border, 0.35)
     focus_outline = background.input_focus if background.input_focus else accent.base
@@ -374,8 +381,9 @@ QTabBar::tab {{
     border-bottom: none;
     border-top-left-radius: {tab_radius}px;
     border-top-right-radius: {tab_radius}px;
-    padding: 12px 26px;
+    padding: 12px 32px;
     margin: 0 8px;
+    min-width: {tab_min_width}px;
     color: {background.tab_text};
     font-weight: 500;
 }}
@@ -399,6 +407,8 @@ QLabel[modernSectionTitle="true"] {{
     font-weight: 600;
     color: {background.muted_text};
     padding-bottom: 4px;
+    qproperty-wordWrap: false;
+    min-width: 0;
 }}
 QGroupBox {{
     border: 1px solid {background.border};
@@ -433,8 +443,10 @@ QPushButton, QToolButton {{
     color: {accent.text};
     border: none;
     border-radius: {button_radius}px;
-    padding: 7px 18px;
+    padding: 8px 20px;
     font-weight: 600;
+    min-width: {button_min_width}px;
+    min-height: {button_min_height}px;
 }}
 QPushButton:disabled, QToolButton:disabled {{
     background-color: {accent_disabled};
@@ -452,6 +464,8 @@ QToolButton[headerAction="true"] {{
     padding: 4px 10px;
     border-radius: {control_radius + 2}px;
     font-weight: 500;
+    min-width: 0;
+    min-height: 0;
 }}
 QToolButton[headerAction="true"]:hover {{
     background: {_mix(accent.base, background.panel, 0.85)};
@@ -539,6 +553,17 @@ QToolTip {{
     color: {background.text};
     border: 1px solid {background.border};
     padding: 6px 8px;
+}}
+QCheckBox, QRadioButton {{
+    spacing: 6px;
+    min-width: {label_min_width}px;
+    min-height: {checkbox_min_height}px;
+    qproperty-wordWrap: true;
+}}
+QLabel {{
+    min-width: {label_min_width}px;
+    min-height: {label_min_height}px;
+    qproperty-wordWrap: true;
 }}
 """.strip()
 
