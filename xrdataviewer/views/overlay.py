@@ -699,7 +699,17 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         hist_row = QtWidgets.QHBoxLayout(self._histogram_row)
         hist_row.setContentsMargins(0, 0, 0, 0)
         hist_row.setSpacing(6)
-        self.hist_widget = pg.HistogramLUTWidget()
+        hist_kwargs: Dict[str, object] = {}
+        try:
+            import inspect
+
+            sig = inspect.signature(pg.HistogramLUTWidget.__init__)
+            if "orientation" in sig.parameters:
+                hist_kwargs["orientation"] = "horizontal"
+        except Exception:  # pragma: no cover - best effort capability check
+            pass
+
+        self.hist_widget = pg.HistogramLUTWidget(**hist_kwargs)
         self.hist_widget.setMinimumHeight(110)
         self.hist_widget.setMaximumHeight(160)
         self.hist_widget.setSizePolicy(
