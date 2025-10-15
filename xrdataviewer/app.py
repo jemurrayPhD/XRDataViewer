@@ -22,6 +22,19 @@ from .views.multiview import MultiViewGrid
 from .views.overlay import OverlayView
 from .views.sequential import SequentialView
 
+def _supports_button_word_wrap() -> bool:
+    """Return True if the Qt build exposes a wordWrap property on buttons."""
+
+    checkbox = QtWidgets.QCheckBox()
+    radio = QtWidgets.QRadioButton()
+    try:
+        has_checkbox = checkbox.metaObject().indexOfProperty("wordWrap") >= 0
+        has_radio = radio.metaObject().indexOfProperty("wordWrap") >= 0
+    finally:
+        checkbox.deleteLater()
+        radio.deleteLater()
+    return has_checkbox and has_radio
+
 
 class StartupSplash(QtWidgets.QWidget):
     """Frameless splash screen that surfaces Jupyter startup progress."""
@@ -192,6 +205,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preferences = PreferencesManager()
         self.preferences.changed.connect(self._on_preferences_changed)
         self._current_stylesheet = ""
+        self._button_word_wrap_supported = _supports_button_word_wrap()
         self.processing_manager = ProcessingManager()
         self._startup_splash = startup_splash
 
@@ -387,7 +401,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_preferences_changed(self, data: Optional[dict]):
         appearance = data.get("appearance") if isinstance(data, dict) else None
-        stylesheet = build_stylesheet(appearance)
+        stylesheet = build_stylesheet(
+            appearance, support_checkable_wordwrap=self._button_word_wrap_supported
+        )
         if stylesheet == self._current_stylesheet:
             return
         self._current_stylesheet = stylesheet

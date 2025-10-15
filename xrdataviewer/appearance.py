@@ -302,7 +302,11 @@ def _mix(color_a: str, color_b: str, ratio: float) -> str:
     return _rgb_to_hex(blended)
 
 
-def build_stylesheet(appearance: Mapping[str, object] | None) -> str:
+def build_stylesheet(
+    appearance: Mapping[str, object] | None,
+    *,
+    support_checkable_wordwrap: bool = True,
+) -> str:
     settings = sanitize_profile_values(appearance or {}, default_appearance())
     font = FONT_OPTIONS[settings["font_family"]]
     accent = ACCENT_OPTIONS[settings["accent"]]
@@ -324,6 +328,8 @@ def build_stylesheet(appearance: Mapping[str, object] | None) -> str:
     accent_border = _mix(accent.base, background.border, 0.35)
     focus_outline = background.input_focus if background.input_focus else accent.base
     hover_surface = _mix(accent.base, background.panel, 0.9)
+
+    checkable_word_wrap_css = "    qproperty-wordWrap: true;\n" if support_checkable_wordwrap else ""
 
     return f"""
 QWidget {{
@@ -560,8 +566,7 @@ QCheckBox, QRadioButton {{
     spacing: 6px;
     min-width: {label_min_width}px;
     min-height: {checkbox_min_height}px;
-    qproperty-wordWrap: true;
-}}
+{checkable_word_wrap_css}}}
 QLabel {{
     min-width: {label_min_width}px;
     min-height: {label_min_height}px;
