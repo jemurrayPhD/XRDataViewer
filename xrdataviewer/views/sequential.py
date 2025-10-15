@@ -24,7 +24,8 @@ from app_logging import log_action
 from xr_coords import guess_phys_coords
 from xr_plot_widget import CentralPlotWidget, PlotAnnotationConfig, ScientificAxisItem
 
-from ..annotations import PlotAnnotationDialog
+from ..annotations import LineStyleDialog, PlotAnnotationDialog
+from ..colormaps import register_scientific_colormaps, scientific_colormap_names
 from ..datasets import DataSetRef, HighDimVarRef, MemoryDatasetRef, VarRef
 from ..preferences import PreferencesManager
 from ..processing import apply_processing_step, ProcessingManager, ProcessingSelectionDialog
@@ -352,14 +353,35 @@ class SequentialView(QtWidgets.QWidget):
         self.btn_line_style.setEnabled(False)
         self.btn_line_style.clicked.connect(self._open_line_style_dialog)
 
-        def _make_group(title: str, widgets: Iterable[QtWidgets.QWidget]) -> QtWidgets.QGroupBox:
-            box = QtWidgets.QGroupBox(title)
-            layout = QtWidgets.QHBoxLayout(box)
-            layout.setContentsMargins(8, 6, 8, 6)
+        def _make_group(title: str, widgets: Iterable[QtWidgets.QWidget]) -> QtWidgets.QWidget:
+            items = tuple(widgets)
+            if not items:
+                spacer = QtWidgets.QWidget()
+                spacer.setVisible(False)
+                return spacer
+            if len(items) == 1:
+                widget = items[0]
+                if isinstance(widget, QtWidgets.QAbstractButton):
+                    widget.setToolTip(title)
+                return widget
+
+            frame = QtWidgets.QFrame()
+            frame.setProperty("modernSection", True)
+            layout = QtWidgets.QVBoxLayout(frame)
+            layout.setContentsMargins(10, 8, 10, 8)
             layout.setSpacing(6)
-            for widget in widgets:
-                layout.addWidget(widget)
-            return box
+
+            label = QtWidgets.QLabel(title)
+            label.setProperty("modernSectionTitle", True)
+            layout.addWidget(label)
+
+            row = QtWidgets.QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            for widget in items:
+                row.addWidget(widget)
+            layout.addLayout(row)
+            return frame
 
         controls_bar = QtWidgets.QHBoxLayout()
         controls_bar.setSpacing(10)
@@ -444,24 +466,41 @@ class SequentialView(QtWidgets.QWidget):
 
     # ---------- dataset helpers ----------
     def _populate_colormap_choices(self):
-        candidates = [
-            "gray",
-            "viridis",
-            "plasma",
-            "inferno",
-            "magma",
-            "cividis",
-            "turbo",
-            "thermal",
-        ]
+        scientific_names = set(register_scientific_colormaps())
+        try:
+            available = sorted(pg.colormap.listMaps())
+        except Exception:
+            available = [
+                "gray",
+                "viridis",
+                "plasma",
+                "inferno",
+                "magma",
+                "cividis",
+                "turbo",
+            ]
+        ordered: List[str] = []
+        for name in scientific_colormap_names():
+            if name in available and name not in ordered:
+                ordered.append(name)
+        fallbacks = ["gray", "viridis", "plasma", "inferno", "magma", "cividis", "turbo", "thermal"]
+        for name in fallbacks:
+            if name in available and name not in ordered:
+                ordered.append(name)
+        for name in available:
+            if name not in ordered:
+                ordered.append(name)
         self.cmb_colormap.blockSignals(True)
         self.cmb_colormap.clear()
-        for name in candidates:
+        for name in ordered:
             try:
                 pg.colormap.get(name)
             except Exception:
                 continue
-            self.cmb_colormap.addItem(name.title(), name)
+            label = name.replace("_", " ").title()
+            if name in scientific_names:
+                label = f"{label} (Scientific)"
+            self.cmb_colormap.addItem(label, name)
         if self.cmb_colormap.count() == 0:
             self.cmb_colormap.addItem("Default", "default")
         self.cmb_colormap.blockSignals(False)
@@ -1309,6 +1348,7 @@ class SequentialView(QtWidgets.QWidget):
                 preferences.changed.connect(self._on_preferences_changed)
             except Exception:
                 pass
+        self._apply_value_precision()
         self._apply_preference_colormap()
         self._apply_selected_colormap()
         if self._volume_window is not None:
@@ -1335,8 +1375,21 @@ class SequentialView(QtWidgets.QWidget):
                 self.cmb_colormap.blockSignals(block)
 
     def _on_preferences_changed(self, _data):
+        self._apply_value_precision()
         self._apply_preference_colormap()
         self._apply_selected_colormap()
+
+    def _apply_value_precision(self):
+        precision = 6
+        if self.preferences is not None:
+            try:
+                precision = self.preferences.value_precision()
+            except Exception:
+                precision = 6
+        try:
+            self.viewer.set_value_precision(precision)
+        except Exception:
+            pass
 
     # ---------- export helpers ----------
     def _export_current_slice(self):

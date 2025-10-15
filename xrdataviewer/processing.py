@@ -30,6 +30,7 @@ from xr_plot_widget import (
 )
 
 from .annotations import PlotAnnotationDialog
+from .colormaps import register_scientific_colormaps, scientific_colormap_names
 from .utils import _nan_aware_reducer
 from .utils import open_dataset
 
@@ -195,22 +196,38 @@ class PipelineEditorDialog(QtWidgets.QDialog):
         top_row.addWidget(cmap_label, 0)
         self.cmb_colormap = QtWidgets.QComboBox()
         self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
-        candidate_maps = [
-            "gray",
-            "viridis",
-            "plasma",
-            "inferno",
-            "magma",
-            "cividis",
-            "turbo",
-            "thermal",
-        ]
-        for name in candidate_maps:
+        scientific_names = set(register_scientific_colormaps())
+        try:
+            available = sorted(pg.colormap.listMaps())
+        except Exception:
+            available = [
+                "gray",
+                "viridis",
+                "plasma",
+                "inferno",
+                "magma",
+                "cividis",
+                "turbo",
+            ]
+        ordered: List[str] = []
+        for name in scientific_colormap_names():
+            if name in available and name not in ordered:
+                ordered.append(name)
+        fallbacks = ["gray", "viridis", "plasma", "inferno", "magma", "cividis", "turbo"]
+        for name in fallbacks:
+            if name in available and name not in ordered:
+                ordered.append(name)
+        for name in available:
+            if name not in ordered:
+                ordered.append(name)
+        for name in ordered:
             try:
                 pg.colormap.get(name)
             except Exception:
                 continue
-            label = name.title()
+            label = name.replace("_", " ").title()
+            if name in scientific_names:
+                label = f"{label} (Scientific)"
             self.cmb_colormap.addItem(label, name)
         if self.cmb_colormap.count() == 0:
             self.cmb_colormap.addItem("Default", "default")
@@ -608,11 +625,14 @@ class ProcessingDockContainer(QtWidgets.QWidget):
         self._content_widget = widget
         self._floating_window: Optional[QtWidgets.QDialog] = None
 
+        self.setObjectName("processingContainer")
+
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         header = QtWidgets.QWidget()
+        header.setObjectName("processingHeader")
         header_layout = QtWidgets.QHBoxLayout(header)
         header_layout.setContentsMargins(6, 6, 6, 6)
         header_layout.setSpacing(6)
@@ -628,6 +648,7 @@ class ProcessingDockContainer(QtWidgets.QWidget):
         self.btn_float.setAutoRaise(True)
         self.btn_float.setToolTip("Undock processing pane to a floating window")
         self.btn_float.clicked.connect(self._on_float_clicked)
+        self.btn_float.setProperty("headerAction", True)
         header_layout.addWidget(self.btn_float)
 
         self.btn_toggle = QtWidgets.QToolButton()
@@ -637,11 +658,13 @@ class ProcessingDockContainer(QtWidgets.QWidget):
         self.btn_toggle.setArrowType(QtCore.Qt.DownArrow)
         self.btn_toggle.setToolTip("Hide processing pane")
         self.btn_toggle.toggled.connect(self._on_toggle_toggled)
+        self.btn_toggle.setProperty("headerAction", True)
         header_layout.addWidget(self.btn_toggle)
 
         layout.addWidget(header)
 
         self._content_frame = QtWidgets.QWidget()
+        self._content_frame.setObjectName("processingContent")
         self._content_layout = QtWidgets.QVBoxLayout(self._content_frame)
         self._content_layout.setContentsMargins(0, 0, 0, 0)
         self._content_layout.setSpacing(0)
@@ -654,6 +677,7 @@ class ProcessingDockContainer(QtWidgets.QWidget):
         self._placeholder.setAlignment(QtCore.Qt.AlignCenter)
         self._placeholder.setWordWrap(True)
         self._placeholder.hide()
+        self._placeholder.setObjectName("processingPlaceholder")
         layout.addWidget(self._placeholder, 1)
 
         self._update_toggle_visuals()

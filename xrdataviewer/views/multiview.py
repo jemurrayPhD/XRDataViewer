@@ -427,6 +427,10 @@ class ViewerFrame(QtWidgets.QFrame):
         prefs = self.preferences
         if prefs is None:
             return
+        try:
+            self.viewer.set_value_precision(prefs.value_precision())
+        except Exception:
+            pass
         if self._display_mode == "line":
             return
         cmap_name = prefs.preferred_colormap(self._current_variable)
@@ -702,23 +706,57 @@ class MultiViewGrid(QtWidgets.QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(6)
 
-        # Toolbar
-        bar = QtWidgets.QHBoxLayout()
-        bar.setSpacing(10)
-
-        def _make_group(title: str, widgets: Iterable[QtWidgets.QWidget]) -> QtWidgets.QGroupBox:
-            box = QtWidgets.QGroupBox(title)
-            layout = QtWidgets.QHBoxLayout(box)
-            layout.setContentsMargins(8, 6, 8, 6)
-            layout.setSpacing(6)
+        def _tag_compact_buttons(*widgets: QtWidgets.QWidget) -> None:
             for widget in widgets:
-                layout.addWidget(widget)
-            return box
+                if isinstance(widget, (QtWidgets.QPushButton, QtWidgets.QToolButton)):
+                    widget.setProperty("sizeVariant", "compact")
+                    widget.setMinimumWidth(0)
+                    widget.setMinimumHeight(0)
+                    widget.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+
+        # Toolbar
+        bar = QtWidgets.QGridLayout()
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.setHorizontalSpacing(8)
+        bar.setVerticalSpacing(6)
+
+        def _make_group(title: str, widgets: Iterable[QtWidgets.QWidget]) -> QtWidgets.QWidget:
+            items = tuple(widgets)
+            if not items:
+                spacer = QtWidgets.QWidget()
+                spacer.setVisible(False)
+                return spacer
+            if len(items) == 1:
+                widget = items[0]
+                if isinstance(widget, QtWidgets.QAbstractButton):
+                    widget.setToolTip(title)
+                    _tag_compact_buttons(widget)
+                return widget
+
+            frame = QtWidgets.QFrame()
+            frame.setProperty("toolbarGroup", True)
+            layout = QtWidgets.QVBoxLayout(frame)
+            layout.setContentsMargins(8, 6, 8, 6)
+            layout.setSpacing(4)
+
+            label = QtWidgets.QLabel(title)
+            label.setProperty("toolbarGroupLabel", True)
+            layout.addWidget(label)
+
+            row = QtWidgets.QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(4)
+            for widget in items:
+                _tag_compact_buttons(widget)
+                row.addWidget(widget)
+            layout.addLayout(row)
+            return frame
 
         lbl_columns = QtWidgets.QLabel("Columns:")
         self.col_spin = QtWidgets.QSpinBox()
         self.col_spin.setRange(1, 12)
         self.col_spin.setValue(3)
+        self.col_spin.setMaximumWidth(72)
         self.col_spin.valueChanged.connect(self._reflow)
 
         self.chk_show_hist = QtWidgets.QCheckBox("Show histograms")
@@ -775,23 +813,35 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.btn_annotations = QtWidgets.QPushButton("Set annotations…")
         self.btn_annotations.clicked.connect(self._open_annotation_dialog)
 
-        bar.addWidget(
+        toolbar_groups = [
             _make_group(
                 "Layout",
                 (lbl_columns, self.col_spin, self.btn_equalize_rows, self.btn_equalize_cols, self.btn_select_all),
-            )
-        )
-        bar.addWidget(_make_group("Display", (self.chk_show_hist, self.chk_cursor_mirror)))
-        bar.addWidget(
+            ),
+            _make_group("Display", (self.chk_show_hist, self.chk_cursor_mirror)),
             _make_group(
                 "Scaling",
                 (self.chk_link_levels, self.chk_link_panzoom, self.btn_autoscale, self.btn_autopan),
-            )
+            ),
+            _make_group("Processing", (self.btn_apply_processing,)),
+            _make_group("Style", (self.btn_line_style, self.btn_annotations)),
+            _make_group("Export", (self.btn_export,)),
+        ]
+
+        columns = 3
+        for index, widget in enumerate(toolbar_groups):
+            row = index // columns
+            column = index % columns
+            bar.addWidget(widget, row, column)
+
+        rows = max(1, (len(toolbar_groups) + columns - 1) // columns)
+        spacer = QtWidgets.QSpacerItem(
+            0,
+            0,
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Minimum,
         )
-        bar.addWidget(_make_group("Processing", (self.btn_apply_processing,)))
-        bar.addWidget(_make_group("Style", (self.btn_line_style, self.btn_annotations)))
-        bar.addWidget(_make_group("Export", (self.btn_export,)))
-        bar.addStretch(1)
+        bar.addItem(spacer, 0, columns, rows, 1)
         v.addLayout(bar)
 
         # A vertical splitter holds "rows" (each row is a horizontal splitter of tiles)

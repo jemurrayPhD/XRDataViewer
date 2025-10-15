@@ -18,6 +18,7 @@ from xr_plot_widget import (
 )
 
 from ..annotations import LineStyleDialog, PlotAnnotationDialog
+from ..colormaps import register_scientific_colormaps, scientific_colormap_names
 from ..datasets import (
     MemoryDatasetRegistry,
     MemorySliceRef,
@@ -621,12 +622,23 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.cmb_colormap.setMinimumContentsLength(12)
         self.cmb_colormap.setMinimumWidth(200)
+        scientific_names = set(register_scientific_colormaps())
         try:
             cmaps = sorted(pg.colormap.listMaps())
         except Exception:
             cmaps = ["viridis", "plasma", "magma", "cividis", "gray"]
+        ordered: List[str] = []
+        for name in scientific_colormap_names():
+            if name in cmaps and name not in ordered:
+                ordered.append(name)
         for name in cmaps:
-            self.cmb_colormap.addItem(name)
+            if name not in ordered:
+                ordered.append(name)
+        for name in ordered:
+            label = name.replace("_", " ").title()
+            if name in scientific_names:
+                label = f"{label} (Scientific)"
+            self.cmb_colormap.addItem(label, name)
         self.cmb_colormap.currentTextChanged.connect(self._on_colormap)
         cmap_row.addWidget(self.cmb_colormap, 1)
         lay.addWidget(self._colormap_row)
@@ -638,13 +650,11 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         lvl_row.setSpacing(6)
         lvl_row.addWidget(QtWidgets.QLabel("Levels:"))
         self.spin_min = QtWidgets.QDoubleSpinBox()
-        self.spin_min.setDecimals(6)
         self.spin_min.setRange(-1e12, 1e12)
         self.spin_min.valueChanged.connect(self._on_levels_changed)
         lvl_row.addWidget(self.spin_min)
         lvl_row.addWidget(QtWidgets.QLabel("→"))
         self.spin_max = QtWidgets.QDoubleSpinBox()
-        self.spin_max.setDecimals(6)
         self.spin_max.setRange(-1e12, 1e12)
         self.spin_max.valueChanged.connect(self._on_levels_changed)
         lvl_row.addWidget(self.spin_max)
@@ -741,6 +751,9 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         lay.addWidget(proc_box)
         self.set_processing_manager(manager_ref)
 
+        self._value_precision = -1
+        self.set_value_precision(6)
+
         self._ready = True
         self._set_apply_pending(False)
         self._refresh_history_display()
@@ -788,6 +801,26 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self._refresh_history_display()
         self._update_history_controls()
         self.update_target_summary()
+
+    def set_value_precision(self, digits: int):
+        try:
+            digits = int(digits)
+        except Exception:
+            digits = self._value_precision
+        digits = max(0, min(8, digits))
+        if getattr(self, "_value_precision", None) == digits:
+            return
+        self._value_precision = digits
+        step = 10 ** (-digits) if digits > 0 else 1.0
+        for spin in (self.spin_min, self.spin_max):
+            block = spin.blockSignals(True)
+            spin.setDecimals(digits)
+            spin.setSingleStep(step)
+            spin.setValue(spin.value())
+            spin.blockSignals(block)
+        if self.layer.supports_levels():
+            lo, hi = getattr(self.layer, "_levels", (0.0, 1.0))
+            self.update_level_spins(lo, hi)
 
     def _set_colormap_selection(self, name: str):
         if not self.layer.supports_colormap():
@@ -1261,14 +1294,35 @@ class OverlayView(QtWidgets.QWidget):
         toolbar = QtWidgets.QHBoxLayout()
         toolbar.setSpacing(10)
 
-        def _make_group(title: str, widgets: Iterable[QtWidgets.QWidget]) -> QtWidgets.QGroupBox:
-            box = QtWidgets.QGroupBox(title)
-            layout = QtWidgets.QHBoxLayout(box)
-            layout.setContentsMargins(8, 6, 8, 6)
+        def _make_group(title: str, widgets: Iterable[QtWidgets.QWidget]) -> QtWidgets.QWidget:
+            items = tuple(widgets)
+            if not items:
+                spacer = QtWidgets.QWidget()
+                spacer.setVisible(False)
+                return spacer
+            if len(items) == 1:
+                widget = items[0]
+                if isinstance(widget, QtWidgets.QAbstractButton):
+                    widget.setToolTip(title)
+                return widget
+
+            frame = QtWidgets.QFrame()
+            frame.setProperty("modernSection", True)
+            layout = QtWidgets.QVBoxLayout(frame)
+            layout.setContentsMargins(10, 8, 10, 8)
             layout.setSpacing(6)
-            for widget in widgets:
-                layout.addWidget(widget)
-            return box
+
+            label = QtWidgets.QLabel(title)
+            label.setProperty("modernSectionTitle", True)
+            layout.addWidget(label)
+
+            row = QtWidgets.QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            for widget in items:
+                row.addWidget(widget)
+            layout.addLayout(row)
+            return frame
 
         self.btn_auto_view = QtWidgets.QPushButton("Auto view")
         self.btn_auto_view.clicked.connect(self.auto_view_range)
@@ -1301,13 +1355,13 @@ class OverlayView(QtWidgets.QWidget):
 
         # Layer controls panel
         panel = QtWidgets.QWidget()
-        panel.setMinimumWidth(360)
+        panel.setMinimumWidth(440)
         panel.setSizePolicy(
             QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         )
         panel_layout = QtWidgets.QVBoxLayout(panel)
-        panel_layout.setContentsMargins(0, 0, 0, 0)
-        panel_layout.setSpacing(6)
+        panel_layout.setContentsMargins(12, 12, 12, 12)
+        panel_layout.setSpacing(10)
 
         self._layer_rows: Dict[OverlayLayer, int] = {}
         self._layer_pages: Dict[OverlayLayer, int] = {}
@@ -1366,9 +1420,9 @@ class OverlayView(QtWidgets.QWidget):
         self.plot.setLabel("left", "Y")
         self.plot.setLabel("bottom", "X")
         splitter.addWidget(self.glw)
-        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
-        QtCore.QTimer.singleShot(0, lambda: splitter.setSizes([420, 780]))
+        QtCore.QTimer.singleShot(0, lambda: splitter.setSizes([520, 640]))
 
         self.set_preferences(preferences)
 
@@ -1456,6 +1510,7 @@ class OverlayView(QtWidgets.QWidget):
     def _register_layer_widget(self, layer: OverlayLayer, widget: OverlayLayerWidget):
         page = self.detail_stack.addWidget(widget)
         self._layer_pages[layer] = page
+        widget.set_value_precision(self._preferred_value_precision())
         widget.set_active(False)
         self._append_layer_row(layer)
         self._update_hint()
@@ -1529,6 +1584,10 @@ class OverlayView(QtWidgets.QWidget):
         self._apply_preferences_to_layers()
 
     def _apply_preferences_to_layers(self):
+        precision = self._preferred_value_precision()
+        for layer in self.layers:
+            if layer.widget is not None:
+                layer.widget.set_value_precision(precision)
         if not self.preferences:
             return
         preferred = self.preferences.preferred_colormap(None)
@@ -1552,6 +1611,11 @@ class OverlayView(QtWidgets.QWidget):
         if self.preferences:
             return self.preferences.default_export_directory()
         return ""
+
+    def _preferred_value_precision(self) -> int:
+        if self.preferences:
+            return self.preferences.value_precision()
+        return 6
 
     def _store_export_dir(self, directory: str):
         if self.preferences and directory:
