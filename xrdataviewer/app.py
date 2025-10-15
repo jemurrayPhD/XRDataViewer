@@ -21,6 +21,7 @@ from .processing import ProcessingDockContainer, ProcessingDockWidget, Processin
 from .views.multiview import MultiViewGrid
 from .views.overlay import OverlayView
 from .views.sequential import SequentialView
+from .widget_sizes import enable_widget_size_overlays
 
 def _supports_button_word_wrap() -> bool:
     """Return True if the Qt build exposes a wordWrap property on buttons."""
@@ -281,6 +282,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._startup_splash.notify_no_jupyter()
 
         self._on_preferences_changed(self.preferences.data())
+        try:
+            enable_widget_size_overlays()
+        except RuntimeError:
+            pass
 
     def closeEvent(self, event: QtGui.QCloseEvent):  # type: ignore[override]
         try:
@@ -422,6 +427,7 @@ def main() -> None:
     """Start the Qt application with the splash screen and main window."""
 
     app = QtWidgets.QApplication([])
+    enable_widget_size_overlays()
     pg.setConfigOptions(imageAxisOrder="row-major")
     splash = StartupSplash()
     splash_holder: Dict[str, Optional[StartupSplash]] = {"widget": splash}
