@@ -161,7 +161,7 @@ class _WidgetSizeHelper(QtCore.QObject):
     def __init__(self, widget: QtWidgets.QWidget):
         super().__init__(widget)
         self._widget_ref = weakref.ref(widget)
-        self._label = QtWidgets.QLabel(widget)
+        self._label: QtWidgets.QLabel | None = QtWidgets.QLabel(widget)
         self._label.setObjectName(_OVERLAY_OBJECT_NAME)
         self._label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
         self._label.setStyleSheet(
@@ -191,13 +191,20 @@ class _WidgetSizeHelper(QtCore.QObject):
             except Exception:
                 pass
         if self._label is not None:
-            self._label.deleteLater()
+            if _is_valid_widget(self._label):
+                self._label.hide()
+                self._label.deleteLater()
+            self._label = None
         self.deleteLater()
 
     # ------------------------------------------------------------------
     # Event handling for the tracked widget
     # ------------------------------------------------------------------
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        label = self._label
+        if not _is_valid_widget(label):
+            return False
+
         if event.type() in (
             QtCore.QEvent.Show,
             QtCore.QEvent.Resize,
@@ -206,7 +213,7 @@ class _WidgetSizeHelper(QtCore.QObject):
         ):
             self._update_label()
         elif event.type() == QtCore.QEvent.Hide:
-            self._label.hide()
+            label.hide()
         elif _DESTROY_EVENT is not None and event.type() == _DESTROY_EVENT:
             self.cleanup()
         return False
@@ -215,6 +222,10 @@ class _WidgetSizeHelper(QtCore.QObject):
     # Internal helpers
     # ------------------------------------------------------------------
     def _update_label(self) -> None:
+        label = self._label
+        if not _is_valid_widget(label):
+            return
+
         widget = self._widget_ref()
         if not _is_valid_widget(widget):
             return
@@ -223,36 +234,36 @@ class _WidgetSizeHelper(QtCore.QObject):
         except RuntimeError:
             return
         if not visible:
-            self._label.hide()
+            label.hide()
             return
 
         try:
             width = widget.width()
             height = widget.height()
         except RuntimeError:
-            self._label.hide()
+            label.hide()
             return
         if width <= 0 or height <= 0:
-            self._label.hide()
+            label.hide()
             return
 
-        self._label.setText(f"{width}×{height}")
-        self._label.adjustSize()
+        label.setText(f"{width}×{height}")
+        label.adjustSize()
 
         try:
             rect = widget.contentsRect()
         except RuntimeError:
-            self._label.hide()
+            label.hide()
             return
-        label_size = self._label.size()
+        label_size = label.size()
         x = rect.right() - label_size.width() - 4
         y = rect.bottom() - label_size.height() - 2
         x = max(x, rect.left())
         y = max(y, rect.top())
 
-        self._label.move(x, y)
-        self._label.show()
-        self._label.raise_()
+        label.move(x, y)
+        label.show()
+        label.raise_()
 
     def _on_widget_destroyed(self, *_args) -> None:  # pragma: no cover - Qt callback
         self.cleanup()
