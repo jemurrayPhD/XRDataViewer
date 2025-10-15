@@ -315,7 +315,7 @@ def build_stylesheet(
     tab_radius = max(button_radius + 6, 10)
     control_radius = max(button_radius, 4)
 
-    tab_min_width = max(int(settings["font_size"] * 9.0), 128)
+    tab_min_width = max(int(settings["font_size"] * 10.5), 152)
     compact_tab_min_width = max(int(settings["font_size"] * 6.0), 84)
     button_min_width = max(int(settings["font_size"] * 5.2), 88)
     button_min_height = max(int(settings["font_size"] * 2.4), 30)

@@ -1285,7 +1285,12 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        layout.setSpacing(8)
+
+        def _ensure_minimum(widget: QtWidgets.QWidget) -> None:
+            hint = widget.sizeHint()
+            if hint.isValid():
+                widget.setMinimumSize(hint)
 
         hint_text = (
             "Choose an interactive environment. The embedded JupyterLab session automatically mirrors any "
@@ -1309,6 +1314,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self.btn_toggle_instructions.setChecked(False)
         self.btn_toggle_instructions.setArrowType(QtCore.Qt.RightArrow)
         self.btn_toggle_instructions.toggled.connect(self._toggle_instructions)
+        _ensure_minimum(self.btn_toggle_instructions)
         toggle_row.addWidget(self.btn_toggle_instructions)
         toggle_row.addStretch(1)
         layout.addLayout(toggle_row)
@@ -1326,7 +1332,9 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self.instructions_container.setVisible(False)
 
         mode_row = QtWidgets.QHBoxLayout()
+        mode_row.setSpacing(8)
         lbl_mode = QtWidgets.QLabel("Environment:")
+        _ensure_minimum(lbl_mode)
         mode_row.addWidget(lbl_mode)
         self.cmb_mode = QtWidgets.QComboBox()
         self._web_engine_available = QtWebEngineWidgets is not None
@@ -1335,6 +1343,8 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         else:
             self.cmb_mode.addItem("JupyterLab placeholder", "jupyter")
         self.cmb_mode.addItem("Python console", "python")
+        self.cmb_mode.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        _ensure_minimum(self.cmb_mode)
         mode_row.addWidget(self.cmb_mode)
         mode_row.addStretch(1)
         layout.addLayout(mode_row)
@@ -1342,7 +1352,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
         self._jupyter_nav_widget = QtWidgets.QWidget()
         nav_layout = QtWidgets.QHBoxLayout(self._jupyter_nav_widget)
         nav_layout.setContentsMargins(0, 0, 0, 0)
-        nav_layout.setSpacing(4)
+        nav_layout.setSpacing(8)
         if self._web_engine_available:
             self.btn_jupyter_back = QtWidgets.QToolButton()
             self.btn_jupyter_back.setText("◀")
@@ -1350,6 +1360,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             self.btn_jupyter_back.setAutoRaise(True)
             self.btn_jupyter_back.setEnabled(False)
             self.btn_jupyter_back.clicked.connect(self._on_jupyter_back)
+            _ensure_minimum(self.btn_jupyter_back)
             nav_layout.addWidget(self.btn_jupyter_back)
 
             self.btn_jupyter_forward = QtWidgets.QToolButton()
@@ -1358,6 +1369,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             self.btn_jupyter_forward.setAutoRaise(True)
             self.btn_jupyter_forward.setEnabled(False)
             self.btn_jupyter_forward.clicked.connect(self._on_jupyter_forward)
+            _ensure_minimum(self.btn_jupyter_forward)
             nav_layout.addWidget(self.btn_jupyter_forward)
 
             self.btn_jupyter_reload = QtWidgets.QToolButton()
@@ -1366,6 +1378,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             self.btn_jupyter_reload.setAutoRaise(True)
             self.btn_jupyter_reload.setEnabled(False)
             self.btn_jupyter_reload.clicked.connect(self._on_jupyter_reload)
+            _ensure_minimum(self.btn_jupyter_reload)
             nav_layout.addWidget(self.btn_jupyter_reload)
 
             self.btn_jupyter_external = QtWidgets.QToolButton()
@@ -1374,6 +1387,7 @@ class InteractiveProcessingTab(QtWidgets.QWidget):
             self.btn_jupyter_external.setAutoRaise(True)
             self.btn_jupyter_external.setEnabled(False)
             self.btn_jupyter_external.clicked.connect(self._open_jupyter_external)
+            _ensure_minimum(self.btn_jupyter_external)
             nav_layout.addWidget(self.btn_jupyter_external)
 
             nav_layout.addStretch(1)
