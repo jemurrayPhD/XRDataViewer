@@ -107,12 +107,6 @@ class PreferencesManager(QtCore.QObject):
         except Exception:
             return 6
 
-    def jupyter_root_directory(self) -> str:
-        path = str(self._data.get("interactive", {}).get("jupyter_root_dir", "")).strip()
-        if not path:
-            return str(default_documents_directory())
-        return path
-
     def preferred_colormap(self, variable: Optional[str]) -> Optional[str]:
         variables = self._data.get("colormaps", {}).get("variables", {})
         if isinstance(variables, dict) and variable:
@@ -220,7 +214,6 @@ class PreferencesDialog(QtWidgets.QDialog):
         self.spn_value_precision.setToolTip(
             "Number of decimal places used for value readouts and controls."
         )
-        self.spn_value_precision.valueChanged.connect(self._on_field_modified)
         form.addRow("Value precision", self.spn_value_precision)
 
         export_row = QtWidgets.QHBoxLayout()

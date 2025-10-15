@@ -714,12 +714,6 @@ class MultiViewGrid(QtWidgets.QWidget):
                     widget.setMinimumHeight(0)
                     widget.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
 
-        # Toolbar
-        bar = QtWidgets.QGridLayout()
-        bar.setContentsMargins(0, 0, 0, 0)
-        bar.setHorizontalSpacing(8)
-        bar.setVerticalSpacing(6)
-
         def _make_group(title: str, widgets: Iterable[QtWidgets.QWidget]) -> QtWidgets.QWidget:
             items = tuple(widgets)
             if not items:
@@ -730,24 +724,22 @@ class MultiViewGrid(QtWidgets.QWidget):
                 widget = items[0]
                 if isinstance(widget, QtWidgets.QAbstractButton):
                     widget.setToolTip(title)
-                    _tag_compact_buttons(widget)
                 return widget
 
             frame = QtWidgets.QFrame()
-            frame.setProperty("toolbarGroup", True)
+            frame.setProperty("modernSection", True)
             layout = QtWidgets.QVBoxLayout(frame)
-            layout.setContentsMargins(8, 6, 8, 6)
-            layout.setSpacing(4)
+            layout.setContentsMargins(10, 8, 10, 8)
+            layout.setSpacing(6)
 
             label = QtWidgets.QLabel(title)
-            label.setProperty("toolbarGroupLabel", True)
+            label.setProperty("modernSectionTitle", True)
             layout.addWidget(label)
 
             row = QtWidgets.QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(4)
+            row.setSpacing(6)
             for widget in items:
-                _tag_compact_buttons(widget)
                 row.addWidget(widget)
             layout.addLayout(row)
             return frame
