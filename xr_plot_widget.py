@@ -530,6 +530,10 @@ class ScientificAxisItem(pg.AxisItem):
 class MyHistogramLUT(pg.HistogramLUTItem):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        try:
+            self.vb.setDefaultPadding(0.0)
+        except Exception:
+            pass
         QtCore.QTimer.singleShot(0, self._suppress_all_stops)
 
     def mouseDoubleClickEvent(self, ev):
@@ -585,6 +589,17 @@ class CentralPlotWidget(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.glw = pg.GraphicsLayoutWidget()
+        try:
+            layout = self.glw.ci.layout
+        except Exception:
+            layout = None
+        if layout is not None:
+            try:
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setHorizontalSpacing(0)
+                layout.setVerticalSpacing(0)
+            except Exception:
+                pass
         axis_items = {
             "bottom": ScientificAxisItem("bottom"),
             "left": ScientificAxisItem("left"),
@@ -913,7 +928,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
                 container.setObjectName("HistogramContainer")
                 layout = QtWidgets.QVBoxLayout(container)
                 layout.setContentsMargins(0, 0, 0, 0)
-                layout.setSpacing(4)
+                layout.setSpacing(2)
                 label = QtWidgets.QLabel("")
                 label.setAlignment(QtCore.Qt.AlignCenter)
                 label.setWordWrap(True)
@@ -925,6 +940,17 @@ class CentralPlotWidget(QtWidgets.QWidget):
                 glw.setSizePolicy(
                     QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
                 )
+                try:
+                    gl_layout = glw.ci.layout
+                except Exception:
+                    gl_layout = None
+                if gl_layout is not None:
+                    try:
+                        gl_layout.setContentsMargins(0, 0, 0, 0)
+                        gl_layout.setHorizontalSpacing(0)
+                        gl_layout.setVerticalSpacing(0)
+                    except Exception:
+                        pass
                 layout.addWidget(glw, 1)
                 self._colorbar_label_widget = label
                 self._hist_container = container

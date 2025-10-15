@@ -66,6 +66,8 @@ class ColorButton(QtWidgets.QPushButton):
         )
 
 class PlotAnnotationDialog(QtWidgets.QDialog):
+    applied = QtCore.Signal(PlotAnnotationConfig)
+
     def __init__(
         self,
         parent=None,
@@ -77,6 +79,7 @@ class PlotAnnotationDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Set plot annotations")
         self._result: Optional[PlotAnnotationConfig] = None
+        self._apply_button: Optional[QtWidgets.QPushButton] = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -172,9 +175,14 @@ class PlotAnnotationDialog(QtWidgets.QDialog):
             hint.setStyleSheet("color: #555;")
             layout.addWidget(hint)
 
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel | QtWidgets.QDialogButtonBox.Apply
+        )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        self._apply_button = buttons.button(QtWidgets.QDialogButtonBox.Apply)
+        if self._apply_button is not None:
+            self._apply_button.clicked.connect(self._on_apply_clicked)
         layout.addWidget(buttons)
 
     def annotation_config(self) -> Optional[PlotAnnotationConfig]:
@@ -184,9 +192,9 @@ class PlotAnnotationDialog(QtWidgets.QDialog):
         self.cmb_legend_position.setEnabled(enabled)
         self.edit_legend_entries.setEnabled(enabled)
 
-    def accept(self):
+    def _gather_config(self) -> PlotAnnotationConfig:
         font = self.font_combo.currentFont()
-        config = PlotAnnotationConfig(
+        return PlotAnnotationConfig(
             title=self.edit_title.text(),
             xlabel=self.edit_xlabel.text(),
             ylabel=self.edit_ylabel.text(),
@@ -202,16 +210,26 @@ class PlotAnnotationDialog(QtWidgets.QDialog):
             legend_entries=[line.strip() for line in self.edit_legend_entries.toPlainText().splitlines() if line.strip()],
             legend_position=self.cmb_legend_position.currentText(),
         )
+    def accept(self):
+        config = self._gather_config()
         self._result = config
         super().accept()
 
+    def _on_apply_clicked(self):
+        config = self._gather_config()
+        self._result = config
+        self.applied.emit(config)
+
 
 class LineStyleDialog(QtWidgets.QDialog):
+    applied = QtCore.Signal(LineStyleConfig)
+
     def __init__(self, parent=None, *, initial: Optional[LineStyleConfig] = None):
         super().__init__(parent)
         self.setWindowTitle("Configure line style")
         self._result: Optional[LineStyleConfig] = None
         initial = initial or LineStyleConfig()
+        self._apply_button: Optional[QtWidgets.QPushButton] = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -309,9 +327,14 @@ class LineStyleDialog(QtWidgets.QDialog):
         self._update_marker_controls(self.chk_markers.isChecked())
         self._update_opacity_label(self.sld_opacity.value())
 
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel | QtWidgets.QDialogButtonBox.Apply
+        )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        self._apply_button = buttons.button(QtWidgets.QDialogButtonBox.Apply)
+        if self._apply_button is not None:
+            self._apply_button.clicked.connect(self._on_apply_clicked)
         layout.addWidget(buttons)
 
     def _update_line_controls(self):
@@ -332,8 +355,8 @@ class LineStyleDialog(QtWidgets.QDialog):
     def line_style(self) -> Optional[LineStyleConfig]:
         return self._result
 
-    def accept(self):
-        config = LineStyleConfig(
+    def _gather_style(self) -> LineStyleConfig:
+        return LineStyleConfig(
             color=self.btn_color.color(),
             opacity=self.sld_opacity.value() / 100.0,
             width=self.spin_width.value(),
@@ -345,5 +368,13 @@ class LineStyleDialog(QtWidgets.QDialog):
             marker_size=self.spin_marker_size.value(),
             show_line=self.chk_show_line.isChecked(),
         )
+
+    def accept(self):
+        config = self._gather_style()
         self._result = config
         super().accept()
+
+    def _on_apply_clicked(self):
+        config = self._gather_style()
+        self._result = config
+        self.applied.emit(config)

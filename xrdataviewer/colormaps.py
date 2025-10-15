@@ -13,7 +13,7 @@ application start-up to ensure the maps are registered exactly once.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -357,6 +357,19 @@ _SCIENTIFIC_COLOURMAPS: Tuple[_ScientificMap, ...] = (
     ),
 )
 
+_SCIENTIFIC_NAME_SET: Set[str] = {m.name for m in _SCIENTIFIC_COLOURMAPS}
+_SCIENTIFIC_BY_NAME: Dict[str, _ScientificMap] = {m.name: m for m in _SCIENTIFIC_COLOURMAPS}
+_DEFAULT_FALLBACKS: Tuple[str, ...] = (
+    "gray",
+    "viridis",
+    "plasma",
+    "inferno",
+    "magma",
+    "cividis",
+    "turbo",
+)
+_REGISTERED_MAP_OBJECTS: Dict[str, "pg.ColorMap"] = {}
+
 
 _REGISTERED = False
 
@@ -400,6 +413,12 @@ def register_scientific_colormaps() -> Sequence[str]:
         elif existing:
             already_registered = cmap.name in existing
         if already_registered:
+            try:
+                current = pg.colormap.get(cmap.name)
+            except Exception:
+                current = None
+            if current is not None:
+                _REGISTERED_MAP_OBJECTS[cmap.name] = current
             continue
         positions = np.linspace(0.0, 1.0, num=len(cmap.stops))
         colors = np.array([_hex_to_rgb_stop(stop) for stop in cmap.stops], dtype=float)
@@ -411,11 +430,26 @@ def register_scientific_colormaps() -> Sequence[str]:
                 color_map = pg.colormap.ColorMap(positions, colors, mode="rgb")
             except (TypeError, KeyError):  # pragma: no cover - legacy fallback
                 color_map = pg.colormap.ColorMap(positions, colors)
+        _REGISTERED_MAP_OBJECTS[cmap.name] = color_map
         register = getattr(pg.colormap, "register", None)
         if callable(register):  # pragma: no branch - very small helper
             register(cmap.name, color_map)
         elif hasattr(color_map, "save"):
             color_map.save(cmap.name)  # type: ignore[attr-defined]
+        try:
+            from pyqtgraph.graphicsItems import GradientEditorItem
+
+            if cmap.name not in GradientEditorItem.Gradients:
+                ticks = [
+                    (float(pos), (_hex_to_rgb_stop(stop) + (255,)))
+                    for pos, stop in zip(positions, cmap.stops)
+                ]
+                GradientEditorItem.Gradients[cmap.name] = {  # type: ignore[attr-defined]
+                    "mode": "rgb",
+                    "ticks": ticks,
+                }
+        except Exception:
+            pass
 
     _REGISTERED = True
     return tuple(names)
@@ -425,4 +459,85 @@ def scientific_colormap_names() -> Sequence[str]:
     """Expose the ordered list of bundled scientific colour map names."""
 
     return tuple(m.name for m in _SCIENTIFIC_COLOURMAPS)
+
+
+def available_colormap_names() -> List[str]:
+    """Return a union of scientific and runtime-provided colormap names."""
+
+    if pg is None:
+        return list(_DEFAULT_FALLBACKS)
+
+    register_scientific_colormaps()
+
+    names: List[str] = []
+    seen: Set[str] = set()
+
+    for name in scientific_colormap_names():
+        if name not in seen:
+            names.append(name)
+            seen.add(name)
+
+    try:
+        runtime_maps = list(pg.colormap.listMaps())
+    except Exception:
+        runtime_maps = []
+
+    for name in runtime_maps:
+        if not name or name in seen:
+            continue
+        names.append(name)
+        seen.add(name)
+
+    for name in _DEFAULT_FALLBACKS:
+        if name not in seen:
+            names.append(name)
+            seen.add(name)
+
+    return names
+
+
+def is_scientific_colormap(name: str) -> bool:
+    """Return True if *name* refers to one of the bundled scientific maps."""
+
+    return str(name) in _SCIENTIFIC_NAME_SET
+
+
+def get_colormap(name: str) -> Optional["pg.ColorMap"]:
+    """Resolve a colour map by name, including bundled scientific entries."""
+
+    if not name or pg is None:
+        return None
+
+    register_scientific_colormaps()
+
+    try:
+        cmap = pg.colormap.get(name)
+    except Exception:
+        cmap = None
+
+    if cmap is not None:
+        _REGISTERED_MAP_OBJECTS[name] = cmap
+        return cmap
+
+    cached = _REGISTERED_MAP_OBJECTS.get(name)
+    if cached is not None:
+        return cached
+
+    spec = _SCIENTIFIC_BY_NAME.get(name)
+    if spec is None:
+        return None
+
+    positions = np.linspace(0.0, 1.0, num=len(spec.stops))
+    colors = np.array([_hex_to_rgb_stop(stop) for stop in spec.stops], dtype=float)
+    colors /= 255.0
+    try:
+        cmap = pg.colormap.ColorMap(positions, colors, mapping="rgb")
+    except (TypeError, KeyError):  # pragma: no cover - compatibility fallback
+        try:
+            cmap = pg.colormap.ColorMap(positions, colors, mode="rgb")
+        except (TypeError, KeyError):  # pragma: no cover - legacy fallback
+            cmap = pg.colormap.ColorMap(positions, colors)
+
+    _REGISTERED_MAP_OBJECTS[name] = cmap
+    return cmap
 

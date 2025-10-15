@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 from app_logging import log_action
 
-from ..colormaps import register_scientific_colormaps, scientific_colormap_names
+from ..colormaps import available_colormap_names, get_colormap, is_scientific_colormap
 from ..preferences import PreferencesManager
 from ..utils import ask_layout_label, ensure_extension, image_with_label, save_snapshot
 
@@ -148,10 +148,9 @@ class VolumeAlphaCurveWidget(QtWidgets.QWidget):
         eff = self._effective_rect()
         w = int(width or max(2.0, eff.width()))
         h = int(height or max(2.0, eff.height()))
-        try:
-            cmap = pg.colormap.get(self._colormap_name)
-        except Exception:
-            cmap = pg.colormap.get("viridis")
+        cmap = get_colormap(self._colormap_name) or get_colormap("viridis")
+        if cmap is None:
+            return
         lut = cmap.map(np.linspace(0.0, 1.0, max(2, w)), mode="byte")
         gradient = np.repeat(lut[np.newaxis, :, :3], max(2, h), axis=0)
         alpha = np.full((gradient.shape[0], gradient.shape[1], 1), 255, dtype=np.uint8)
@@ -328,25 +327,9 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
         self.cmb_colormap.currentIndexChanged.connect(self._on_colormap_combo_changed)
         block_combo = self.cmb_colormap.blockSignals(True)
-        scientific_names = set(register_scientific_colormaps())
-        try:
-            available = sorted(pg.colormap.listMaps())
-        except Exception:
-            available = ["gray", "viridis", "plasma", "inferno", "magma", "cividis", "turbo"]
-        ordered: List[str] = []
-        for name in scientific_colormap_names():
-            if name in available and name not in ordered:
-                ordered.append(name)
-        for name in available:
-            if name not in ordered:
-                ordered.append(name)
-        for name in ordered:
-            try:
-                pg.colormap.get(name)
-            except Exception:
-                continue
+        for name in available_colormap_names():
             label = name.replace("_", " ").title()
-            if name in scientific_names:
+            if is_scientific_colormap(name):
                 label = f"{label} (Scientific)"
             self.cmb_colormap.addItem(label, name)
         self.cmb_colormap.blockSignals(block_combo)
@@ -582,10 +565,9 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
     def _compute_rgba_volume(self, scalar: np.ndarray) -> np.ndarray:
         if scalar.size == 0:
             return np.zeros(scalar.shape + (4,), dtype=np.ubyte)
-        try:
-            cmap = pg.colormap.get(self._colormap_name)
-        except Exception:
-            cmap = pg.colormap.get("viridis")
+        cmap = get_colormap(self._colormap_name) or get_colormap("viridis")
+        if cmap is None:
+            return np.zeros(scalar.shape + (4,), dtype=np.ubyte)
         data_min = float(self._data_min)
         data_max = float(self._data_max)
         if not np.isfinite(data_min) or not np.isfinite(data_max) or data_min == data_max:
@@ -677,26 +659,13 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
         self.view.update()
 
     def _populate_colormap_choices(self):
-        candidates = [
-            "gray",
-            "viridis",
-            "plasma",
-            "inferno",
-            "magma",
-            "cividis",
-            "turbo",
-            "thermal",
-            "blues",
-            "reds",
-        ]
         self.cmb_colormap.blockSignals(True)
         self.cmb_colormap.clear()
-        for name in candidates:
-            try:
-                pg.colormap.get(name)
-            except Exception:
-                continue
-            self.cmb_colormap.addItem(name.title(), name)
+        for name in available_colormap_names():
+            label = name.replace("_", " ").title()
+            if is_scientific_colormap(name):
+                label = f"{label} (Scientific)"
+            self.cmb_colormap.addItem(label, name)
         if self.cmb_colormap.count() == 0:
             self.cmb_colormap.addItem("Viridis", "viridis")
         self.cmb_colormap.blockSignals(False)

@@ -25,7 +25,7 @@ from xr_coords import guess_phys_coords
 from xr_plot_widget import CentralPlotWidget, PlotAnnotationConfig, ScientificAxisItem
 
 from ..annotations import LineStyleDialog, PlotAnnotationDialog
-from ..colormaps import register_scientific_colormaps, scientific_colormap_names
+from ..colormaps import available_colormap_names, get_colormap, is_scientific_colormap
 from ..datasets import DataSetRef, HighDimVarRef, MemoryDatasetRef, VarRef
 from ..preferences import PreferencesManager
 from ..processing import apply_processing_step, ProcessingManager, ProcessingSelectionDialog
@@ -466,39 +466,11 @@ class SequentialView(QtWidgets.QWidget):
 
     # ---------- dataset helpers ----------
     def _populate_colormap_choices(self):
-        scientific_names = set(register_scientific_colormaps())
-        try:
-            available = sorted(pg.colormap.listMaps())
-        except Exception:
-            available = [
-                "gray",
-                "viridis",
-                "plasma",
-                "inferno",
-                "magma",
-                "cividis",
-                "turbo",
-            ]
-        ordered: List[str] = []
-        for name in scientific_colormap_names():
-            if name in available and name not in ordered:
-                ordered.append(name)
-        fallbacks = ["gray", "viridis", "plasma", "inferno", "magma", "cividis", "turbo", "thermal"]
-        for name in fallbacks:
-            if name in available and name not in ordered:
-                ordered.append(name)
-        for name in available:
-            if name not in ordered:
-                ordered.append(name)
         self.cmb_colormap.blockSignals(True)
         self.cmb_colormap.clear()
-        for name in ordered:
-            try:
-                pg.colormap.get(name)
-            except Exception:
-                continue
+        for name in available_colormap_names():
             label = name.replace("_", " ").title()
-            if name in scientific_names:
+            if is_scientific_colormap(name):
                 label = f"{label} (Scientific)"
             self.cmb_colormap.addItem(label, name)
         if self.cmb_colormap.count() == 0:
@@ -523,13 +495,17 @@ class SequentialView(QtWidgets.QWidget):
         if not hasattr(self, "viewer"):
             return
         name = self.cmb_colormap.currentData()
-        if not name or name == "default":
-            target = "viridis"
-        else:
+        target = None
+        if name and name != "default":
             target = str(name)
-        try:
-            cmap = pg.colormap.get(target)
-        except Exception:
+        elif self.preferences is not None:
+            target = self.preferences.preferred_colormap(self._current_variable)
+            if not target:
+                target = self.preferences.preferred_colormap(None)
+        if not target:
+            target = "viridis"
+        cmap = get_colormap(str(target))
+        if cmap is None:
             return
         try:
             self.viewer.lut.gradient.setColorMap(cmap)
@@ -1262,6 +1238,7 @@ class SequentialView(QtWidgets.QWidget):
             allow_apply_all=False,
             template_hint=hint,
         )
+        dialog.applied.connect(lambda config: self._apply_annotation_from_dialog(config))
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         config = dialog.annotation_config()
@@ -1271,11 +1248,28 @@ class SequentialView(QtWidgets.QWidget):
         self._annotation_config = config
         self._apply_viewer_annotations()
 
+    def _apply_annotation_from_dialog(self, config: PlotAnnotationConfig) -> None:
+        if config is None:
+            return
+        self._annotation_config = replace(config, apply_to_all=False)
+        self._apply_viewer_annotations()
+
     def _open_line_style_dialog(self):
         dialog = LineStyleDialog(self, initial=self._line_style)
+        dialog.applied.connect(self._apply_line_style_from_dialog)
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         style = dialog.line_style()
+        if style is None:
+            return
+        self._line_style = style
+        try:
+            self.viewer.set_line_style(self._line_style, refresh=True)
+        except Exception:
+            pass
+        self._update_line_style_button()
+
+    def _apply_line_style_from_dialog(self, style: LineStyleConfig) -> None:
         if style is None:
             return
         self._line_style = style
@@ -1303,6 +1297,7 @@ class SequentialView(QtWidgets.QWidget):
             self,
             dims=dims if dims else None,
         )
+        dialog.applied.connect(self._apply_processing_selection)
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         mode, params = dialog.selected_processing()
@@ -1316,6 +1311,12 @@ class SequentialView(QtWidgets.QWidget):
         self._processing_params = {}
         self._invalidate_volume_cache()
         self._update_slice_display(autorange=True)
+
+    def _apply_processing_selection(self, mode: str, params: Dict[str, object]) -> None:
+        self._processing_mode = mode
+        self._processing_params = dict(params)
+        self._invalidate_volume_cache()
+        self._update_slice_display()
 
     def _default_layout_label(self) -> str:
         if self.preferences:

@@ -21,6 +21,7 @@ from xr_plot_widget import (
 )
 
 from ..annotations import LineStyleDialog, PlotAnnotationDialog
+from ..colormaps import available_colormap_names, get_colormap, is_scientific_colormap
 from ..datasets import (
     DataSetRef,
     HighDimVarRef,
@@ -218,9 +219,15 @@ class ViewerFrame(QtWidgets.QFrame):
 
     def _open_line_style_dialog(self):
         dialog = LineStyleDialog(self, initial=self.line_style_config())
+        dialog.applied.connect(self._apply_line_style_dialog_result)
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         style = dialog.line_style()
+        if style is None:
+            return
+        self._apply_line_style_dialog_result(style)
+
+    def _apply_line_style_dialog_result(self, style: LineStyleConfig) -> None:
         if style is None:
             return
         self.set_line_style_config(style, refresh=True)
@@ -232,6 +239,19 @@ class ViewerFrame(QtWidgets.QFrame):
 
     def is_line_display(self) -> bool:
         return self._display_mode == "line"
+
+    def apply_colormap(self, name: str) -> bool:
+        if self._display_mode == "line":
+            return False
+        cmap = get_colormap(name)
+        if cmap is None:
+            return False
+        try:
+            self.viewer.lut.gradient.setColorMap(cmap)
+            self.viewer.lut.rehide_stops()
+        except Exception:
+            return False
+        return True
 
     def set_dataset(self, dataset: xr.Dataset, path: Path, *, select: Optional[str] = None):
         self._dispose_dataset()
@@ -435,12 +455,7 @@ class ViewerFrame(QtWidgets.QFrame):
             return
         cmap_name = prefs.preferred_colormap(self._current_variable)
         if cmap_name:
-            try:
-                cmap = pg.colormap.get(cmap_name)
-                self.viewer.lut.gradient.setColorMap(cmap)
-                self.viewer.lut.rehide_stops()
-            except Exception:
-                pass
+            self.apply_colormap(cmap_name)
         if prefs.autoscale_on_load():
             try:
                 self.viewer.autoscale_levels()
@@ -813,6 +828,9 @@ class MultiViewGrid(QtWidgets.QWidget):
         self.btn_annotations = QtWidgets.QPushButton("Set annotations…")
         self.btn_annotations.clicked.connect(self._open_annotation_dialog)
 
+        self.btn_set_colormap = QtWidgets.QPushButton("Set colormap…")
+        self.btn_set_colormap.clicked.connect(self._open_colormap_dialog)
+
         toolbar_groups = [
             _make_group(
                 "Layout",
@@ -825,6 +843,7 @@ class MultiViewGrid(QtWidgets.QWidget):
             ),
             _make_group("Processing", (self.btn_apply_processing,)),
             _make_group("Style", (self.btn_line_style, self.btn_annotations)),
+            _make_group("Color", (self.btn_set_colormap,)),
             _make_group("Export", (self.btn_export,)),
         ]
 
@@ -1174,15 +1193,41 @@ class MultiViewGrid(QtWidgets.QWidget):
         initial = frames[0].annotation_defaults()
         initial.apply_to_all = False
         dialog = PlotAnnotationDialog(self, initial=initial, allow_apply_all=True)
+        dialog.applied.connect(lambda config: self._apply_annotation_dialog_result(config, frames))
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         config = dialog.annotation_config()
+        if config is None:
+            return
+        self._apply_annotation_dialog_result(config, frames)
+
+    def _apply_annotation_dialog_result(
+        self, config: PlotAnnotationConfig, frames: List["ViewerFrame"]
+    ) -> None:
         if config is None:
             return
         targets = self.frames if config.apply_to_all else frames
         base = replace(config, apply_to_all=False)
         for frame in targets:
             frame.apply_annotation(base)
+
+    def _apply_line_style(self, style: LineStyleConfig, targets: List["ViewerFrame"]) -> None:
+        if style is None:
+            return
+        for fr in targets:
+            fr.set_line_style_config(style, refresh=True)
+        log_action(f"Updated line style for {len(targets)} plot(s)")
+        self._update_apply_button_state()
+
+    def _apply_processing_selection(
+        self, mode: str, params: Dict[str, object], frames: List["ViewerFrame"]
+    ) -> None:
+        for frame in frames:
+            try:
+                frame.apply_processing(mode, params, self.processing_manager)
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(self, "Processing failed", str(exc))
+                break
 
     def _open_line_style_dialog(self):
         frames = self.selected_frames()
@@ -1198,15 +1243,67 @@ class MultiViewGrid(QtWidgets.QWidget):
             )
             return
         dialog = LineStyleDialog(self, initial=targets[0].line_style_config())
+        dialog.applied.connect(lambda style: self._apply_line_style(style, targets))
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         style = dialog.line_style()
         if style is None:
             return
-        for fr in targets:
-            fr.set_line_style_config(style, refresh=True)
-        log_action(f"Updated line style for {len(targets)} plot(s)")
-        self._update_apply_button_state()
+        self._apply_line_style(style, targets)
+
+    def _open_colormap_dialog(self):
+        frames = [fr for fr in self.selected_frames() if not fr.is_line_display()]
+        if not frames:
+            frames = [fr for fr in self.frames if not fr.is_line_display()]
+        if not frames:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No images",
+                "Select at least one 2D plot before setting a colormap.",
+            )
+            return
+        names = available_colormap_names()
+        if not names:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "No colormaps",
+                "No colormaps are available to apply.",
+            )
+            return
+        options = []
+        for name in names:
+            label = name.replace("_", " ").title()
+            if is_scientific_colormap(name):
+                label = f"{label} (Scientific)"
+            options.append((label, name))
+        labels = [label for label, _ in options]
+        selection, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "Select colormap",
+            "Colormap:",
+            labels,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        try:
+            index = labels.index(selection)
+        except ValueError:
+            return
+        chosen = options[index][1]
+        applied = 0
+        for frame in frames:
+            if frame.apply_colormap(chosen):
+                applied += 1
+        if applied:
+            log_action(f"Applied colormap '{chosen}' to {applied} plot(s)")
+        else:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Colormap",
+                "Unable to apply the selected colormap to the chosen plots.",
+            )
 
     # ---------- export helpers ----------
     def _on_preferences_changed(self, _data):
@@ -1331,15 +1428,11 @@ class MultiViewGrid(QtWidgets.QWidget):
             self,
             dims=dims if dims else None,
         )
+        dialog.applied.connect(lambda mode, params: self._apply_processing_selection(mode, params, frames))
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         mode, params = dialog.selected_processing()
-        for frame in frames:
-            try:
-                frame.apply_processing(mode, params, self.processing_manager)
-            except Exception as exc:
-                QtWidgets.QMessageBox.warning(self, "Processing failed", str(exc))
-                break
+        self._apply_processing_selection(mode, params, frames)
 
 
     def _reflow(self):

@@ -18,7 +18,7 @@ from xr_plot_widget import (
 )
 
 from ..annotations import LineStyleDialog, PlotAnnotationDialog
-from ..colormaps import register_scientific_colormaps, scientific_colormap_names
+from ..colormaps import available_colormap_names, get_colormap, is_scientific_colormap
 from ..datasets import (
     MemoryDatasetRegistry,
     MemorySliceRef,
@@ -350,8 +350,10 @@ class OverlayLayer(QtCore.QObject):
         self.colormap_name = name or "viridis"
         if not self.supports_colormap():
             return
+        cmap = get_colormap(self.colormap_name)
+        if cmap is None:
+            return
         try:
-            cmap = pg.colormap.get(self.colormap_name)
             if hasattr(cmap, "getLookupTable"):
                 lut = cmap.getLookupTable(0.0, 1.0, 256)
                 self.graphics_item.setLookupTable(lut)
@@ -622,21 +624,9 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.cmb_colormap.setMinimumContentsLength(12)
         self.cmb_colormap.setMinimumWidth(200)
-        scientific_names = set(register_scientific_colormaps())
-        try:
-            cmaps = sorted(pg.colormap.listMaps())
-        except Exception:
-            cmaps = ["viridis", "plasma", "magma", "cividis", "gray"]
-        ordered: List[str] = []
-        for name in scientific_colormap_names():
-            if name in cmaps and name not in ordered:
-                ordered.append(name)
-        for name in cmaps:
-            if name not in ordered:
-                ordered.append(name)
-        for name in ordered:
+        for name in available_colormap_names():
             label = name.replace("_", " ").title()
-            if name in scientific_names:
+            if is_scientific_colormap(name):
                 label = f"{label} (Scientific)"
             self.cmb_colormap.addItem(label, name)
         self.cmb_colormap.currentTextChanged.connect(self._on_colormap)
@@ -1108,9 +1098,15 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         if not self.layer.is_line_layer():
             return
         dialog = LineStyleDialog(self, initial=self.layer.line_style_config())
+        dialog.applied.connect(self._apply_line_style_from_dialog)
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         style = dialog.line_style()
+        if style is None:
+            return
+        self._apply_line_style_from_dialog(style)
+
+    def _apply_line_style_from_dialog(self, style: LineStyleConfig) -> None:
         if style is None:
             return
         self.layer.set_line_style(style)
@@ -1550,6 +1546,7 @@ class OverlayView(QtWidgets.QWidget):
         if self._annotation_config is not None:
             initial = replace(self._annotation_config, apply_to_all=False)
         dialog = PlotAnnotationDialog(self, initial=initial, allow_apply_all=False)
+        dialog.applied.connect(self._apply_annotation_from_dialog)
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
         config = dialog.annotation_config()
@@ -1562,6 +1559,14 @@ class OverlayView(QtWidgets.QWidget):
             config,
             background_widget=self.glw,
         )
+        self._apply_legend_config(config)
+
+    def _apply_annotation_from_dialog(self, config: PlotAnnotationConfig) -> None:
+        if config is None:
+            return
+        config = replace(config, apply_to_all=False)
+        self._annotation_config = config
+        apply_plotitem_annotation(self.plot, config, background_widget=self.glw)
         self._apply_legend_config(config)
 
     def set_preferences(self, preferences: Optional[PreferencesManager]):
