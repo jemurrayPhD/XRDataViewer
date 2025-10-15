@@ -11,6 +11,8 @@ from PySide2 import QtCore, QtGui, QtWidgets, QtUiTools
 
 from app_logging import ACTION_LOGGER, log_action
 
+from .appearance import build_stylesheet
+from .colormaps import register_scientific_colormaps
 from .datasets import DatasetsPane, SliceDataTab
 from .interactive import InteractiveBridgeServer, InteractiveProcessingTab
 from .logging.panel import LoggingDockWidget
@@ -19,6 +21,20 @@ from .processing import ProcessingDockContainer, ProcessingDockWidget, Processin
 from .views.multiview import MultiViewGrid
 from .views.overlay import OverlayView
 from .views.sequential import SequentialView
+from .widget_sizes import enable_widget_size_overlays
+
+def _supports_button_word_wrap() -> bool:
+    """Return True if the Qt build exposes a wordWrap property on buttons."""
+
+    checkbox = QtWidgets.QCheckBox()
+    radio = QtWidgets.QRadioButton()
+    try:
+        has_checkbox = checkbox.metaObject().indexOfProperty("wordWrap") >= 0
+        has_radio = radio.metaObject().indexOfProperty("wordWrap") >= 0
+    finally:
+        checkbox.deleteLater()
+        radio.deleteLater()
+    return has_checkbox and has_radio
 
 
 class StartupSplash(QtWidgets.QWidget):
@@ -188,6 +204,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Dataset Multi-Viewer")
 
         self.preferences = PreferencesManager()
+        self.preferences.changed.connect(self._on_preferences_changed)
+        self._current_stylesheet = ""
+        self._button_word_wrap_supported = _supports_button_word_wrap()
         self.processing_manager = ProcessingManager()
         self._startup_splash = startup_splash
 
@@ -242,6 +261,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_interactive = InteractiveProcessingTab(
             self.datasets,
             self.bridge_server,
+            preferences=self.preferences,
             startup_callbacks=startup_callbacks,
         )
         self.tabs.addTab(self.tab_interactive, "Interactive Processing")
@@ -250,12 +270,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.log_dock)
         self.log_dock.setFloating(False)
         self.log_dock.resize(800, 200)
+        self.log_dock.setCollapsed(True)
 
         self.resize(1220, 780)
         self.setMinimumSize(920, 640)
 
         if self._startup_splash is not None and not self.tab_interactive.has_embedded_jupyter:
             self._startup_splash.notify_no_jupyter()
+
+        self._on_preferences_changed(self.preferences.data())
+        try:
+            enable_widget_size_overlays()
+        except RuntimeError:
+            pass
 
     def closeEvent(self, event: QtGui.QCloseEvent):  # type: ignore[override]
         try:
@@ -270,18 +297,25 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_menus(self):
         menubar = self.menuBar()
-        prefs_menu = menubar.addMenu("Preferences")
+        if not isinstance(menubar, QtWidgets.QMenuBar):
+            menubar = QtWidgets.QMenuBar(self)
+            self.setMenuBar(menubar)
+        prefs_menu = QtWidgets.QMenu("Preferences", menubar)
+        menubar.addMenu(prefs_menu)
 
-        act_edit = prefs_menu.addAction("Edit preferences…")
+        act_edit = QtWidgets.QAction("Edit preferences…", self)
         act_edit.triggered.connect(self._edit_preferences)
+        prefs_menu.addAction(act_edit)
 
         prefs_menu.addSeparator()
 
-        act_load = prefs_menu.addAction("Load preferences…")
+        act_load = QtWidgets.QAction("Load preferences…", self)
         act_load.triggered.connect(self._load_preferences)
+        prefs_menu.addAction(act_load)
 
-        act_save = prefs_menu.addAction("Save preferences…")
+        act_save = QtWidgets.QAction("Save preferences…", self)
         act_save.triggered.connect(self._save_preferences)
+        prefs_menu.addAction(act_save)
 
     def _edit_preferences(self):
         dialog = PreferencesDialog(self.preferences, self)
@@ -367,6 +401,7 @@ def main() -> None:
     """Start the Qt application with the splash screen and main window."""
 
     app = QtWidgets.QApplication([])
+    enable_widget_size_overlays()
     pg.setConfigOptions(imageAxisOrder="row-major")
     splash = StartupSplash()
     splash_holder: Dict[str, Optional[StartupSplash]] = {"widget": splash}

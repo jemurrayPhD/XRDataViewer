@@ -18,6 +18,7 @@ from xr_plot_widget import (
 )
 
 from ..annotations import LineStyleDialog, PlotAnnotationDialog
+from ..colormaps import register_scientific_colormaps, scientific_colormap_names
 from ..datasets import (
     MemoryDatasetRegistry,
     MemorySliceRef,
@@ -621,12 +622,23 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.cmb_colormap.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.cmb_colormap.setMinimumContentsLength(12)
         self.cmb_colormap.setMinimumWidth(200)
+        scientific_names = set(register_scientific_colormaps())
         try:
             cmaps = sorted(pg.colormap.listMaps())
         except Exception:
             cmaps = ["viridis", "plasma", "magma", "cividis", "gray"]
+        ordered: List[str] = []
+        for name in scientific_colormap_names():
+            if name in cmaps and name not in ordered:
+                ordered.append(name)
         for name in cmaps:
-            self.cmb_colormap.addItem(name)
+            if name not in ordered:
+                ordered.append(name)
+        for name in ordered:
+            label = name.replace("_", " ").title()
+            if name in scientific_names:
+                label = f"{label} (Scientific)"
+            self.cmb_colormap.addItem(label, name)
         self.cmb_colormap.currentTextChanged.connect(self._on_colormap)
         cmap_row.addWidget(self.cmb_colormap, 1)
         lay.addWidget(self._colormap_row)

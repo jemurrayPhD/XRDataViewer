@@ -29,6 +29,8 @@ class LoggingDockWidget(QtWidgets.QDockWidget):
 
         self._build_title_bar()
 
+        self.setCollapsed(False)
+
         clear_action = QtWidgets.QAction("Clear log", self)
         clear_action.triggered.connect(self._clear_log)
         self.addAction(clear_action)
@@ -53,7 +55,7 @@ class LoggingDockWidget(QtWidgets.QDockWidget):
         self._toggle_btn.setArrowType(QtCore.Qt.DownArrow)
         self._toggle_btn.setCheckable(True)
         self._toggle_btn.setChecked(True)
-        self._toggle_btn.clicked.connect(self._toggle_collapsed)
+        self._toggle_btn.toggled.connect(lambda checked: self.setCollapsed(not checked))
         layout.addWidget(self._toggle_btn, 0)
 
         label = QtWidgets.QLabel("Action Log")
@@ -70,17 +72,28 @@ class LoggingDockWidget(QtWidgets.QDockWidget):
         layout.addStretch(0)
         self.setTitleBarWidget(title_widget)
 
-    def _toggle_collapsed(self):
-        self._collapsed = not self._collapsed
-        self.widget().setVisible(not self._collapsed)
-        self._toggle_btn.setArrowType(
-            QtCore.Qt.RightArrow if self._collapsed else QtCore.Qt.DownArrow
-        )
+    def setCollapsed(self, collapsed: bool) -> None:
+        collapsed = bool(collapsed)
+        widget = self.widget()
+        self._collapsed = collapsed
+        block = self._toggle_btn.blockSignals(True)
+        self._toggle_btn.setChecked(not collapsed)
+        self._toggle_btn.blockSignals(block)
+        if widget is not None:
+            widget.setVisible(not collapsed)
+        self._toggle_btn.setArrowType(QtCore.Qt.RightArrow if collapsed else QtCore.Qt.DownArrow)
+        if collapsed:
+            title_height = self.titleBarWidget().sizeHint().height() if self.titleBarWidget() else 24
+            self.setMaximumHeight(title_height + 8)
+        else:
+            self.setMaximumHeight(16777215)
+        self.updateGeometry()
 
     def _append(self, entry: str):
         self._view.appendPlainText(entry)
         bar = self._view.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        if isinstance(bar, QtWidgets.QAbstractSlider):
+            bar.setValue(bar.maximum())
 
     def _reset(self):
         self._view.clear()
