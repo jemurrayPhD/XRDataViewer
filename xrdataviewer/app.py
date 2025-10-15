@@ -372,30 +372,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if central is None:
             raise RuntimeError(f"Failed to load UI from {ui_path}: {loader.errorString()}")
 
+        placeholders = self._extract_ui_placeholders(central)
+        missing = [name for name, widget in placeholders.items() if widget is None]
+        if missing:
+            central.deleteLater()
+            central, placeholders = self._build_fallback_central()
+
         self.setCentralWidget(central)
 
-        main_splitter = central.findChild(QtWidgets.QSplitter, "mainSplitter")
-        left_splitter = central.findChild(QtWidgets.QSplitter, "leftSplitter")
-        tabs = central.findChild(QtWidgets.QTabWidget, "mainTabs")
-        dataset_host = central.findChild(QtWidgets.QWidget, "datasetsHost")
-        processing_host = central.findChild(QtWidgets.QWidget, "processingHost")
-        right_pane = central.findChild(QtWidgets.QWidget, "rightPane")
-
-        if None in (main_splitter, left_splitter, tabs, dataset_host, processing_host, right_pane):
-            raise RuntimeError("Main window UI is missing required widgets")
-
         central.setMinimumSize(920, 600)
-        tabs.setMinimumSize(780, 520)
-        right_pane.setMinimumWidth(780)
+        placeholders["tabs"].setMinimumSize(780, 520)
+        placeholders["right_pane"].setMinimumWidth(780)
 
-        return {
-            "central": central,
-            "main_splitter": main_splitter,
-            "left_splitter": left_splitter,
-            "tabs": tabs,
-            "dataset_host": dataset_host,
-            "processing_host": processing_host,
-        }
+        return placeholders
 
     def _apply_initial_geometry(self) -> None:
         screen = QtWidgets.QApplication.primaryScreen()
@@ -409,6 +398,109 @@ class MainWindow(QtWidgets.QMainWindow):
         frame = self.frameGeometry()
         frame.moveCenter(available.center())
         self.move(frame.topLeft())
+
+    def _extract_ui_placeholders(
+        self, central: QtWidgets.QWidget
+    ) -> Dict[str, QtWidgets.QWidget]:
+        """Return important widgets declared in the designer UI."""
+
+        return {
+            "central": central,
+            "main_splitter": central.findChild(QtWidgets.QSplitter, "mainSplitter"),
+            "left_splitter": central.findChild(QtWidgets.QSplitter, "leftSplitter"),
+            "tabs": central.findChild(QtWidgets.QTabWidget, "mainTabs"),
+            "dataset_host": central.findChild(QtWidgets.QWidget, "datasetsHost"),
+            "processing_host": central.findChild(QtWidgets.QWidget, "processingHost"),
+            "right_pane": central.findChild(QtWidgets.QWidget, "rightPane"),
+        }
+
+    def _build_fallback_central(self) -> (
+        QtWidgets.QWidget,
+        Dict[str, QtWidgets.QWidget],
+    ):
+        """Construct a manual layout if the designer file is incomplete."""
+
+        central = QtWidgets.QWidget(self)
+        central.setObjectName("MainWindowCentral")
+
+        outer_layout = QtWidgets.QVBoxLayout(central)
+        outer_layout.setObjectName("outerLayout")
+        outer_layout.setContentsMargins(12, 12, 12, 12)
+        outer_layout.setSpacing(12)
+
+        main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal, central)
+        main_splitter.setObjectName("mainSplitter")
+        main_splitter.setChildrenCollapsible(False)
+        main_splitter.setHandleWidth(10)
+        outer_layout.addWidget(main_splitter)
+
+        left_pane = QtWidgets.QWidget(main_splitter)
+        left_pane.setObjectName("leftPane")
+        left_layout = QtWidgets.QVBoxLayout(left_pane)
+        left_layout.setObjectName("leftPaneLayout")
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(12)
+
+        left_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical, left_pane)
+        left_splitter.setObjectName("leftSplitter")
+        left_splitter.setChildrenCollapsible(False)
+        left_splitter.setHandleWidth(8)
+        left_layout.addWidget(left_splitter)
+
+        datasets_section = QtWidgets.QWidget(left_splitter)
+        datasets_section.setObjectName("datasetsSection")
+        datasets_layout = QtWidgets.QVBoxLayout(datasets_section)
+        datasets_layout.setObjectName("datasetsSectionLayout")
+        datasets_layout.setContentsMargins(0, 0, 0, 0)
+        datasets_layout.setSpacing(0)
+
+        dataset_host = QtWidgets.QWidget(datasets_section)
+        dataset_host.setObjectName("datasetsHost")
+        dataset_host_layout = QtWidgets.QVBoxLayout(dataset_host)
+        dataset_host_layout.setObjectName("datasetsHostLayout")
+        dataset_host_layout.setContentsMargins(0, 0, 0, 0)
+        dataset_host_layout.setSpacing(0)
+        datasets_layout.addWidget(dataset_host)
+
+        processing_section = QtWidgets.QWidget(left_splitter)
+        processing_section.setObjectName("processingSection")
+        processing_layout = QtWidgets.QVBoxLayout(processing_section)
+        processing_layout.setObjectName("processingSectionLayout")
+        processing_layout.setContentsMargins(0, 0, 0, 0)
+        processing_layout.setSpacing(0)
+
+        processing_host = QtWidgets.QWidget(processing_section)
+        processing_host.setObjectName("processingHost")
+        processing_host_layout = QtWidgets.QVBoxLayout(processing_host)
+        processing_host_layout.setObjectName("processingHostLayout")
+        processing_host_layout.setContentsMargins(0, 0, 0, 0)
+        processing_host_layout.setSpacing(0)
+        processing_layout.addWidget(processing_host)
+
+        right_pane = QtWidgets.QWidget(main_splitter)
+        right_pane.setObjectName("rightPane")
+        right_layout = QtWidgets.QVBoxLayout(right_pane)
+        right_layout.setObjectName("rightPaneLayout")
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+
+        tabs = QtWidgets.QTabWidget(right_pane)
+        tabs.setObjectName("mainTabs")
+        tabs.setDocumentMode(True)
+        tabs.setMovable(True)
+        right_layout.addWidget(tabs)
+
+        placeholders = {
+            "central": central,
+            "main_splitter": main_splitter,
+            "left_splitter": left_splitter,
+            "tabs": tabs,
+            "dataset_host": dataset_host,
+            "processing_host": processing_host,
+            "right_pane": right_pane,
+        }
+
+        return central, placeholders
 
     def _on_preferences_changed(self, data: Optional[dict]):
         appearance = data.get("appearance") if isinstance(data, dict) else None
