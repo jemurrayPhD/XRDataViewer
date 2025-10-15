@@ -330,7 +330,10 @@ def register_scientific_colormaps() -> Sequence[str]:
         positions = np.linspace(0.0, 1.0, num=len(cmap.stops))
         colors = np.array([_hex_to_rgb_stop(stop) for stop in cmap.stops], dtype=float)
         colors /= 255.0
-        color_map = pg.colormap.ColorMap(positions, colors, cmap.name)
+        try:
+            color_map = pg.colormap.ColorMap(positions, colors, mapping="rgb")
+        except TypeError:  # pragma: no cover - compatibility fallback
+            color_map = pg.colormap.ColorMap(positions, colors, mode="rgb")
         register = getattr(pg.colormap, "register", None)
         if callable(register):  # pragma: no branch - very small helper
             register(cmap.name, color_map)
