@@ -306,9 +306,26 @@ def register_scientific_colormaps() -> Sequence[str]:
         return tuple(m.name for m in _SCIENTIFIC_COLOURMAPS)
 
     names: List[str] = []
+    has_map = getattr(pg.colormap, "hasMap", None)
+    list_maps = getattr(pg.colormap, "listMaps", None)
+    existing = set()
+    if callable(list_maps):  # pragma: no branch - compatibility shim
+        try:
+            existing = set(list_maps())
+        except Exception:
+            existing = set()
+
     for cmap in _SCIENTIFIC_COLOURMAPS:
         names.append(cmap.name)
-        if pg.colormap.hasMap(cmap.name):  # pragma: no cover - relies on runtime
+        already_registered = False
+        if callable(has_map):  # pragma: no branch - runtime compatibility
+            try:
+                already_registered = bool(has_map(cmap.name))
+            except Exception:
+                already_registered = False
+        elif existing:
+            already_registered = cmap.name in existing
+        if already_registered:
             continue
         positions = np.linspace(0.0, 1.0, num=len(cmap.stops))
         colors = np.array([_hex_to_rgb_stop(stop) for stop in cmap.stops], dtype=float)

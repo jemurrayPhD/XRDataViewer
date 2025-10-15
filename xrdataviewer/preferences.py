@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -19,6 +20,7 @@ from .appearance import (
     sanitize_profile_values,
 )
 from .colormaps import register_scientific_colormaps, scientific_colormap_names
+from .utils import default_documents_directory
 
 
 class PreferencesManager(QtCore.QObject):
@@ -41,6 +43,9 @@ class PreferencesManager(QtCore.QObject):
             },
             "misc": {
                 "default_export_dir": "",
+            },
+            "interactive": {
+                "jupyter_root_dir": str(default_documents_directory()),
             },
             "appearance": default_appearance(),
         }
@@ -76,6 +81,12 @@ class PreferencesManager(QtCore.QObject):
         misc = data.get("misc", {}) if isinstance(data, dict) else {}
         if isinstance(misc, dict):
             normalized["misc"].update(misc)
+        interactive = data.get("interactive", {}) if isinstance(data, dict) else {}
+        if isinstance(interactive, dict):
+            root = str(interactive.get("jupyter_root_dir", "")).strip()
+            if root:
+                expanded = os.path.expandvars(root)
+                normalized["interactive"]["jupyter_root_dir"] = str(Path(expanded).expanduser())
         appearance = data.get("appearance") if isinstance(data, dict) else None
         normalized["appearance"] = sanitize_appearance(appearance)
         self._data = normalized
@@ -95,6 +106,12 @@ class PreferencesManager(QtCore.QObject):
             return int(self._data.get("general", {}).get("value_precision", 6))
         except Exception:
             return 6
+
+    def jupyter_root_directory(self) -> str:
+        path = str(self._data.get("interactive", {}).get("jupyter_root_dir", "")).strip()
+        if not path:
+            return str(default_documents_directory())
+        return path
 
     def preferred_colormap(self, variable: Optional[str]) -> Optional[str]:
         variables = self._data.get("colormaps", {}).get("variables", {})
@@ -200,6 +217,16 @@ class PreferencesDialog(QtWidgets.QDialog):
         btn_browse.clicked.connect(self._browse_export_dir)
         export_row.addWidget(btn_browse)
         form.addRow("Default export folder", export_row)
+
+        jupyter_row = QtWidgets.QHBoxLayout()
+        self.txt_jupyter_root = QtWidgets.QLineEdit(
+            str(self._data.get("interactive", {}).get("jupyter_root_dir", ""))
+        )
+        jupyter_row.addWidget(self.txt_jupyter_root, 1)
+        btn_jupyter = QtWidgets.QPushButton("Browse…")
+        btn_jupyter.clicked.connect(self._browse_jupyter_root)
+        jupyter_row.addWidget(btn_jupyter)
+        form.addRow("Embedded Jupyter directory", jupyter_row)
 
         self.tabs.addTab(tab, "General")
 
@@ -346,6 +373,15 @@ class PreferencesDialog(QtWidgets.QDialog):
         if directory:
             self.txt_export_dir.setText(directory)
 
+    def _browse_jupyter_root(self):
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select embedded Jupyter directory",
+            self.txt_jupyter_root.text() or self.txt_export_dir.text(),
+        )
+        if directory:
+            self.txt_jupyter_root.setText(directory)
+
     def _add_colormap_mapping(self):
         var, ok = QtWidgets.QInputDialog.getText(self, "Variable name", "Variable name:")
         if not ok or not str(var).strip():
@@ -423,6 +459,9 @@ class PreferencesDialog(QtWidgets.QDialog):
         misc = {
             "default_export_dir": self.txt_export_dir.text().strip(),
         }
+        interactive = {
+            "jupyter_root_dir": self.txt_jupyter_root.text().strip(),
+        }
         appearance = {
             "font_family": self.cmb_font_family.currentData(),
             "font_size": float(self.spn_font_size.value()),
@@ -436,6 +475,7 @@ class PreferencesDialog(QtWidgets.QDialog):
             "general": general,
             "colormaps": colormaps,
             "misc": misc,
+            "interactive": interactive,
             "appearance": appearance,
         }
 
@@ -445,6 +485,13 @@ class PreferencesDialog(QtWidgets.QDialog):
         self.txt_layout_label.setText(str(data.get("general", {}).get("default_layout_label", "")))
         self.spn_value_precision.setValue(int(data.get("general", {}).get("value_precision", 6)))
         self.txt_export_dir.setText(str(data.get("misc", {}).get("default_export_dir", "")))
+        root_dir = str(data.get("interactive", {}).get("jupyter_root_dir", "")).strip()
+        if not root_dir:
+            try:
+                root_dir = self._manager.jupyter_root_directory()
+            except Exception:
+                root_dir = ""
+        self.txt_jupyter_root.setText(root_dir)
         default_cmap = str(data.get("colormaps", {}).get("default", ""))
         idx = self.cmb_default_cmap.findData(default_cmap)
         if idx < 0:

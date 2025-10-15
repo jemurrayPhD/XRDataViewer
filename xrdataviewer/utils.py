@@ -1,6 +1,8 @@
 """Utility helpers shared across XRDataViewer widgets."""
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
@@ -21,10 +23,31 @@ __all__ = [
     "ensure_extension",
     "open_dataset",
     "FORCE_XARRAY_ENGINE",
+    "default_documents_directory",
 ]
 
 
 FORCE_XARRAY_ENGINE: Optional[str] = None
+
+
+def default_documents_directory() -> Path:
+    """Return the user's documents folder or, as a fallback, their home."""
+
+    home = Path.home()
+    candidates = []
+    if sys.platform.startswith("win"):
+        user_profile = os.environ.get("USERPROFILE")
+        if user_profile:
+            candidates.append(Path(user_profile) / "Documents")
+    candidates.append(home / "Documents")
+    candidates.append(home)
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return candidate
+        except Exception:
+            continue
+    return home
 
 
 def nan_aware_reducer(func: Callable[[np.ndarray, Optional[int]], np.ndarray]):

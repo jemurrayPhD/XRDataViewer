@@ -24,7 +24,7 @@ from app_logging import log_action
 from xr_coords import guess_phys_coords
 from xr_plot_widget import CentralPlotWidget, PlotAnnotationConfig, ScientificAxisItem
 
-from ..annotations import PlotAnnotationDialog
+from ..annotations import LineStyleDialog, PlotAnnotationDialog
 from ..colormaps import register_scientific_colormaps, scientific_colormap_names
 from ..datasets import DataSetRef, HighDimVarRef, MemoryDatasetRef, VarRef
 from ..preferences import PreferencesManager

@@ -248,6 +248,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_interactive = InteractiveProcessingTab(
             self.datasets,
             self.bridge_server,
+            preferences=self.preferences,
             startup_callbacks=startup_callbacks,
         )
         self.tabs.addTab(self.tab_interactive, "Interactive Processing")
