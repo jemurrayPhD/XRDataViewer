@@ -434,9 +434,9 @@ class MainWindow(QtWidgets.QMainWindow):
         dataset_host = placeholders.get("dataset_host")
         processing_host = placeholders.get("processing_host")
 
-        left_min = scaled(400, 220)
-        right_min = scaled(1220, 680)
-        spacer = scaled(40)
+        left_min = scaled(400, 260)
+        right_min = scaled(1220, 760)
+        spacer = scaled(60)
 
         if left_splitter is not None:
             left_splitter.setMinimumWidth(left_min)
@@ -454,7 +454,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if central is not None:
             central_min_width = left_min + right_min + spacer
-            central_min_height = max(central.minimumHeight(), scaled(600, 420))
+            central_min_height = max(central.minimumHeight(), scaled(640, 480))
             central.setMinimumSize(central_min_width, central_min_height)
 
         if main_splitter is not None:
@@ -462,8 +462,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Ensure the main window honors the computed minimums.
         if central is not None:
-            self.setMinimumWidth(max(self.minimumWidth(), central.minimumWidth() + scaled(40)))
-            self.setMinimumHeight(max(self.minimumHeight(), central.minimumHeight() + scaled(40, 0)))
+            window_min_width = central.minimumWidth() + scaled(160)
+            window_min_height = central.minimumHeight() + scaled(160, 120)
+            self.setMinimumWidth(max(self.minimumWidth(), window_min_width))
+            self.setMinimumHeight(max(self.minimumHeight(), window_min_height))
 
     def _extract_ui_placeholders(
         self, central: QtWidgets.QWidget
