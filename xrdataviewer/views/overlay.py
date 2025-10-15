@@ -823,10 +823,9 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         self.btn_autoscale = QtWidgets.QToolButton()
         self.btn_autoscale.setText("Auto")
         self.btn_autoscale.clicked.connect(self._on_autoscale)
-        hist_col.addWidget(self.btn_autoscale, 0, alignment=QtCore.Qt.AlignRight)
-        hist_col.addStretch(1)
+        hist_col.addWidget(self.btn_autoscale, 0, alignment=QtCore.Qt.AlignHCenter)
 
-        content_row.addWidget(self._histogram_container, 0, QtCore.Qt.AlignTop)
+        content_row.addWidget(self._histogram_container, 0)
         self._histogram_container.setVisible(False)
         self.hist_widget.setVisible(False)
         # Backwards compatible alias for helper methods referencing the old row widget
@@ -978,9 +977,32 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
             setter = getattr(item, "setLevels", None)
             if callable(setter):
                 funcs.append(setter)
+        applied = False
         for func in funcs:
             if self._invoke_histogram_set_levels(func, lo, hi):
+                applied = True
                 break
+        # Ensure the movable region follows the updated range so the sliders reflect autoscale.
+        region = getattr(self.hist_widget, "region", None) if self.hist_widget is not None else None
+        if region is None and item is not None:
+            region = getattr(item, "region", None)
+        if region is not None:
+            try:
+                self._block_histogram_updates = True
+                region.setRegion((lo, hi))
+                applied = True
+            except Exception:
+                pass
+            finally:
+                self._block_histogram_updates = False
+        if not applied and item is not None:
+            try:
+                self._block_histogram_updates = True
+                item.setHistogramRange(lo, hi)
+            except Exception:
+                pass
+            finally:
+                self._block_histogram_updates = False
 
     def _invoke_histogram_set_levels(self, func, lo: float, hi: float) -> bool:
         try:
@@ -1277,6 +1299,9 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
         if not self.layer.supports_levels():
             return
         self.layer.auto_levels()
+        levels = getattr(self.layer, "_levels", None)
+        if levels and self.hist_widget is not None:
+            self.update_histogram_levels(levels[0], levels[1])
 
     def _on_opacity(self, value: int):
         alpha = float(value) / 100.0
