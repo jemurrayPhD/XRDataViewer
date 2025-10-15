@@ -365,6 +365,7 @@ class DatasetsPane(QtWidgets.QWidget):
 
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.setDocumentMode(True)
+        self.tabs.setProperty("compactTabs", True)
         layout.addWidget(self.tabs, 1)
 
         self._trees: Dict[str, QtWidgets.QTreeWidget] = {}

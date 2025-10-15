@@ -316,10 +316,15 @@ def build_stylesheet(
     control_radius = max(button_radius, 4)
 
     tab_min_width = max(int(settings["font_size"] * 9.0), 128)
+    compact_tab_min_width = max(int(settings["font_size"] * 6.0), 84)
     button_min_width = max(int(settings["font_size"] * 5.2), 88)
     button_min_height = max(int(settings["font_size"] * 2.4), 30)
+    compact_button_min_width = max(int(settings["font_size"] * 3.8), 64)
+    compact_button_min_height = max(int(settings["font_size"] * 2.0), 26)
     button_padding_y = max(int(settings["font_size"] * 0.55), 5)
     button_padding_x = max(int(settings["font_size"] * 1.25), 12)
+    compact_button_padding_y = max(int(settings["font_size"] * 0.45), 4)
+    compact_button_padding_x = max(int(settings["font_size"] * 0.95), 9)
     checkbox_min_height = max(int(settings["font_size"] * 2.2), 26)
     label_min_height = max(int(settings["font_size"] * 1.8), 20)
     label_min_width = max(int(settings["font_size"] * 6.0), 96)
@@ -383,6 +388,9 @@ QTabWidget::pane {{
     padding: 8px;
     background: {background.panel};
 }}
+QTabWidget[compactTabs="true"]::pane {{
+    padding: 6px;
+}}
 QTabBar::tab {{
     background: {background.tab_bg};
     border: 1px solid {background.border};
@@ -404,17 +412,36 @@ QTabBar::tab:selected {{
 QTabBar::tab:hover {{
     background: {hover_surface};
 }}
+QTabWidget[compactTabs="true"] QTabBar::tab {{
+    padding: 8px 18px;
+    margin: 0 4px;
+    min-width: {compact_tab_min_width}px;
+}}
 QFrame[modernSection="true"] {{
     background: {background.panel};
     border: 1px solid {background.border};
     border-radius: {tab_radius}px;
     padding: 10px 14px;
 }}
+QFrame[toolbarGroup="true"] {{
+    background: {background.panel};
+    border: 1px solid {background.border};
+    border-radius: {control_radius + 4}px;
+    padding: 6px 8px;
+}}
 QLabel[modernSectionTitle="true"] {{
     font-size: {max(settings['font_size'] - 0.5, 8.5):.1f}pt;
     font-weight: 600;
     color: {background.muted_text};
     padding-bottom: 4px;
+    qproperty-wordWrap: false;
+    min-width: 0;
+}}
+QLabel[toolbarGroupLabel="true"] {{
+    font-size: {max(settings['font_size'] - 0.4, 8.0):.1f}pt;
+    font-weight: 600;
+    color: {background.muted_text};
+    padding-bottom: 2px;
     qproperty-wordWrap: false;
     min-width: 0;
 }}
@@ -455,6 +482,11 @@ QPushButton, QToolButton {{
     font-weight: 600;
     min-width: {button_min_width}px;
     min-height: {button_min_height}px;
+}}
+QPushButton[sizeVariant="compact"], QToolButton[sizeVariant="compact"] {{
+    padding: {compact_button_padding_y}px {compact_button_padding_x}px;
+    min-width: {compact_button_min_width}px;
+    min-height: {compact_button_min_height}px;
 }}
 QPushButton:disabled, QToolButton:disabled {{
     background-color: {accent_disabled};
