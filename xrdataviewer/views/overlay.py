@@ -21,8 +21,8 @@ from ..annotations import LineStyleDialog, PlotAnnotationDialog
 from ..colormaps import (
     available_colormap_names,
     colormap_lookup_table,
-    get_colormap,
     is_scientific_colormap,
+    resolve_colormap_assets,
 )
 from ..datasets import (
     MemoryDatasetRegistry,
@@ -355,19 +355,27 @@ class OverlayLayer(QtCore.QObject):
         self.colormap_name = name or "viridis"
         if not self.supports_colormap():
             return
-        cmap = get_colormap(self.colormap_name)
-        if cmap is None:
+        cmap, state, lut = resolve_colormap_assets(self.colormap_name)
+        if cmap is None and state is None and lut is None:
             return
-        lut = colormap_lookup_table(cmap, name=self.colormap_name)
+        lut = lut or colormap_lookup_table(cmap, name=self.colormap_name)
         if lut is not None:
             try:
-                self.graphics_item.setLookupTable(lut)
+                self.graphics_item.setLookupTable(lut, update=True)
             except Exception:
                 pass
         setter = getattr(self.graphics_item, "setColorMap", None)
         if callable(setter):
             try:
                 setter(cmap)
+            except Exception:
+                pass
+        if state:
+            gradient = getattr(self.graphics_item, "lut", None)
+            gradient_widget = getattr(gradient, "gradient", None)
+            try:
+                if gradient_widget is not None:
+                    gradient_widget.restoreState(state)
             except Exception:
                 pass
 

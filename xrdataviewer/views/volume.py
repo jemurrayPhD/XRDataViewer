@@ -14,7 +14,12 @@ except Exception:  # pragma: no cover - optional dependency
 
 from app_logging import log_action
 
-from ..colormaps import available_colormap_names, get_colormap, is_scientific_colormap
+from ..colormaps import (
+    available_colormap_names,
+    colormap_lookup_table,
+    is_scientific_colormap,
+    resolve_colormap_assets,
+)
 from ..preferences import PreferencesManager
 from ..utils import ask_layout_label, ensure_extension, image_with_label, save_snapshot
 
@@ -148,11 +153,25 @@ class VolumeAlphaCurveWidget(QtWidgets.QWidget):
         eff = self._effective_rect()
         w = int(width or max(2.0, eff.width()))
         h = int(height or max(2.0, eff.height()))
-        cmap = get_colormap(self._colormap_name) or get_colormap("viridis")
-        if cmap is None:
+        cmap, state, asset_lut = resolve_colormap_assets(self._colormap_name)
+        if cmap is None and state is None and asset_lut is None:
+            cmap, state, asset_lut = resolve_colormap_assets("viridis")
+        if cmap is None and state is None and asset_lut is None:
             return
-        lut = cmap.map(np.linspace(0.0, 1.0, max(2, w)), mode="byte")
-        gradient = np.repeat(lut[np.newaxis, :, :3], max(2, h), axis=0)
+        try:
+            mapped = cmap.map(np.linspace(0.0, 1.0, max(2, w)), mode="byte") if cmap else None
+        except Exception:
+            mapped = None
+        if mapped is None:
+            table = asset_lut
+            if table is None:
+                table = colormap_lookup_table(cmap, name=self._colormap_name, size=max(2, w))
+            if table is None and state:
+                table = colormap_lookup_table(None, name=self._colormap_name, size=max(2, w))
+            if table is None:
+                return
+            mapped = table
+        gradient = np.repeat(mapped[np.newaxis, :, :3], max(2, h), axis=0)
         alpha = np.full((gradient.shape[0], gradient.shape[1], 1), 255, dtype=np.uint8)
         rgba = np.concatenate((gradient, alpha), axis=2)
         image = QtGui.QImage(
@@ -565,8 +584,10 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
     def _compute_rgba_volume(self, scalar: np.ndarray) -> np.ndarray:
         if scalar.size == 0:
             return np.zeros(scalar.shape + (4,), dtype=np.ubyte)
-        cmap = get_colormap(self._colormap_name) or get_colormap("viridis")
-        if cmap is None:
+        cmap, state, lut = resolve_colormap_assets(self._colormap_name)
+        if cmap is None and state is None and lut is None:
+            cmap, state, lut = resolve_colormap_assets("viridis")
+        if cmap is None and state is None and lut is None:
             return np.zeros(scalar.shape + (4,), dtype=np.ubyte)
         data_min = float(self._data_min)
         data_max = float(self._data_max)
@@ -582,7 +603,26 @@ class SequentialVolumeWindow(QtWidgets.QWidget):
             scale = 1.0
         norm = (scalar - data_min) / scale
         norm = np.clip(norm, 0.0, 1.0)
-        rgba = cmap.map(norm.reshape(-1), mode="byte").reshape(scalar.shape + (4,))
+        rgba = None
+        if cmap is not None:
+            try:
+                rgba = cmap.map(norm.reshape(-1), mode="byte").reshape(
+                    scalar.shape + (4,)
+                )
+            except Exception:
+                rgba = None
+        if rgba is None:
+            table = lut or colormap_lookup_table(cmap, name=self._colormap_name)
+            if table is None:
+                table = colormap_lookup_table(cmap, name="viridis")
+            if table is None:
+                return np.zeros(scalar.shape + (4,), dtype=np.ubyte)
+            idx = np.clip(
+                np.round(norm * (table.shape[0] - 1)).astype(int),
+                0,
+                table.shape[0] - 1,
+            )
+            rgba = table[idx].reshape(scalar.shape + (4,))
 
         alpha_value = self._apply_alpha_scale(self._sample_alpha_curve("value", norm))
         alpha_total = alpha_value

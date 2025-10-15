@@ -25,7 +25,11 @@ from xr_coords import guess_phys_coords
 from xr_plot_widget import CentralPlotWidget, PlotAnnotationConfig, ScientificAxisItem
 
 from ..annotations import LineStyleDialog, PlotAnnotationDialog
-from ..colormaps import available_colormap_names, get_colormap, is_scientific_colormap
+from ..colormaps import (
+    available_colormap_names,
+    is_scientific_colormap,
+    resolve_colormap_assets,
+)
 from ..datasets import DataSetRef, HighDimVarRef, MemoryDatasetRef, VarRef
 from ..preferences import PreferencesManager
 from ..processing import apply_processing_step, ProcessingManager, ProcessingSelectionDialog
@@ -504,10 +508,12 @@ class SequentialView(QtWidgets.QWidget):
                 target = self.preferences.preferred_colormap(None)
         if not target:
             target = "viridis"
-        cmap = get_colormap(str(target))
-        if cmap is None:
+        cmap, state, lut = resolve_colormap_assets(str(target))
+        if cmap is None and state is None and lut is None:
             return
-        if not self.viewer.apply_colormap(cmap, name=str(target)):
+        if not self.viewer.apply_colormap(
+            cmap, name=str(target), gradient_state=state, lookup_table=lut
+        ):
             return
         self._update_volume_window_colormap()
 

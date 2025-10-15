@@ -21,7 +21,11 @@ from xr_plot_widget import (
 )
 
 from ..annotations import LineStyleDialog, PlotAnnotationDialog
-from ..colormaps import available_colormap_names, get_colormap, is_scientific_colormap
+from ..colormaps import (
+    available_colormap_names,
+    is_scientific_colormap,
+    resolve_colormap_assets,
+)
 from ..datasets import (
     DataSetRef,
     HighDimVarRef,
@@ -243,10 +247,12 @@ class ViewerFrame(QtWidgets.QFrame):
     def apply_colormap(self, name: str) -> bool:
         if self._display_mode == "line":
             return False
-        cmap = get_colormap(name)
-        if cmap is None:
+        cmap, state, lut = resolve_colormap_assets(name)
+        if cmap is None and state is None and lut is None:
             return False
-        return self.viewer.apply_colormap(cmap, name=name)
+        return self.viewer.apply_colormap(
+            cmap, name=name, gradient_state=state, lookup_table=lut
+        )
 
     def set_dataset(self, dataset: xr.Dataset, path: Path, *, select: Optional[str] = None):
         self._dispose_dataset()

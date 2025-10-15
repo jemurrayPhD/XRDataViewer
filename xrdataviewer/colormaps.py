@@ -371,6 +371,37 @@ _DEFAULT_FALLBACKS: Tuple[str, ...] = (
 _REGISTERED_MAP_OBJECTS: Dict[str, "pg.ColorMap"] = {}
 
 
+def scientific_gradient_state(name: str) -> Optional[dict]:
+    """Return a gradient state dictionary for a bundled scientific map."""
+
+    spec = _SCIENTIFIC_BY_NAME.get(str(name))
+    if spec is None:
+        return None
+    positions = np.linspace(0.0, 1.0, num=len(spec.stops))
+    ticks = [
+        (float(pos), _hex_to_rgb_stop(stop) + (255,))
+        for pos, stop in zip(positions, spec.stops)
+    ]
+    return {"mode": "rgb", "ticks": ticks}
+
+
+def _lut_from_state(state: dict, size: int) -> Optional[np.ndarray]:
+    """Derive a lookup table from a gradient state dictionary."""
+
+    ticks = state.get("ticks", []) if isinstance(state, dict) else []
+    if len(ticks) < 2:
+        return None
+    positions = np.array([pos for pos, _ in ticks], dtype=float)
+    colours = np.array([rgba[:3] for _, rgba in ticks], dtype=float)
+    alphas = np.array([rgba[3] for _, rgba in ticks], dtype=float)
+    xs = np.linspace(0.0, 1.0, max(2, int(size)))
+    lut = np.empty((xs.size, 4), dtype=float)
+    for channel in range(3):
+        lut[:, channel] = np.interp(xs, positions, colours[:, channel])
+    lut[:, 3] = np.interp(xs, positions, alphas)
+    return _normalize_lut(lut)
+
+
 def _normalize_stop_color(color: Sequence[float]) -> Tuple[int, int, int, int]:
     """Convert a colour stop tuple to 0-255 RGBA integers."""
 
@@ -443,13 +474,9 @@ def colormap_gradient_state(cmap: "pg.ColorMap", *, name: Optional[str] = None) 
         except Exception:
             stops = None
     if not stops and name:
-        spec = _SCIENTIFIC_BY_NAME.get(name)
-        if spec is not None:
-            positions = np.linspace(0.0, 1.0, num=len(spec.stops))
-            stops = [
-                (float(pos), _hex_to_rgb_stop(stop) + (255,))
-                for pos, stop in zip(positions, spec.stops)
-            ]
+        sci_state = scientific_gradient_state(name)
+        if sci_state:
+            return sci_state
     if not stops:
         return None
     ticks: List[Tuple[float, Tuple[int, int, int, int]]] = []
@@ -501,20 +528,11 @@ def colormap_lookup_table(
             if normalized is not None:
                 return normalized
     state = colormap_gradient_state(cmap, name=name)
+    if not state and name:
+        state = scientific_gradient_state(name)
     if not state:
         return None
-    ticks = state.get("ticks", [])
-    if len(ticks) < 2:
-        return None
-    positions = np.array([pos for pos, _ in ticks], dtype=float)
-    colours = np.array([rgba[:3] for _, rgba in ticks], dtype=float)
-    alphas = np.array([rgba[3] for _, rgba in ticks], dtype=float)
-    xs = np.linspace(0.0, 1.0, max(2, int(size)))
-    lut = np.empty((xs.size, 4), dtype=float)
-    for channel in range(3):
-        lut[:, channel] = np.interp(xs, positions, colours[:, channel])
-    lut[:, 3] = np.interp(xs, positions, alphas)
-    return _normalize_lut(lut)
+    return _lut_from_state(state, size)
 
 
 _REGISTERED = False
@@ -686,4 +704,20 @@ def get_colormap(name: str) -> Optional["pg.ColorMap"]:
 
     _REGISTERED_MAP_OBJECTS[name] = cmap
     return cmap
+
+
+def resolve_colormap_assets(
+    name: str, *, size: int = 256
+) -> Tuple[Optional["pg.ColorMap"], Optional[dict], Optional[np.ndarray]]:
+    """Return a tuple of (ColorMap, gradient state, lookup table) for *name*."""
+
+    normalized = str(name) if name is not None else ""
+    cmap = get_colormap(normalized)
+    state = colormap_gradient_state(cmap, name=normalized)
+    if not state:
+        state = scientific_gradient_state(normalized)
+    lut = colormap_lookup_table(cmap, name=normalized, size=size)
+    if lut is None and state:
+        lut = _lut_from_state(state, size)
+    return cmap, state, lut
 

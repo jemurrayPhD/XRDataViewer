@@ -13,7 +13,7 @@ import pyqtgraph as pg
 from xrdataviewer.colormaps import (
     colormap_gradient_state,
     colormap_lookup_table,
-    get_colormap,
+    resolve_colormap_assets,
 )
 
 FORCE_SOFT_RENDER = False
@@ -708,14 +708,19 @@ class CentralPlotWidget(QtWidgets.QWidget):
             pass
 
     def apply_colormap(
-        self, cmap: Optional["pg.ColorMap"], *, name: Optional[str] = None
+        self,
+        cmap: Optional["pg.ColorMap"],
+        *,
+        name: Optional[str] = None,
+        gradient_state: Optional[dict] = None,
+        lookup_table: Optional[np.ndarray] = None,
     ) -> bool:
-        """Apply *cmap* to both the histogram and image items."""
+        """Apply *cmap* (or explicit gradient/LUT) to the viewer widgets."""
 
-        if cmap is None:
-            return False
         applied = False
-        state = colormap_gradient_state(cmap, name=name)
+        state = gradient_state if gradient_state is not None else None
+        if state is None:
+            state = colormap_gradient_state(cmap, name=name)
         if state:
             try:
                 self.lut.gradient.restoreState(state)
@@ -732,10 +737,12 @@ class CentralPlotWidget(QtWidgets.QWidget):
             self.lut.rehide_stops()
         except Exception:
             pass
-        lut = colormap_lookup_table(cmap, name=name)
+        lut = lookup_table if lookup_table is not None else None
+        if lut is None:
+            lut = colormap_lookup_table(cmap, name=name)
         if lut is not None:
             try:
-                self.img_item.setLookupTable(lut)
+                self.img_item.setLookupTable(lut, update=True)
                 applied = True
             except Exception:
                 pass
@@ -751,10 +758,10 @@ class CentralPlotWidget(QtWidgets.QWidget):
     def apply_colormap_name(self, name: str) -> bool:
         """Resolve and apply a colour map by *name*."""
 
-        cmap = get_colormap(name)
-        if cmap is None:
+        cmap, state, lut = resolve_colormap_assets(name)
+        if cmap is None and state is None and lut is None:
             return False
-        return self.apply_colormap(cmap, name=name)
+        return self.apply_colormap(cmap, name=name, gradient_state=state, lookup_table=lut)
 
     # ---------- annotation helpers ----------
     def annotation_defaults(self) -> PlotAnnotationConfig:
