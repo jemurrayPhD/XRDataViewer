@@ -300,6 +300,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_menus(self):
         menubar = self.menuBar()
+        if not isinstance(menubar, QtWidgets.QMenuBar):
+            menubar = QtWidgets.QMenuBar(self)
+            self.setMenuBar(menubar)
         prefs_menu = menubar.addMenu("Preferences")
 
         act_edit = prefs_menu.addAction("Edit preferences…")
