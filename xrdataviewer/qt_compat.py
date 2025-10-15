@@ -45,6 +45,13 @@ if QtCore is not None and QtWidgets is not None:
             hint = box.sizeHint()
             target_width = max(hint.width(), self._min_width)
             target_height = max(hint.height(), self._min_height)
+
+            max_size = box.maximumSize()
+            if max_size.width() > 0:
+                target_width = min(target_width, max_size.width())
+            if max_size.height() > 0:
+                target_height = min(target_height, max_size.height())
+
             resize_width = max(box.width(), target_width)
             resize_height = max(box.height(), target_height)
             if resize_width != box.width() or resize_height != box.height():
