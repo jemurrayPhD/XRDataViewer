@@ -303,7 +303,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not isinstance(menubar, QtWidgets.QMenuBar):
             menubar = QtWidgets.QMenuBar(self)
             self.setMenuBar(menubar)
-        prefs_menu = menubar.addMenu("Preferences")
+        prefs_menu = QtWidgets.QMenu("Preferences", menubar)
+        menubar.addMenu(prefs_menu)
 
         act_edit = QtWidgets.QAction("Edit preferences…", self)
         act_edit.triggered.connect(self._edit_preferences)
