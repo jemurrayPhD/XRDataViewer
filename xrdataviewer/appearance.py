@@ -311,9 +311,11 @@ def build_stylesheet(appearance: Mapping[str, object] | None) -> str:
     tab_radius = max(button_radius + 6, 10)
     control_radius = max(button_radius, 4)
 
-    tab_min_width = max(int(settings["font_size"] * 9.5), 140)
-    button_min_width = max(int(settings["font_size"] * 7.5), 120)
-    button_min_height = max(int(settings["font_size"] * 2.8), 34)
+    tab_min_width = max(int(settings["font_size"] * 9.0), 128)
+    button_min_width = max(int(settings["font_size"] * 5.2), 88)
+    button_min_height = max(int(settings["font_size"] * 2.4), 30)
+    button_padding_y = max(int(settings["font_size"] * 0.55), 5)
+    button_padding_x = max(int(settings["font_size"] * 1.25), 12)
     checkbox_min_height = max(int(settings["font_size"] * 2.2), 26)
     label_min_height = max(int(settings["font_size"] * 1.8), 20)
     label_min_width = max(int(settings["font_size"] * 6.0), 96)
@@ -443,7 +445,7 @@ QPushButton, QToolButton {{
     color: {accent.text};
     border: none;
     border-radius: {button_radius}px;
-    padding: 8px 20px;
+    padding: {button_padding_y}px {button_padding_x}px;
     font-weight: 600;
     min-width: {button_min_width}px;
     min-height: {button_min_height}px;
