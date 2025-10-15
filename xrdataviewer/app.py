@@ -273,7 +273,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_dock.resize(800, 200)
         self.log_dock.setCollapsed(True)
 
-        self.setMinimumSize(860, 580)
+        # Guard against collapsing the main interface into an unreadable layout.
+        self.setMinimumSize(980, 640)
         self._apply_initial_geometry()
 
         if self._startup_splash is not None and not self.tab_interactive.has_embedded_jupyter:
@@ -367,16 +368,20 @@ class MainWindow(QtWidgets.QMainWindow):
             raise RuntimeError(f"Failed to load UI from {ui_path}: {loader.errorString()}")
 
         self.setCentralWidget(central)
-        central.setMinimumSize(840, 540)
 
         main_splitter = central.findChild(QtWidgets.QSplitter, "mainSplitter")
         left_splitter = central.findChild(QtWidgets.QSplitter, "leftSplitter")
         tabs = central.findChild(QtWidgets.QTabWidget, "mainTabs")
         dataset_host = central.findChild(QtWidgets.QWidget, "datasetsHost")
         processing_host = central.findChild(QtWidgets.QWidget, "processingHost")
+        right_pane = central.findChild(QtWidgets.QWidget, "rightPane")
 
-        if None in (main_splitter, left_splitter, tabs, dataset_host, processing_host):
+        if None in (main_splitter, left_splitter, tabs, dataset_host, processing_host, right_pane):
             raise RuntimeError("Main window UI is missing required widgets")
+
+        central.setMinimumSize(920, 600)
+        tabs.setMinimumSize(780, 520)
+        right_pane.setMinimumWidth(780)
 
         return {
             "central": central,

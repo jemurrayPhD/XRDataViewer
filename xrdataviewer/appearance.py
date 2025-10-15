@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Helpers for translating appearance preferences into Qt stylesheets."""
+"""Helpers for translating appearance preferences into a restrained Qt stylesheet."""
 
 from dataclasses import dataclass
 from typing import Dict, Iterable, Mapping, Tuple
@@ -50,138 +50,150 @@ class BackgroundOption:
 
 
 FONT_OPTIONS: Dict[str, FontOption] = {
-    "Segoe UI": FontOption("Segoe UI", "'Segoe UI', 'Roboto', 'Noto Sans', sans-serif"),
+    "Segoe UI": FontOption("Segoe UI", "'Segoe UI', 'Noto Sans', 'Roboto', sans-serif"),
     "Roboto": FontOption("Roboto", "'Roboto', 'Segoe UI', 'Noto Sans', sans-serif"),
+    "Noto Sans": FontOption("Noto Sans", "'Noto Sans', 'Segoe UI', 'Roboto', sans-serif"),
     "Source Sans Pro": FontOption(
         "Source Sans Pro", "'Source Sans Pro', 'Segoe UI', 'Noto Sans', sans-serif"
     ),
-    "Open Sans": FontOption("Open Sans", "'Open Sans', 'Segoe UI', 'Noto Sans', sans-serif"),
 }
 
 
 ACCENT_OPTIONS: Dict[str, AccentOption] = {
-    "Azure": AccentOption("Azure", "#1a73e8", "#1967d2", "#174ea6", "#ffffff"),
-    "Emerald": AccentOption("Emerald", "#0f9d58", "#0b8043", "#0a6631", "#ffffff"),
-    "Coral": AccentOption("Coral", "#ff7043", "#ff5c29", "#f4511e", "#ffffff"),
-    "Violet": AccentOption("Violet", "#8e63ce", "#7c52bd", "#6a46a6", "#ffffff"),
+    "Blue": AccentOption("Blue", "#3a6db3", "#315f9b", "#285282", "#ffffff"),
+    "Green": AccentOption("Green", "#4a8f49", "#3f7a3e", "#356535", "#ffffff"),
+    "Orange": AccentOption("Orange", "#d98032", "#c46f25", "#a95c1e", "#ffffff"),
+    "Plum": AccentOption("Plum", "#8060a5", "#6f5290", "#5e4578", "#ffffff"),
 }
 
 
 BACKGROUND_OPTIONS: Dict[str, BackgroundOption] = {
-    "Frosted Light": BackgroundOption(
-        "Frosted Light",
-        window="#f1f3f4",
+    "Classic Light": BackgroundOption(
+        "Classic Light",
+        window="#f2f2f3",
         panel="#ffffff",
-        surface_alt="#eef1f6",
-        border="#dadce0",
-        divider="#c7cbd1",
+        surface_alt="#e6e7e9",
+        border="#c1c4ca",
+        divider="#d2d5da",
         text="#202124",
         muted_text="#5f6368",
         menu="#ffffff",
         menu_text="#202124",
-        menu_border="#dadce0",
-        dock_title="#eef1f6",
-        status="#eef1f6",
+        menu_border="#c1c4ca",
+        dock_title="#eceef1",
+        status="#e7e9ec",
         input_bg="#ffffff",
-        input_border="#d2d6dc",
-        input_focus="#1a73e8",
-        tab_bg="#eef1f6",
+        input_border="#b7bbc1",
+        input_focus="#3a6db3",
+        tab_bg="#e7e9ec",
         tab_selected_bg="#ffffff",
-        tab_text="#5f6368",
+        tab_text="#4d5156",
         tab_selected_text="#202124",
-        scrollbar_groove="#e0e3eb",
-        scrollbar_handle="#b9bec7",
-        splitter="#dadce0",
-        header_bg="#eef1f6",
+        scrollbar_groove="#e0e3e8",
+        scrollbar_handle="#c7cbd1",
+        splitter="#c7cbd1",
+        header_bg="#edeff2",
     ),
-    "Nightfall": BackgroundOption(
-        "Nightfall",
+    "Slate Dark": BackgroundOption(
+        "Slate Dark",
         window="#1f2227",
-        panel="#2b3038",
-        surface_alt="#262a32",
-        border="#3a404a",
-        divider="#353b45",
-        text="#e8eaed",
-        muted_text="#b0b6c0",
+        panel="#2b3037",
+        surface_alt="#262a31",
+        border="#3a414a",
+        divider="#343a44",
+        text="#eceef1",
+        muted_text="#a9afb7",
         menu="#2e333b",
-        menu_text="#e8eaed",
-        menu_border="#3a404a",
+        menu_text="#eceef1",
+        menu_border="#3a414a",
         dock_title="#2e333b",
-        status="#262a32",
-        input_bg="#343a44",
-        input_border="#474f5c",
-        input_focus="#8ab4f8",
+        status="#242930",
+        input_bg="#323841",
+        input_border="#444b55",
+        input_focus="#648ad1",
         tab_bg="#2a2f37",
-        tab_selected_bg="#343a44",
+        tab_selected_bg="#323841",
         tab_text="#b0b6c0",
-        tab_selected_text="#e8eaed",
-        scrollbar_groove="#2b3038",
-        scrollbar_handle="#525a66",
-        splitter="#3a404a",
-        header_bg="#343a44",
+        tab_selected_text="#eceef1",
+        scrollbar_groove="#2a2f37",
+        scrollbar_handle="#4a525e",
+        splitter="#3a414a",
+        header_bg="#30363f",
     ),
-    "Sunrise": BackgroundOption(
-        "Sunrise",
-        window="#f7f3ef",
-        panel="#ffffff",
-        surface_alt="#f0e6de",
-        border="#d9cfc3",
-        divider="#cbbfb0",
-        text="#3d3027",
-        muted_text="#6a5a50",
-        menu="#ffffff",
-        menu_text="#3d3027",
-        menu_border="#d9cfc3",
-        dock_title="#f0e6de",
-        status="#f2eae2",
+    "Warm Gray": BackgroundOption(
+        "Warm Gray",
+        window="#eeedeb",
+        panel="#f8f7f5",
+        surface_alt="#e3e1df",
+        border="#c5c1bc",
+        divider="#d3cfcb",
+        text="#2f302c",
+        muted_text="#6c6964",
+        menu="#f8f7f5",
+        menu_text="#2f302c",
+        menu_border="#c5c1bc",
+        dock_title="#e8e6e3",
+        status="#e2dfdb",
         input_bg="#ffffff",
-        input_border="#d4c9bb",
-        input_focus="#f18f43",
-        tab_bg="#efe2d6",
-        tab_selected_bg="#ffffff",
-        tab_text="#6a5a50",
-        tab_selected_text="#3d3027",
-        scrollbar_groove="#e4d7cb",
-        scrollbar_handle="#c8b8a9",
-        splitter="#d9cfc3",
-        header_bg="#efe2d6",
+        input_border="#c1bcb6",
+        input_focus="#d98032",
+        tab_bg="#e8e6e3",
+        tab_selected_bg="#fdfcfa",
+        tab_text="#615f5a",
+        tab_selected_text="#2f302c",
+        scrollbar_groove="#dedbd7",
+        scrollbar_handle="#beb9b2",
+        splitter="#c5c1bc",
+        header_bg="#eae7e3",
     ),
+}
+
+
+BACKGROUND_ALIASES = {
+    "Frosted Light": "Classic Light",
+    "Nightfall": "Slate Dark",
+    "Sunrise": "Warm Gray",
 }
 
 
 BUTTON_SHAPE_OPTIONS: Dict[str, int] = {
-    "Rounded": 6,
-    "Pill": 12,
     "Square": 2,
+    "Soft": 4,
+    "Rounded": 6,
+}
+
+
+BUTTON_SHAPE_ALIASES = {
+    "Pill": "Rounded",
 }
 
 
 BUILTIN_PROFILES: Dict[str, Dict[str, object]] = {
-    "Serene Light": {
+    "Classic Light": {
         "font_family": "Segoe UI",
-        "font_size": 10.5,
-        "accent": "Azure",
-        "background": "Frosted Light",
-        "button_shape": "Rounded",
+        "font_size": 10.0,
+        "accent": "Blue",
+        "background": "Classic Light",
+        "button_shape": "Square",
     },
-    "Midnight Dusk": {
-        "font_family": "Source Sans Pro",
-        "font_size": 11.0,
-        "accent": "Violet",
-        "background": "Nightfall",
-        "button_shape": "Rounded",
+    "Slate Dark": {
+        "font_family": "Noto Sans",
+        "font_size": 10.0,
+        "accent": "Plum",
+        "background": "Slate Dark",
+        "button_shape": "Soft",
     },
-    "Citrus Glow": {
+    "Warm Gray": {
         "font_family": "Roboto",
         "font_size": 10.0,
-        "accent": "Coral",
-        "background": "Sunrise",
-        "button_shape": "Pill",
+        "accent": "Orange",
+        "background": "Warm Gray",
+        "button_shape": "Soft",
     },
 }
 
 
-DEFAULT_PROFILE_NAME = "Serene Light"
+DEFAULT_PROFILE_NAME = "Classic Light"
 
 
 def default_appearance() -> Dict[str, object]:
@@ -198,37 +210,35 @@ def default_appearance() -> Dict[str, object]:
 
 
 def sanitize_profile_values(
-    values: Mapping[str, object], fallback: Mapping[str, object] | None = None
+    values: Mapping[str, object] | None, base: Mapping[str, object]
 ) -> Dict[str, object]:
-    base = default_appearance() if fallback is None else dict(fallback)
     result = dict(base)
 
-    font = str(values.get("font_family", result["font_family"])) if isinstance(values, Mapping) else result["font_family"]
-    if font in FONT_OPTIONS:
-        result["font_family"] = font
+    if isinstance(values, Mapping):
+        font = str(values.get("font_family", result["font_family"]))
+        if font in FONT_OPTIONS:
+            result["font_family"] = font
 
-    size = values.get("font_size") if isinstance(values, Mapping) else None
-    try:
-        size = float(size)
-    except Exception:
-        size = result["font_size"]
-    result["font_size"] = max(8.0, min(14.0, float(size)))
+        size = values.get("font_size")
+        try:
+            size = float(size)
+        except Exception:
+            size = result["font_size"]
+        result["font_size"] = max(8.0, min(14.0, float(size)))
 
-    accent = str(values.get("accent", result["accent"])) if isinstance(values, Mapping) else result["accent"]
-    if accent in ACCENT_OPTIONS:
-        result["accent"] = accent
+        accent = str(values.get("accent", result["accent"]))
+        if accent in ACCENT_OPTIONS:
+            result["accent"] = accent
 
-    background = (
-        str(values.get("background", result["background"]))
-        if isinstance(values, Mapping)
-        else result["background"]
-    )
-    if background in BACKGROUND_OPTIONS:
-        result["background"] = background
+        background = str(values.get("background", result["background"]))
+        background = BACKGROUND_ALIASES.get(background, background)
+        if background in BACKGROUND_OPTIONS:
+            result["background"] = background
 
-    shape = str(values.get("button_shape", result["button_shape"])) if isinstance(values, Mapping) else result["button_shape"]
-    if shape in BUTTON_SHAPE_OPTIONS:
-        result["button_shape"] = shape
+        shape = str(values.get("button_shape", result["button_shape"]))
+        shape = BUTTON_SHAPE_ALIASES.get(shape, shape)
+        if shape in BUTTON_SHAPE_OPTIONS:
+            result["button_shape"] = shape
 
     return {
         "font_family": result["font_family"],
@@ -250,19 +260,15 @@ def sanitize_appearance(data: Mapping[str, object] | None) -> Dict[str, object]:
     raw_profiles = data.get("profiles")
     if isinstance(raw_profiles, Mapping):
         for name, profile in raw_profiles.items():
-            if not isinstance(name, str):
+            if not isinstance(name, str) or not isinstance(profile, Mapping):
                 continue
             key = name.strip()
             if not key:
                 continue
-            if not isinstance(profile, Mapping):
-                continue
             profiles[key] = sanitize_profile_values(profile, sanitized)
-
     sanitized["profiles"] = profiles
 
-    active = str(data.get("active_profile", sanitized.get("active_profile", "")))
-    active = active.strip()
+    active = str(data.get("active_profile", sanitized.get("active_profile", ""))).strip()
     if active in BUILTIN_PROFILES or active in profiles:
         sanitized["active_profile"] = active
     else:
@@ -271,11 +277,14 @@ def sanitize_appearance(data: Mapping[str, object] | None) -> Dict[str, object]:
     return sanitized
 
 
-def available_profiles(custom_profiles: Mapping[str, Mapping[str, object]] | None = None) -> Dict[str, Dict[str, object]]:
+def available_profiles(
+    custom_profiles: Mapping[str, Mapping[str, object]] | None = None
+) -> Dict[str, Dict[str, object]]:
     profiles = {name: dict(values) for name, values in BUILTIN_PROFILES.items()}
     if isinstance(custom_profiles, Mapping):
         for name, values in custom_profiles.items():
-            profiles[name] = dict(values)
+            if isinstance(name, str) and isinstance(values, Mapping):
+                profiles[name] = dict(values)
     return profiles
 
 
@@ -307,181 +316,96 @@ def build_stylesheet(
     *,
     support_checkable_wordwrap: bool = True,
 ) -> str:
-    settings = sanitize_profile_values(appearance or {}, default_appearance())
-    font = FONT_OPTIONS[settings["font_family"]]
-    accent = ACCENT_OPTIONS[settings["accent"]]
-    background = BACKGROUND_OPTIONS[settings["background"]]
-    button_radius = max(3, min(12, BUTTON_SHAPE_OPTIONS[settings["button_shape"]]))
-    tab_radius = max(button_radius + 4, 8)
-    control_radius = max(button_radius, 4)
+    defaults = default_appearance()
+    settings = sanitize_profile_values(appearance or {}, defaults)
 
-    tab_min_width = max(int(settings["font_size"] * 8.4), 130)
-    compact_tab_min_width = max(int(settings["font_size"] * 5.8), 90)
-    button_min_width = max(int(settings["font_size"] * 4.6), 82)
-    button_min_height = max(int(settings["font_size"] * 2.2), 28)
-    compact_button_min_width = max(int(settings["font_size"] * 3.6), 66)
-    compact_button_min_height = max(int(settings["font_size"] * 2.0), 26)
-    button_padding_y = max(int(settings["font_size"] * 0.45), 4)
-    button_padding_x = max(int(settings["font_size"] * 1.05), 10)
-    compact_button_padding_y = max(int(settings["font_size"] * 0.35), 3)
-    compact_button_padding_x = max(int(settings["font_size"] * 0.8), 8)
-    checkbox_min_height = max(int(settings["font_size"] * 2.4), 28)
-    label_min_height = max(int(settings["font_size"] * 2.0), 22)
-    label_min_width = max(int(settings["font_size"] * 6.4), 102)
+    font = FONT_OPTIONS.get(settings["font_family"], FONT_OPTIONS[defaults["font_family"]])
+    accent = ACCENT_OPTIONS.get(settings["accent"], ACCENT_OPTIONS[defaults["accent"]])
+    background = BACKGROUND_OPTIONS.get(
+        settings["background"], BACKGROUND_OPTIONS[defaults["background"]]
+    )
+    button_radius = max(0, min(8, BUTTON_SHAPE_OPTIONS.get(settings["button_shape"], 2)))
+    tab_radius = max(button_radius, 2)
 
-    accent_disabled = _mix(accent.base, background.panel, 0.55)
-    accent_border = _mix(accent.base, background.border, 0.35)
-    focus_outline = background.input_focus if background.input_focus else accent.base
-    hover_surface = _mix(accent.base, background.panel, 0.9)
+    font_size = float(settings["font_size"])
+    tab_min_width = max(int(font_size * 6.8), 112)
+    compact_tab_min_width = max(int(font_size * 5.2), 92)
+    button_min_width = max(int(font_size * 4.0), 72)
+    button_min_height = max(int(font_size * 1.9), 24)
+    compact_button_min_width = max(int(font_size * 3.2), 60)
+    compact_button_min_height = max(int(font_size * 1.7), 22)
+    button_padding_y = max(int(font_size * 0.35), 3)
+    button_padding_x = max(int(font_size * 0.9), 8)
+    compact_button_padding_y = max(button_padding_y - 1, 2)
+    compact_button_padding_x = max(button_padding_x - 2, 6)
+    checkbox_min_height = max(int(font_size * 2.1), 24)
+    label_min_height = max(int(font_size * 1.9), 20)
+    label_min_width = max(int(font_size * 5.6), 96)
 
-    checkable_word_wrap_css = "    qproperty-wordWrap: true;\n" if support_checkable_wordwrap else ""
+    hover_surface = _mix(accent.base, background.panel, 0.85)
+    pressed_surface = _mix(accent.base, background.panel, 0.7)
+    disabled_text = _mix(background.text, background.panel, 0.6)
+    focus_outline = background.input_focus or accent.base
+    menubar_bg = _mix(background.surface_alt, background.panel, 0.5)
+    subtle_border = _mix(background.border, background.panel, 0.7)
+
+    checkable_props = [
+        f"    min-height: {checkbox_min_height}px;",
+        "    spacing: 6px;",
+    ]
+    if support_checkable_wordwrap:
+        checkable_props.append("    qproperty-wordWrap: true;")
+    checkable_block = "\n".join(checkable_props)
 
     return f"""
 QWidget {{
     font-family: {font.css_stack};
-    font-size: {settings['font_size']:.1f}pt;
+    font-size: {font_size:.1f}pt;
     color: {background.text};
 }}
 QMainWindow, QDialog {{
-    background-color: {background.window};
-}}
-QMenuBar {{
-    background: {background.surface_alt};
-    color: {background.text};
-    padding: 4px 8px;
-    border-bottom: 1px solid {background.border};
-}}
-QMenuBar::item {{
-    background: transparent;
-    padding: 4px 12px;
-    border-radius: {control_radius + 2}px;
-}}
-QMenuBar::item:selected {{
-    background: {_mix(accent.base, background.panel, 0.85)};
-    color: {accent.base};
-}}
-QMenu {{
-    background: {background.menu};
-    color: {background.menu_text};
-    border: 1px solid {background.menu_border};
-    border-radius: {control_radius + 4}px;
-    padding: 6px 0;
-}}
-QMenu::item {{
-    padding: 6px 20px;
-    border-radius: {control_radius}px;
-}}
-QMenu::item:selected {{
-    background: {_mix(accent.base, background.menu, 0.85)};
-    color: {accent.base};
-}}
-QSplitter::handle:horizontal, QSplitter::handle:vertical {{
-    background: {background.splitter};
-    border-radius: {control_radius}px;
-}}
-QSplitter::handle:horizontal:hover, QSplitter::handle:vertical:hover {{
-    background: {_mix(background.splitter, accent.base, 0.3)};
+    background: {background.window};
 }}
 QTabWidget::pane {{
     border: 1px solid {background.border};
-    border-radius: {tab_radius}px;
-    padding: 8px;
+    padding: 6px;
     background: {background.panel};
 }}
 QTabWidget[compactTabs="true"]::pane {{
-    padding: 6px;
+    padding: 4px;
 }}
 QTabBar::tab {{
-    background: {background.tab_bg};
+    padding: 4px 12px;
+    margin: 0 2px;
+    min-width: {tab_min_width}px;
     border: 1px solid {background.border};
     border-bottom: none;
     border-top-left-radius: {tab_radius}px;
     border-top-right-radius: {tab_radius}px;
-    padding: 10px 22px;
-    margin: 0 6px;
-    min-width: {tab_min_width}px;
+    background: {background.tab_bg};
     color: {background.tab_text};
-    font-weight: 500;
 }}
 QTabBar::tab:selected {{
     background: {background.tab_selected_bg};
     color: {background.tab_selected_text};
-    border-color: {accent_border};
+    border-color: {accent.base};
     font-weight: 600;
 }}
 QTabBar::tab:hover {{
     background: {hover_surface};
 }}
 QTabWidget[compactTabs="true"] QTabBar::tab {{
-    padding: 6px 14px;
-    margin: 0 4px;
     min-width: {compact_tab_min_width}px;
-}}
-QFrame[modernSection="true"] {{
-    background: {background.panel};
-    border: 1px solid {background.border};
-    border-radius: {tab_radius}px;
-    padding: 10px 14px;
-}}
-QFrame[toolbarGroup="true"] {{
-    background: {background.panel};
-    border: 1px solid {background.border};
-    border-radius: {control_radius + 4}px;
-    padding: 6px 8px;
-}}
-QLabel[modernSectionTitle="true"] {{
-    font-size: {max(settings['font_size'] - 0.5, 8.5):.1f}pt;
-    font-weight: 600;
-    color: {background.muted_text};
-    padding-bottom: 4px;
-    qproperty-wordWrap: false;
-    min-width: 0;
-}}
-QLabel[toolbarGroupLabel="true"] {{
-    font-size: {max(settings['font_size'] - 0.4, 8.0):.1f}pt;
-    font-weight: 600;
-    color: {background.muted_text};
-    padding-bottom: 2px;
-    qproperty-wordWrap: false;
-    min-width: 0;
-}}
-QGroupBox {{
-    border: 1px solid {background.border};
-    border-radius: {tab_radius - 2}px;
-    margin-top: 12px;
-    padding: 12px;
-    background: {background.panel};
-}}
-QGroupBox::title {{
-    subcontrol-origin: margin;
-    left: 18px;
-    padding: 0 6px;
-    color: {background.muted_text};
-    font-weight: 600;
-}}
-QTreeWidget, QListWidget, QTextEdit, QPlainTextEdit, QTableView, QLineEdit,
-QSpinBox, QDoubleSpinBox, QComboBox {{
-    background: {background.input_bg};
-    border: 1px solid {background.input_border};
-    border-radius: {control_radius + 2}px;
-    padding: 4px 6px;
-}}
-QTreeWidget::item:selected, QListWidget::item:selected {{
-    background: {_mix(accent.base, background.panel, 0.8)};
-    color: {background.text};
-}}
-QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
-    border-color: {focus_outline};
+    padding: 3px 10px;
 }}
 QPushButton, QToolButton {{
-    background-color: {accent.base};
-    color: {accent.text};
-    border: none;
-    border-radius: {button_radius}px;
     padding: {button_padding_y}px {button_padding_x}px;
-    font-weight: 600;
     min-width: {button_min_width}px;
     min-height: {button_min_height}px;
+    border: 1px solid {background.border};
+    border-radius: {button_radius}px;
+    background: {background.panel};
+    color: {background.text};
 }}
 QPushButton[sizeVariant="compact"], QToolButton[sizeVariant="compact"] {{
     padding: {compact_button_padding_y}px {compact_button_padding_x}px;
@@ -489,121 +413,73 @@ QPushButton[sizeVariant="compact"], QToolButton[sizeVariant="compact"] {{
     min-height: {compact_button_min_height}px;
 }}
 QPushButton:disabled, QToolButton:disabled {{
-    background-color: {accent_disabled};
-    color: {_mix(background.text, background.panel, 0.55)};
+    color: {disabled_text};
 }}
 QPushButton:hover, QToolButton:hover {{
-    background-color: {accent.hover};
+    background: {hover_surface};
 }}
 QPushButton:pressed, QToolButton:pressed {{
-    background-color: {accent.pressed};
+    background: {pressed_surface};
 }}
-QToolButton[headerAction="true"] {{
-    background: transparent;
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTextEdit, QPlainTextEdit, QListWidget, QTreeWidget, QTableView {{
+    background: {background.input_bg};
+    border: 1px solid {background.input_border};
+    border-radius: {max(button_radius, 2)}px;
+    padding: 2px 4px;
+}}
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QTextEdit:focus, QPlainTextEdit:focus {{
+    border-color: {focus_outline};
+}}
+QGroupBox {{
+    border: 1px solid {background.border};
+    border-radius: {max(button_radius, 2)}px;
+    margin-top: 10px;
+    padding: 8px;
+    background: {background.panel};
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    left: 12px;
+    padding: 0 4px;
     color: {background.muted_text};
-    padding: 4px 10px;
-    border-radius: {control_radius + 2}px;
-    font-weight: 500;
-    min-width: 0;
-    min-height: 0;
 }}
-QToolButton[headerAction="true"]:hover {{
-    background: {_mix(accent.base, background.panel, 0.85)};
+QMenuBar {{
+    background: {menubar_bg};
+    padding: 2px 6px;
+}}
+QMenuBar::item {{
+    padding: 4px 10px;
+    border-radius: {max(button_radius, 2)}px;
+}}
+QMenuBar::item:selected {{
+    background: {hover_surface};
+}}
+QMenu {{
+    background: {background.menu};
+    color: {background.menu_text};
+    border: 1px solid {background.menu_border};
+    padding: 4px 0;
+}}
+QMenu::item {{
+    padding: 4px 14px;
+}}
+QMenu::item:selected {{
+    background: {hover_surface};
     color: {accent.base};
 }}
-QDockWidget {{
-    titlebar-close-icon: url();
-    titlebar-normal-icon: url();
-    font-size: {settings['font_size']:.1f}pt;
-}}
-QDockWidget::title {{
-    text-align: center;
-    background: {background.dock_title};
-    border: 1px solid {background.border};
-    border-radius: {tab_radius}px {tab_radius}px 0 0;
-    padding: 6px;
-    color: {background.muted_text};
-    font-weight: 600;
-}}
-QHeaderView::section {{
-    background: {background.header_bg};
-    border: none;
-    padding: 6px 10px;
-    font-weight: 600;
-    color: {background.muted_text};
+QSplitter::handle {{
+    background: {background.splitter};
 }}
 QStatusBar {{
     background: {background.status};
-    border-top: 1px solid {background.border};
+    border-top: 1px solid {subtle_border};
 }}
-QWidget#datasetsPane {{
-    background: {background.panel};
-    border: 1px solid {background.border};
-    border-radius: {tab_radius + 6}px;
-}}
-QWidget#processingContainer {{
-    background: {background.panel};
-    border: 1px solid {background.border};
-    border-radius: {tab_radius + 6}px;
-}}
-QWidget#processingHeader {{
-    border-bottom: 1px solid {background.divider};
-    background: {_mix(background.surface_alt, background.panel, 0.4)};
-    border-top-left-radius: {tab_radius + 6}px;
-    border-top-right-radius: {tab_radius + 6}px;
-}}
-QWidget#processingContent {{
-    border-bottom-left-radius: {tab_radius + 6}px;
-    border-bottom-right-radius: {tab_radius + 6}px;
-}}
-QLabel#processingPlaceholder {{
-    color: {background.muted_text};
-    padding: 16px;
-}}
-QScrollBar:vertical {{
-    width: 12px;
-    background: transparent;
-}}
-QScrollBar::handle:vertical {{
-    background: {background.scrollbar_handle};
-    border-radius: {control_radius}px;
-}}
-QScrollBar::handle:vertical:hover {{
-    background: {_mix(background.scrollbar_handle, accent.base, 0.35)};
-}}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-    height: 0;
-}}
-QScrollBar:horizontal {{
-    height: 12px;
-    background: transparent;
-}}
-QScrollBar::handle:horizontal {{
-    background: {background.scrollbar_handle};
-    border-radius: {control_radius}px;
-}}
-QScrollBar::handle:horizontal:hover {{
-    background: {_mix(background.scrollbar_handle, accent.base, 0.35)};
-}}
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
-    width: 0;
-}}
-QToolTip {{
-    background: {background.panel};
-    color: {background.text};
-    border: 1px solid {background.border};
-    padding: 6px 8px;
-}}
-QCheckBox, QRadioButton {{
-    spacing: 6px;
-    min-width: {label_min_width}px;
-    min-height: {checkbox_min_height}px;
-{checkable_word_wrap_css}}}
 QLabel {{
     min-width: {label_min_width}px;
     min-height: {label_min_height}px;
     qproperty-wordWrap: true;
 }}
+QCheckBox, QRadioButton {{
+{checkable_block}
+}}
 """.strip()
-
-
