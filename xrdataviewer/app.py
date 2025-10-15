@@ -275,7 +275,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_dock.setCollapsed(True)
 
         # Guard against collapsing the main interface into an unreadable layout.
-        self.setMinimumSize(980, 640)
+        self.setMinimumSize(
+            max(self.minimumWidth(), 980), max(self.minimumHeight(), 640)
+        )
         self._apply_initial_geometry()
 
         if self._startup_splash is not None and not self.tab_interactive.has_embedded_jupyter:
