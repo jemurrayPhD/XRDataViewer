@@ -710,8 +710,34 @@ class OverlayLayerWidget(QtWidgets.QGroupBox):
             pass
 
         self.hist_widget = pg.HistogramLUTWidget(**hist_kwargs)
-        self.hist_widget.setMinimumHeight(110)
-        self.hist_widget.setMaximumHeight(160)
+        # Force a horizontal presentation where supported.  PyQtGraph has used
+        # multiple APIs for this over time, so try them all until one succeeds.
+        horizontal = False
+        try:
+            if hasattr(self.hist_widget, "setOrientation"):
+                for candidate in ("horizontal", QtCore.Qt.Horizontal):
+                    try:
+                        self.hist_widget.setOrientation(candidate)  # type: ignore[arg-type]
+                        horizontal = True
+                        break
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        if not horizontal:
+            gradient = getattr(self.hist_widget, "gradient", None)
+            setter = getattr(gradient, "setOrientation", None)
+            if callable(setter):
+                for candidate in ("bottom", "horizontal", QtCore.Qt.Horizontal):
+                    try:
+                        setter(candidate)  # type: ignore[arg-type]
+                        horizontal = True
+                        break
+                    except Exception:
+                        continue
+
+        self.hist_widget.setMinimumHeight(80 if horizontal else 110)
+        self.hist_widget.setMaximumHeight(120 if horizontal else 160)
         self.hist_widget.setSizePolicy(
             QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         )
