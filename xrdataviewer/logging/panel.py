@@ -92,7 +92,8 @@ class LoggingDockWidget(QtWidgets.QDockWidget):
     def _append(self, entry: str):
         self._view.appendPlainText(entry)
         bar = self._view.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        if isinstance(bar, QtWidgets.QAbstractSlider):
+            bar.setValue(bar.maximum())
 
     def _reset(self):
         self._view.clear()
