@@ -332,8 +332,11 @@ def register_scientific_colormaps() -> Sequence[str]:
         colors /= 255.0
         try:
             color_map = pg.colormap.ColorMap(positions, colors, mapping="rgb")
-        except TypeError:  # pragma: no cover - compatibility fallback
-            color_map = pg.colormap.ColorMap(positions, colors, mode="rgb")
+        except (TypeError, KeyError):  # pragma: no cover - compatibility fallback
+            try:
+                color_map = pg.colormap.ColorMap(positions, colors, mode="rgb")
+            except (TypeError, KeyError):  # pragma: no cover - legacy fallback
+                color_map = pg.colormap.ColorMap(positions, colors)
         register = getattr(pg.colormap, "register", None)
         if callable(register):  # pragma: no branch - very small helper
             register(cmap.name, color_map)
