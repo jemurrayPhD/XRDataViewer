@@ -456,11 +456,11 @@ def _normalize_lut(lut: object) -> Optional[np.ndarray]:
     if max_val <= 1.0:
         arr = arr * 255.0
     arr = np.nan_to_num(arr, nan=0.0, posinf=255.0, neginf=0.0)
-    arr = np.clip(np.round(arr), 0.0, 255.0).astype(np.uint8)
+    arr = np.clip(np.round(arr), 0.0, 255.0)
     if arr.shape[1] == 3:
-        alpha = np.full((arr.shape[0], 1), 255, dtype=np.uint8)
+        alpha = np.full((arr.shape[0], 1), 255.0)
         arr = np.hstack([arr, alpha])
-    return arr
+    return arr.astype(np.float32, copy=True)
 
 
 def colormap_gradient_state(cmap: "pg.ColorMap", *, name: Optional[str] = None) -> Optional[dict]:
@@ -720,4 +720,79 @@ def resolve_colormap_assets(
     if lut is None and state:
         lut = _lut_from_state(state, size)
     return cmap, state, lut
+
+
+def apply_histogram_gradient(
+    histogram: object, cmap: Optional["pg.ColorMap"], state: Optional[dict]
+) -> bool:
+    """Apply *state*/*cmap* to a :class:`~pyqtgraph.HistogramLUTItem`."""
+
+    applied = False
+    gradient = getattr(histogram, "gradient", None)
+    if gradient is not None and state:
+        try:
+            gradient.restoreState(state)
+            applied = True
+        except Exception:
+            pass
+    setter = getattr(getattr(histogram, "gradient", None), "setColorMap", None)
+    if callable(setter) and cmap is not None:
+        try:
+            setter(cmap)
+            applied = True
+        except Exception:
+            pass
+    rehide = getattr(histogram, "rehide_stops", None)
+    if callable(rehide):
+        try:
+            rehide()
+        except Exception:
+            pass
+    return applied
+
+
+def apply_image_colormap(
+    image_item: object,
+    cmap: Optional["pg.ColorMap"],
+    *,
+    name: Optional[str] = None,
+    lookup_table: Optional[np.ndarray] = None,
+) -> bool:
+    """Attach *lookup_table* (or derive one) to ``image_item`` and refresh."""
+
+    if image_item is None:
+        return False
+    applied = False
+    lut = lookup_table
+    if lut is None and cmap is not None:
+        lut = colormap_lookup_table(cmap, name=name)
+    if lut is not None:
+        array = np.array(lut, dtype=np.float32, copy=False)
+        if array.ndim == 1:
+            array = array.reshape(-1, 1)
+        table = array
+        try:
+            if np.nanmax(table) > 1.0:
+                table = table / 255.0
+        except Exception:
+            table = array
+        try:
+            image_item.setLookupTable(table, update=True)
+            applied = True
+            refresher = getattr(image_item, "updateImage", None)
+            if callable(refresher):
+                try:
+                    refresher()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    setter = getattr(image_item, "setColorMap", None)
+    if callable(setter) and cmap is not None:
+        try:
+            setter(cmap)
+            applied = True
+        except Exception:
+            pass
+    return applied
 

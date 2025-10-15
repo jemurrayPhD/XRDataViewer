@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -19,6 +20,7 @@ from xr_plot_widget import (
 
 from ..annotations import LineStyleDialog, PlotAnnotationDialog
 from ..colormaps import (
+    apply_image_colormap,
     available_colormap_names,
     colormap_lookup_table,
     is_scientific_colormap,
@@ -107,6 +109,9 @@ class OverlayLayer(QtCore.QObject):
         self._levels: Tuple[float, float]
         self._line_style = clone_line_style(line_style)
         self._line_x = np.array([], dtype=float)
+        self._colormap_object: Optional["pg.ColorMap"] = None
+        self._colormap_state: Optional[dict] = None
+        self._colormap_lut: Optional[np.ndarray] = None
 
         if self.is_line_layer():
             self.base_data = np.asarray(data, float).reshape(-1)
@@ -321,9 +326,32 @@ class OverlayLayer(QtCore.QObject):
                 self.graphics_item.setImage(self.processed_data, autoLevels=False)
             except Exception:
                 pass
+            self._reapply_colormap()
             self.auto_levels()
 
     # ---------- layer controls ----------
+    def _reapply_colormap(self):
+        if not self.supports_colormap():
+            return
+        if (
+            self._colormap_object is None
+            and self._colormap_state is None
+            and self._colormap_lut is None
+        ):
+            return
+        state = copy.deepcopy(self._colormap_state) if self._colormap_state is not None else None
+        lut = (
+            np.array(self._colormap_lut, copy=True)
+            if self._colormap_lut is not None
+            else None
+        )
+        apply_image_colormap(
+            self.graphics_item,
+            self._colormap_object,
+            name=self.colormap_name,
+            lookup_table=lut,
+        )
+
     def set_visible(self, on: bool):
         """Toggle whether the layer's graphics item is shown."""
 
@@ -358,26 +386,32 @@ class OverlayLayer(QtCore.QObject):
         cmap, state, lut = resolve_colormap_assets(self.colormap_name)
         if cmap is None and state is None and lut is None:
             return
-        lut = lut or colormap_lookup_table(cmap, name=self.colormap_name)
+        applied = apply_image_colormap(
+            self.graphics_item,
+            cmap,
+            name=self.colormap_name,
+            lookup_table=lut,
+        )
+        if not applied and cmap is not None and lut is None:
+            fallback = colormap_lookup_table(cmap, name=self.colormap_name)
+            apply_image_colormap(
+                self.graphics_item,
+                cmap,
+                name=self.colormap_name,
+                lookup_table=fallback,
+            )
+            if fallback is not None:
+                lut = fallback
+        self._colormap_object = cmap
+        self._colormap_state = copy.deepcopy(state) if state is not None else None
         if lut is not None:
             try:
-                self.graphics_item.setLookupTable(lut, update=True)
+                self._colormap_lut = np.array(lut, copy=True)
             except Exception:
-                pass
-        setter = getattr(self.graphics_item, "setColorMap", None)
-        if callable(setter):
-            try:
-                setter(cmap)
-            except Exception:
-                pass
-        if state:
-            gradient = getattr(self.graphics_item, "lut", None)
-            gradient_widget = getattr(gradient, "gradient", None)
-            try:
-                if gradient_widget is not None:
-                    gradient_widget.restoreState(state)
-            except Exception:
-                pass
+                self._colormap_lut = None
+        else:
+            current = getattr(self.graphics_item, "lookupTable", None)
+            self._colormap_lut = np.array(current, copy=True) if isinstance(current, np.ndarray) else None
 
     def set_levels(self, lo: float, hi: float, *, update_widget: bool = True):
         """Apply manual intensity levels to the image layer."""

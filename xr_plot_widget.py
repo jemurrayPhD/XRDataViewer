@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import copy
 import html
 import re
 from dataclasses import dataclass, field
@@ -11,6 +12,8 @@ from PySide2 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 
 from xrdataviewer.colormaps import (
+    apply_histogram_gradient,
+    apply_image_colormap,
     colormap_gradient_state,
     colormap_lookup_table,
     resolve_colormap_assets,
@@ -644,6 +647,11 @@ class CentralPlotWidget(QtWidgets.QWidget):
         self._histogram_menu_setter = None
         self._histogram_menu_enabled_getter = None
 
+        self._colormap_object: Optional["pg.ColorMap"] = None
+        self._colormap_state: Optional[dict] = None
+        self._colormap_lut: Optional[np.ndarray] = None
+        self._colormap_name: str = "viridis"
+
         lay = QtWidgets.QHBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.addWidget(self.glw)
         try:
             self.apply_colormap_name("viridis")
@@ -707,6 +715,73 @@ class CentralPlotWidget(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def _apply_colormap_assets(
+        self,
+        cmap: Optional["pg.ColorMap"],
+        *,
+        name: Optional[str] = None,
+        gradient_state: Optional[dict] = None,
+        lookup_table: Optional[np.ndarray] = None,
+        remember: bool = False,
+    ) -> bool:
+        state = gradient_state if gradient_state is not None else None
+        if state is None and cmap is not None:
+            state = colormap_gradient_state(cmap, name=name)
+        lut = lookup_table if lookup_table is not None else None
+        if lut is None and cmap is not None:
+            lut = colormap_lookup_table(cmap, name=name)
+
+        histogram_applied = False
+        if getattr(self, "lut", None) is not None:
+            histogram_applied = apply_histogram_gradient(self.lut, cmap, state)
+
+        image_applied = apply_image_colormap(
+            self.img_item,
+            cmap,
+            name=name,
+            lookup_table=lut,
+        )
+
+        applied = histogram_applied or image_applied
+
+        if applied and remember:
+            self._colormap_object = cmap
+            self._colormap_state = copy.deepcopy(state) if state is not None else None
+            if lut is not None:
+                try:
+                    self._colormap_lut = np.array(lut, copy=True)
+                except Exception:
+                    self._colormap_lut = None
+            else:
+                self._colormap_lut = None
+            if name:
+                self._colormap_name = str(name)
+        elif remember and name:
+            self._colormap_name = str(name)
+
+        return applied
+
+    def _reapply_cached_colormap(self) -> None:
+        if (
+            self._colormap_object is None
+            and self._colormap_state is None
+            and self._colormap_lut is None
+        ):
+            return
+        state = copy.deepcopy(self._colormap_state) if self._colormap_state is not None else None
+        lut = (
+            np.array(self._colormap_lut, copy=True)
+            if self._colormap_lut is not None
+            else None
+        )
+        self._apply_colormap_assets(
+            self._colormap_object,
+            name=self._colormap_name,
+            gradient_state=state,
+            lookup_table=lut,
+            remember=False,
+        )
+
     def apply_colormap(
         self,
         cmap: Optional["pg.ColorMap"],
@@ -717,43 +792,13 @@ class CentralPlotWidget(QtWidgets.QWidget):
     ) -> bool:
         """Apply *cmap* (or explicit gradient/LUT) to the viewer widgets."""
 
-        applied = False
-        state = gradient_state if gradient_state is not None else None
-        if state is None:
-            state = colormap_gradient_state(cmap, name=name)
-        if state:
-            try:
-                self.lut.gradient.restoreState(state)
-                applied = True
-            except Exception:
-                pass
-        if not applied:
-            try:
-                self.lut.gradient.setColorMap(cmap)
-                applied = True
-            except Exception:
-                pass
-        try:
-            self.lut.rehide_stops()
-        except Exception:
-            pass
-        lut = lookup_table if lookup_table is not None else None
-        if lut is None:
-            lut = colormap_lookup_table(cmap, name=name)
-        if lut is not None:
-            try:
-                self.img_item.setLookupTable(lut, update=True)
-                applied = True
-            except Exception:
-                pass
-        setter = getattr(self.img_item, "setColorMap", None)
-        if callable(setter):
-            try:
-                setter(cmap)
-                applied = True
-            except Exception:
-                pass
-        return applied
+        return self._apply_colormap_assets(
+            cmap,
+            name=name,
+            gradient_state=gradient_state,
+            lookup_table=lookup_table,
+            remember=True,
+        )
 
     def apply_colormap_name(self, name: str) -> bool:
         """Resolve and apply a colour map by *name*."""
@@ -1084,6 +1129,7 @@ class CentralPlotWidget(QtWidgets.QWidget):
             self.lut.setVisible(True)
         except Exception:
             pass
+        self._reapply_cached_colormap()
         if autorange:
             try:
                 self.plot.enableAutoRange(x=True, y=True)
