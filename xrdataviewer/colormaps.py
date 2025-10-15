@@ -23,6 +23,78 @@ except ModuleNotFoundError:  # pragma: no cover
     pg = None  # type: ignore[assignment]
 
 
+def _patch_colormap_menu() -> None:
+    """Ensure ``ColorMapMenu`` can build nested menus on all Qt bindings.
+
+    Older PySide2 releases sometimes return a ``QWidget`` (or ``QAction``)
+    from :func:`QMenu.addMenu` when invoked with a string title.  PyQtGraph's
+    colour map helper expects a real :class:`QMenu`, so the mismatch bubbles up
+    as an ``AttributeError`` during HistogramLUT initialisation.  To keep the
+    bundled scientific maps compatible with those environments we temporarily
+    wrap :func:`QMenu.addMenu` while the menu is being constructed and coerce
+    the return value back to a menu when necessary.
+    """
+
+    if pg is None:  # pragma: no cover - nothing to patch without pyqtgraph
+        return
+
+    try:  # pragma: no cover - depends on optional runtime components
+        from pyqtgraph.widgets import ColorMapMenu
+        from pyqtgraph.Qt import QtWidgets
+    except Exception:
+        return
+
+    patched_flag = "_xr_colormap_menu_patched"
+    if getattr(ColorMapMenu.ColorMapMenu, patched_flag, False):
+        return
+
+    original_init = ColorMapMenu.ColorMapMenu.__init__
+
+    def patched_init(self, *args, **kwargs):
+        original_add_menu = QtWidgets.QMenu.addMenu
+
+        def safe_add_menu(menu_self, *inner_args, **inner_kwargs):
+            result = original_add_menu(menu_self, *inner_args, **inner_kwargs)
+            if isinstance(result, QtWidgets.QMenu):
+                return result
+
+            # PySide2 may yield a QAction/QWidgetAction instead of the submenu.
+            action = None
+            if isinstance(result, QtWidgets.QAction):
+                action = result
+            else:
+                widget_action_type = getattr(QtWidgets, "QWidgetAction", None)
+                if widget_action_type is not None and isinstance(result, widget_action_type):
+                    action = result
+            if action is not None:
+                try:
+                    sub_menu = action.menu()
+                except Exception:
+                    sub_menu = None
+                if isinstance(sub_menu, QtWidgets.QMenu):
+                    return sub_menu
+
+            # Some bindings even hand back a QWidget; fall back to a manual menu.
+            if inner_args and isinstance(inner_args[0], str):
+                try:
+                    new_menu = QtWidgets.QMenu(inner_args[0], menu_self)
+                except Exception:
+                    return result
+                original_add_menu(menu_self, new_menu)
+                return new_menu
+
+            return result
+
+        QtWidgets.QMenu.addMenu = safe_add_menu
+        try:
+            original_init(self, *args, **kwargs)
+        finally:
+            QtWidgets.QMenu.addMenu = original_add_menu
+
+    ColorMapMenu.ColorMapMenu.__init__ = patched_init  # type: ignore[assignment]
+    setattr(ColorMapMenu.ColorMapMenu, patched_flag, True)
+
+
 @dataclass(frozen=True)
 class _ScientificMap:
     name: str
@@ -301,6 +373,8 @@ def register_scientific_colormaps() -> Sequence[str]:
 
     if pg is None:
         return ()
+
+    _patch_colormap_menu()
 
     if _REGISTERED:
         return tuple(m.name for m in _SCIENTIFIC_COLOURMAPS)
