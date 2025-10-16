@@ -1,9 +1,21 @@
+"""Processing tools for XRDataViewer.
+
+This module contains the dialogs and helper classes that allow end-users to
+build, preview, and persist data processing pipelines.  It also centralises the
+logic for rendering previews, so the UI components can focus on presentation.
+
+The module historically grew organically which lead to duplicated widget
+initialisation code and implicit behaviour.  The refactor performed here
+deduplicates the parameter form handling logic and documents the intent of the
+key building blocks to make future maintenance predictable.
+"""
+
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, cast
 
 import json
 
@@ -35,13 +47,42 @@ from .utils import _nan_aware_reducer
 from .utils import open_dataset
 
 
+@dataclass(frozen=True)
+class _WidgetBinding:
+    """Container tying a widget to its value accessors."""
+
+    widget: QtWidgets.QWidget
+    reader: Callable[[QtWidgets.QWidget], object]
+    writer: Callable[[QtWidgets.QWidget, object], None]
+
+
+def _connect_signal(signal: Any, callback: Callable[[], None]):
+    """Connect *signal* to *callback* while tolerating signature mismatches."""
+
+    try:
+        signal.connect(lambda *_args, **_kwargs: callback())
+    except Exception:
+        # Some custom widgets expose read-only signals.  Failing silently keeps
+        # the default value intact without breaking the form.
+        pass
+
+
 class ParameterForm(QtWidgets.QWidget):
+    """Widget that exposes processing parameter definitions as form controls.
+
+    The form is responsible for building the appropriate Qt widget for each
+    :class:`~data_processing.ParameterDefinition` and providing a uniform API to
+    read or write their values.  Historically the widget construction logic was
+    duplicated across the class; the refactor uses :class:`_WidgetBinding`
+    instances to centralise the behaviour and make the intent explicit.
+    """
+
     parametersChanged = QtCore.Signal()
 
     def __init__(self, parameters: Iterable[ParameterDefinition], parent=None):
         super().__init__(parent)
         self._definitions = list(parameters)
-        self._widgets: Dict[str, QtWidgets.QWidget] = {}
+        self._bindings: Dict[str, _WidgetBinding] = {}
 
         layout = QtWidgets.QFormLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -54,84 +95,133 @@ class ParameterForm(QtWidgets.QWidget):
             return
 
         for definition in self._definitions:
-            widget: Optional[QtWidgets.QWidget] = None
-            if definition.kind == "float":
-                spin = QtWidgets.QDoubleSpinBox()
-                spin.setDecimals(6)
-                lo = float(definition.minimum) if definition.minimum is not None else -1e9
-                hi = float(definition.maximum) if definition.maximum is not None else 1e9
-                spin.setRange(lo, hi)
-                if definition.step is not None:
-                    spin.setSingleStep(float(definition.step))
-                spin.setValue(float(definition.default))
-                spin.valueChanged.connect(lambda *_: self.parametersChanged.emit())
-                widget = spin
-            elif definition.kind == "int":
-                spin_i = QtWidgets.QSpinBox()
-                lo = int(definition.minimum) if definition.minimum is not None else -1_000_000
-                hi = int(definition.maximum) if definition.maximum is not None else 1_000_000
-                spin_i.setRange(lo, hi)
-                if definition.step is not None:
-                    spin_i.setSingleStep(int(definition.step))
-                spin_i.setValue(int(definition.default))
-                spin_i.valueChanged.connect(lambda *_: self.parametersChanged.emit())
-                widget = spin_i
-            elif definition.kind == "enum":
-                combo = QtWidgets.QComboBox()
-                if definition.choices:
-                    for label, value in definition.choices:
-                        combo.addItem(label, value)
-                combo.setCurrentIndex(max(combo.findData(definition.default), 0))
-                combo.currentIndexChanged.connect(lambda *_: self.parametersChanged.emit())
-                widget = combo
-            else:
-                line = QtWidgets.QLineEdit(str(definition.default))
-                line.textChanged.connect(lambda *_: self.parametersChanged.emit())
-                widget = line
-
-            self._widgets[definition.name] = widget
-            layout.addRow(definition.label, widget)
+            binding = self._create_binding(definition)
+            self._bindings[definition.name] = binding
+            layout.addRow(definition.label, binding.widget)
 
     def values(self) -> Dict[str, object]:
+        """Return the current parameter values keyed by definition name."""
+
         values: Dict[str, object] = {}
         for definition in self._definitions:
-            widget = self._widgets.get(definition.name)
-            if widget is None:
+            binding = self._bindings.get(definition.name)
+            if binding is None:
                 continue
-            if isinstance(widget, QtWidgets.QDoubleSpinBox):
-                values[definition.name] = float(widget.value())
-            elif isinstance(widget, QtWidgets.QSpinBox):
-                values[definition.name] = int(widget.value())
-            elif isinstance(widget, QtWidgets.QComboBox):
-                data = widget.currentData()
-                values[definition.name] = data if data is not None else widget.currentText()
-            elif isinstance(widget, QtWidgets.QLineEdit):
-                values[definition.name] = widget.text()
+            values[definition.name] = binding.reader(binding.widget)
         return values
 
     def set_values(self, params: Dict[str, object]):
+        """Apply *params* to the form without emitting change signals."""
+
         for definition in self._definitions:
-            widget = self._widgets.get(definition.name)
-            if widget is None:
+            binding = self._bindings.get(definition.name)
+            if binding is None:
                 continue
             value = params.get(definition.name, definition.default)
+            widget = binding.widget
             block = widget.blockSignals(True)
             try:
-                if isinstance(widget, QtWidgets.QDoubleSpinBox):
-                    widget.setValue(float(value))
-                elif isinstance(widget, QtWidgets.QSpinBox):
-                    widget.setValue(int(value))
-                elif isinstance(widget, QtWidgets.QComboBox):
-                    idx = widget.findData(value)
-                    if idx < 0:
-                        idx = widget.findText(str(value))
-                    widget.setCurrentIndex(max(idx, 0))
-                elif isinstance(widget, QtWidgets.QLineEdit):
-                    widget.setText(str(value))
+                binding.writer(widget, value)
             finally:
                 widget.blockSignals(block)
 
+    # ----- private helpers -------------------------------------------------
+
+    def _create_binding(self, definition: ParameterDefinition) -> _WidgetBinding:
+        """Create a :class:`_WidgetBinding` for *definition*."""
+
+        kind = (definition.kind or "").lower()
+        if kind == "float":
+            return self._build_double_spinbox(definition)
+        if kind == "int":
+            return self._build_int_spinbox(definition)
+        if kind == "enum":
+            return self._build_enum_combobox(definition)
+        return self._build_line_edit(definition)
+
+    def _build_double_spinbox(self, definition: ParameterDefinition) -> _WidgetBinding:
+        """Return a binding configured for floating-point parameters."""
+
+        spin = QtWidgets.QDoubleSpinBox()
+        spin.setDecimals(6)
+        lo = float(definition.minimum) if definition.minimum is not None else -1e9
+        hi = float(definition.maximum) if definition.maximum is not None else 1e9
+        spin.setRange(lo, hi)
+        if definition.step is not None:
+            spin.setSingleStep(float(definition.step))
+        spin.setValue(float(definition.default))
+        _connect_signal(spin.valueChanged, self.parametersChanged.emit)
+        return _WidgetBinding(
+            widget=spin,
+            reader=lambda w: float(cast(QtWidgets.QDoubleSpinBox, w).value()),
+            writer=lambda w, value: cast(QtWidgets.QDoubleSpinBox, w).setValue(float(value)),
+        )
+
+    def _build_int_spinbox(self, definition: ParameterDefinition) -> _WidgetBinding:
+        """Return a binding configured for integer parameters."""
+
+        spin = QtWidgets.QSpinBox()
+        lo = int(definition.minimum) if definition.minimum is not None else -1_000_000
+        hi = int(definition.maximum) if definition.maximum is not None else 1_000_000
+        spin.setRange(lo, hi)
+        if definition.step is not None:
+            spin.setSingleStep(int(definition.step))
+        spin.setValue(int(definition.default))
+        _connect_signal(spin.valueChanged, self.parametersChanged.emit)
+        return _WidgetBinding(
+            widget=spin,
+            reader=lambda w: int(cast(QtWidgets.QSpinBox, w).value()),
+            writer=lambda w, value: cast(QtWidgets.QSpinBox, w).setValue(int(value)),
+        )
+
+    def _build_enum_combobox(self, definition: ParameterDefinition) -> _WidgetBinding:
+        """Return a binding configured for enumerated options."""
+
+        combo = QtWidgets.QComboBox()
+        if definition.choices:
+            for label, value in definition.choices:
+                combo.addItem(label, value)
+        combo.setCurrentIndex(max(combo.findData(definition.default), 0))
+        _connect_signal(combo.currentIndexChanged, self.parametersChanged.emit)
+        return _WidgetBinding(
+            widget=combo,
+            reader=self._read_combobox,
+            writer=lambda w, value: self._write_combobox(
+                cast(QtWidgets.QComboBox, w), value
+            ),
+        )
+
+    def _build_line_edit(self, definition: ParameterDefinition) -> _WidgetBinding:
+        """Return a binding configured for free-form text values."""
+
+        line = QtWidgets.QLineEdit(str(definition.default))
+        _connect_signal(line.textChanged, self.parametersChanged.emit)
+        return _WidgetBinding(
+            widget=line,
+            reader=lambda w: cast(QtWidgets.QLineEdit, w).text(),
+            writer=lambda w, value: cast(QtWidgets.QLineEdit, w).setText(str(value)),
+        )
+
+    @staticmethod
+    def _read_combobox(widget: QtWidgets.QWidget) -> object:
+        """Return the active value of *widget* taking custom data into account."""
+
+        combo = cast(QtWidgets.QComboBox, widget)
+        data = combo.currentData()
+        return data if data is not None else combo.currentText()
+
+    @staticmethod
+    def _write_combobox(widget: QtWidgets.QComboBox, value: object) -> None:
+        """Update *widget* to select *value* by data first, then text."""
+
+        idx = widget.findData(value)
+        if idx < 0:
+            idx = widget.findText(str(value))
+        widget.setCurrentIndex(max(idx, 0))
+
 class ProcessingManager(QtCore.QObject):
+    """In-memory registry for named :class:`ProcessingPipeline` objects."""
+
     pipelines_changed = QtCore.Signal()
 
     def __init__(self):
@@ -139,17 +229,25 @@ class ProcessingManager(QtCore.QObject):
         self._pipelines: Dict[str, ProcessingPipeline] = {}
 
     def list_pipelines(self) -> List[ProcessingPipeline]:
+        """Return all known pipelines as defensive copies."""
+
         return [self._clone_pipeline(p) for p in self._pipelines.values()]
 
     def pipeline_names(self) -> List[str]:
+        """Return the pipeline names sorted alphabetically."""
+
         return sorted(self._pipelines.keys())
 
     def get_pipeline(self, name: str) -> Optional[ProcessingPipeline]:
+        """Return a copy of the pipeline identified by *name* if present."""
+
         if name not in self._pipelines:
             return None
         return self._clone_pipeline(self._pipelines[name])
 
     def save_pipeline(self, pipeline: ProcessingPipeline):
+        """Persist *pipeline* (overwriting any existing entry with the same name)."""
+
         name = pipeline.name.strip()
         if not name:
             raise ValueError("Pipeline name cannot be empty")
@@ -157,11 +255,15 @@ class ProcessingManager(QtCore.QObject):
         self.pipelines_changed.emit()
 
     def delete_pipeline(self, name: str):
+        """Remove the pipeline identified by *name* if it exists."""
+
         if name in self._pipelines:
             del self._pipelines[name]
             self.pipelines_changed.emit()
 
     def _clone_pipeline(self, pipeline: ProcessingPipeline) -> ProcessingPipeline:
+        """Create a deep-ish copy of *pipeline* suitable for external use."""
+
         return ProcessingPipeline(
             name=pipeline.name,
             steps=[ProcessingStep(step.key, dict(step.params)) for step in pipeline.steps],

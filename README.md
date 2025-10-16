@@ -45,4 +45,4 @@ XRDataViewer is a PySide2/pyqtgraph desktop application for exploring and proces
 - **Animation capture** – export sequential view sweeps to video when OpenCV is available, using the configured frame range and playback speed.
 - **Processed datasets** – persist the results of processing pipelines by exporting modified xarray DataArrays or saving pipeline definitions for repeatable analysis sessions.
 
-Refer to the HTML documentation in `docs/` for a deeper architectural overview and feature guide.
+Refer to the HTML documentation in `docs/` for a deeper architectural overview and feature guide.  The newly added Markdown notes – [`docs/features.md`](docs/features.md) for end users and [`docs/development.md`](docs/development.md) for contributors – provide concise summaries that are easy to browse directly on GitHub.
